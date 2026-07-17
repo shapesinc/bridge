@@ -18,11 +18,14 @@ const http = require("node:http");
 const os = require("node:os");
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { exec, spawn } = require("node:child_process");
 const { URL } = require("node:url");
 
 const MAX_OUTPUT = 20000;
 const MAX_FILE_READ = 100000;
+const MAX_COMMAND_BUFFER = 4 * 1024 * 1024;
+const MAX_DIRECTORY_ENTRIES = 2000;
 
 const CAPABILITIES = {
   run: "run a shell command",
@@ -86,7 +89,7 @@ function runCommand({ cmd, cwd, timeout }) {
       {
         cwd: cwd || undefined,
         timeout: seconds * 1000,
-        maxBuffer: 64 * 1024 * 1024,
+        maxBuffer: MAX_COMMAND_BUFFER,
         windowsHide: true,
       },
       (err, stdout, stderr) => {
@@ -159,7 +162,10 @@ function sysinfo() {
 function startServer({ port, token }) {
   const authed = (req) => {
     const provided = req.headers["x-token"];
-    return Boolean(token) && provided === token;
+    if (!token || typeof provided !== "string") return false;
+    const expected = Buffer.from(token);
+    const actual = Buffer.from(provided);
+    return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
   };
 
   const server = http.createServer(async (req, res) => {
@@ -215,14 +221,28 @@ function startServer({ port, token }) {
         const p = expand(url.searchParams.get("path"));
         if (!p) return sendJson(res, 400, { error: "'path' is required" });
         log(`READ: ${p}`);
-        const content = fs.readFileSync(p, "utf8").slice(0, MAX_FILE_READ);
-        return sendJson(res, 200, { path: p, content });
+        const stat = fs.statSync(p);
+        if (!stat.isFile()) return sendJson(res, 400, { error: "path is not a file" });
+        const size = Math.min(stat.size, MAX_FILE_READ);
+        const buffer = Buffer.alloc(size);
+        const fd = fs.openSync(p, "r");
+        try {
+          fs.readSync(fd, buffer, 0, size, 0);
+        } finally {
+          fs.closeSync(fd);
+        }
+        return sendJson(res, 200, {
+          path: p,
+          content: buffer.toString("utf8"),
+          truncated: stat.size > MAX_FILE_READ,
+        });
       }
 
       if (route === "/ls" && method === "GET") {
         const p = expand(url.searchParams.get("path") || ".");
         log(`LS: ${p}`);
-        const entries = fs.readdirSync(p).sort().map((name) => {
+        const allNames = fs.readdirSync(p).sort();
+        const entries = allNames.slice(0, MAX_DIRECTORY_ENTRIES).map((name) => {
           const full = path.join(p, name);
           let isDir = false;
           let size = null;
@@ -235,7 +255,11 @@ function startServer({ port, token }) {
           }
           return { name, dir: isDir, size };
         });
-        return sendJson(res, 200, { path: p, entries });
+        return sendJson(res, 200, {
+          path: p,
+          entries,
+          truncated: allNames.length > MAX_DIRECTORY_ENTRIES,
+        });
       }
 
       if (route === "/open" && method === "POST") {

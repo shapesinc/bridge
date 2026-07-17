@@ -56,6 +56,18 @@ These map 1:1 to the `SHAPES_BRIDGE` tool in the Shapes app.
 | `sysinfo` | harmless machine stats (os, cpu, mem, disk)     | `GET /sysinfo`   |
 | `health`  | check the bridge is alive (no token needed)     | `GET /health`    |
 
+### Give your Shape a repository
+
+Once connected, paste a GitHub repository URL and ask the Shape to run,
+connect, or build it on this machine. The Shape uses the bridge—not its remote
+sandbox—to clone the repo, then reads root `SHAPE.md`, `AGENTS.md`, `llms.txt`,
+or `README.md` before acting.
+
+For private repos, authenticate GitHub locally with `gh auth login`. Never
+paste GitHub credentials into chat. [`shapesinc/form`](https://github.com/shapesinc/form)
+ships a complete `SHAPE.md` contract for connecting to and co-building a
+physical robot this way.
+
 ## Troubleshooting
 
 - **Shape says it can't connect?** The terminal probably got closed. Run the
