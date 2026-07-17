@@ -83,11 +83,30 @@ function readBody(req) {
 
 function runCommand({ cmd, cwd, timeout }) {
   const seconds = Math.max(1, Math.min(Number(timeout) || 60, 600));
+  // Expand a leading ~ so home-relative working dirs work, and fail loudly with
+  // a clear message when the dir is missing — otherwise a bad cwd makes exec
+  // fail at spawn time and return a bare, confusing exit_code -1 with no output.
+  const workdir = cwd ? expand(cwd) : undefined;
+  if (workdir !== undefined) {
+    let ok = false;
+    try {
+      ok = fs.statSync(workdir).isDirectory();
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      return Promise.resolve({
+        exit_code: -1,
+        stdout: "",
+        stderr: `cwd does not exist or is not a directory: ${workdir}`,
+      });
+    }
+  }
   return new Promise((resolve) => {
     exec(
       cmd,
       {
-        cwd: cwd || undefined,
+        cwd: workdir,
         timeout: seconds * 1000,
         maxBuffer: MAX_COMMAND_BUFFER,
         windowsHide: true,
@@ -96,7 +115,13 @@ function runCommand({ cmd, cwd, timeout }) {
         let exitCode = 0;
         let errText = stderr || "";
         if (err) {
-          if (err.killed) errText += `\ntimed out after ${seconds}s`;
+          if (err.killed) {
+            errText += `\ntimed out after ${seconds}s`;
+          } else if (typeof err.code !== "number") {
+            // Spawn-level failure (bad cwd, shell missing, etc.) — surface the
+            // reason instead of an empty -1.
+            errText += (errText ? "\n" : "") + (err.message || String(err));
+          }
           exitCode = typeof err.code === "number" ? err.code : -1;
         }
         resolve({
