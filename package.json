@@ -5,6 +5,9 @@
   "bin": {
     "shapes-bridge": "bin/cli.js"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "type": "commonjs",
   "files": [
     "bin",
