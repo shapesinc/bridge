@@ -1,0 +1,35 @@
+{
+  "name": "@shapesinc/bridge",
+  "version": "0.1.0",
+  "description": "Give your Shape hands on your own computer — a tiny, token-locked bridge you run and control.",
+  "bin": {
+    "shapes-bridge": "bin/cli.js"
+  },
+  "type": "commonjs",
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shapesinc/bridge.git"
+  },
+  "homepage": "https://github.com/shapesinc/bridge#readme",
+  "bugs": {
+    "url": "https://github.com/shapesinc/bridge/issues"
+  },
+  "keywords": [
+    "shapes",
+    "bridge",
+    "ai",
+    "agent",
+    "cli",
+    "remote-control"
+  ]
+}
