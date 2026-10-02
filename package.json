@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "description": "Give your Shape hands on your own computer — a tiny, token-locked bridge you run and control.",
   "bin": {
-    "shapes-bridge": "bin/cli.js"
+    "shapes-bridge": "bin/cli.js",
+    "shapes-codex": "bin/codex.js"
   },
   "scripts": {
     "test": "node --test"

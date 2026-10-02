@@ -6,7 +6,7 @@
 //   npx github:shapesinc/bridge
 //
 // Starts a token-locked local server, opens a temporary public tunnel, and
-// prints ONE line to paste into your chat. Every action your Shape runs prints
+// prints connection details for the private Connect Computer dialog. Every action prints
 // live in this terminal. Ctrl+C shuts the door instantly.
 
 const crypto = require("node:crypto");
@@ -37,12 +37,12 @@ function banner(url, token) {
     [
       "",
       bar,
-      "  Computer bridge LIVE. Paste this ONE line into your chat:",
+      "  Computer bridge LIVE. Open Connect Computer in Shapes:",
       "",
       `   ${line}`,
       "",
-      "  Treat it like a password — it lets that chat act on this computer",
-      "  until you close this terminal. Every action prints below, live.",
+      "  Enter this URL and token only in the private connection dialog.",
+      "  Never paste the token into a chat message. Treat it as a password.",
       "  Ctrl+C = shut the door (URL + token die instantly).",
       bar,
       "",
