@@ -56,6 +56,9 @@ These map 1:1 to the `SHAPES_BRIDGE` tool in the Shapes app.
 | `open`    | open a file / app / url with the OS default     | `POST /open`     |
 | `sysinfo` | harmless machine stats (os, cpu, mem, disk)     | `GET /sysinfo`   |
 | `health`  | check the bridge is alive (no token needed)     | `GET /health`    |
+| `codex_start` | start a task in local Codex                 | `POST /codex/start` |
+| `codex_status` | wait for a job and read its result         | `GET /codex/status?job_id=…` |
+| `codex_cancel` | request that a job stops                  | `POST /codex/cancel` |
 
 ## Troubleshooting
 
@@ -82,9 +85,26 @@ Codex sign-in and settings. On macOS it prefers the CLI bundled with ChatGPT
 or Codex over an older executable on your PATH. `SHAPES_CODEX_BINARY` can
 select an explicit executable. No credentials are copied to Shapes.
 
-Use the connected computer's `SHAPES_BRIDGE` `write` action to create a prompt
-file, then its `run` action to start the job. Each command returns promptly so
-long Codex turns do not depend on the bridge request timeout:
+Ask your Shape to do the task in Codex on your computer. Shapes uses the
+bridge's native `codex_start`, `codex_status`, and `codex_cancel` actions; you
+do not need to supply launcher paths or shell commands. If the computer is not
+connected, the Shape's **Connect your computer** link opens the private setup
+dialog. **Connect and continue** resumes the request after connection succeeds.
+An older running bridge needs to be restarted with the current package to add
+the Codex endpoints.
+
+For integrations, `POST /codex/start` accepts JSON with a required `prompt`
+(up to 64 KiB), optional absolute `cwd` (defaults to the bridge's working
+directory), and optional boolean `workspace_write` (defaults to false). It
+returns HTTP 202 with `job_id`, `state: "queued"`, `cwd`, and `sandbox`.
+`GET /codex/status?job_id=…` waits up to 20 seconds for a terminal result and
+returns HTTP 200 with the current job state. `POST /codex/cancel` accepts
+`{"job_id":"…"}`; its `cancel_requested` receipt is not confirmation that the
+process has stopped. Check status afterward. Every Codex endpoint requires the
+same `X-Token` header as the other machine actions. Native responses exclude
+local diagnostic paths and raw logs.
+
+The separate `shapes-codex` CLI remains available for terminal use:
 
 ```bash
 shapes-codex start --prompt-file /absolute/task.txt --cwd /absolute/project
@@ -93,12 +113,17 @@ shapes-codex cancel JOB_ID
 ```
 
 The responses are JSON with `job_id` and `state`; status also returns `final`,
-`error`, and the private local diagnostics directory. Raw Codex output is never
+`error`, and `thread_id` (when reported by Codex). CLI status additionally
+returns the private local diagnostics directory. Raw Codex output is never
 included: MCP startup logs may contain credentials. Poll until `completed`, `failed`,
 `cancelled`, or `timed_out`. Only `completed` confirms success. The default
-timeout is 30 minutes; use `--timeout-seconds` to change it (maximum 24 hours).
+timeout is 30 minutes; the CLI's `--timeout-seconds` changes it (maximum 24 hours).
+Queued and running jobs are not completed work. A returned `thread_id` can be
+opened in the desktop app using `codex://threads/THREAD_ID` through the bridge's
+`open` action when the user requests it.
 
-The default sandbox is read-only. For edits, pass `--workspace-write` and a
+The default sandbox is read-only. For edits, set `workspace_write: true` (CLI:
+`--workspace-write`) and a
 dedicated Git worktree path. The launcher refuses writes in a repository's
 primary checkout; create the worktree first. A directory outside Git can also
 be used, but has no Git worktree protection. Approvals are set to `never`, so

@@ -88,16 +88,21 @@ function validateCwd(value, sandbox) {
   return cwd;
 }
 
-async function startJob({ promptFile, cwd, sandbox = "read-only", timeoutSeconds = 1800 }) {
+async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "read-only", timeoutSeconds = 1800 }) {
   if (process.platform === "win32") throw new Error("The Codex job launcher currently requires macOS or Linux.");
   if (!["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
   cwd = validateCwd(cwd, sandbox);
   const timeout = Number(timeoutSeconds);
   if (!Number.isInteger(timeout) || timeout < 1 || timeout > 86400) throw new Error("Timeout must be between 1 and 86400 seconds.");
-  if (!promptFile) throw new Error("--prompt-file is required.");
-  const promptStat = fs.statSync(promptFile);
-  if (!promptStat.isFile() || promptStat.size > MAX_PROMPT) throw new Error("Prompt must be a regular file no larger than 64 KiB.");
-  const prompt = fs.readFileSync(promptFile, "utf8");
+  if (promptFile && suppliedPrompt !== undefined) throw new Error("Supply a prompt or a prompt file, not both.");
+  let prompt = suppliedPrompt;
+  if (prompt === undefined) {
+    if (!promptFile) throw new Error("--prompt-file is required.");
+    const promptStat = fs.statSync(promptFile);
+    if (!promptStat.isFile() || promptStat.size > MAX_PROMPT) throw new Error("Prompt must be a regular file no larger than 64 KiB.");
+    prompt = fs.readFileSync(promptFile, "utf8");
+  }
+  if (typeof prompt !== "string" || Buffer.byteLength(prompt) > MAX_PROMPT) throw new Error("Prompt must be text no larger than 64 KiB.");
   if (!prompt.trim()) throw new Error("Prompt must not be empty.");
   const executable = binary();
   const id = crypto.randomUUID();

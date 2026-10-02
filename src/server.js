@@ -13,6 +13,9 @@
 //   GET  /read?path=    -> read a file back
 //   GET  /ls?path=      -> list a directory
 //   POST /open          -> open a file/app/url with the OS default {target}
+//   POST /codex/start   -> start a local Codex task {prompt, cwd?, workspace_write?}
+//   GET  /codex/status  -> wait up to 20 seconds for a job {job_id in query}
+//   POST /codex/cancel  -> request cancellation {job_id}
 
 const http = require("node:http");
 const os = require("node:os");
@@ -21,6 +24,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { exec, spawn } = require("node:child_process");
 const { URL } = require("node:url");
+const { startJob, getStatus, cancelJob } = require("./codex");
 
 const MAX_OUTPUT = 20000;
 const MAX_FILE_READ = 100000;
@@ -34,7 +38,27 @@ const CAPABILITIES = {
   ls: "list a directory",
   open: "open a file, app, or url with the OS default",
   sysinfo: "harmless machine stats",
+  codex_start: "start a local Codex task using this computer's sign-in",
+  codex_status: "wait for a local Codex task and collect its result",
+  codex_cancel: "stop a local Codex task",
 };
+
+const CODEX_TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"]);
+
+function codexReceipt(id) {
+  const { diagnostics_directory, diagnostics_available, ...receipt } = getStatus(id);
+  return receipt;
+}
+
+async function waitForCodex(id, req, res) {
+  const deadline = Date.now() + 20000;
+  let status = codexReceipt(id);
+  while (!CODEX_TERMINAL.has(status.state) && Date.now() < deadline && !req.aborted && !res.destroyed) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    status = codexReceipt(id);
+  }
+  return status;
+}
 
 function log(msg) {
   process.stdout.write(`[bridge] ${msg}\n`);
@@ -217,6 +241,54 @@ function startServer({ port, token }) {
     }
 
     try {
+      if (route === "/codex/start" && method === "POST") {
+        try {
+          const body = await readBody(req);
+          if (!body || typeof body !== "object" || Array.isArray(body)
+              || Object.keys(body).some((key) => !["prompt", "cwd", "workspace_write"].includes(key))
+              || typeof body.prompt !== "string" || !body.prompt.trim()
+              || (body.cwd !== undefined && typeof body.cwd !== "string")
+              || (body.workspace_write !== undefined && typeof body.workspace_write !== "boolean")) {
+            return sendJson(res, 400, { error: "Supply prompt text, an optional absolute cwd, and optional boolean workspace_write." });
+          }
+          const cwd = body.cwd ? expand(body.cwd) : process.cwd();
+          log(`CODEX START (cwd=${cwd}, sandbox=${body.workspace_write ? "workspace-write" : "read-only"})`);
+          const result = await startJob({
+            prompt: body.prompt, cwd,
+            sandbox: body.workspace_write ? "workspace-write" : "read-only",
+          });
+          return sendJson(res, 202, result);
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      }
+
+      if (route === "/codex/status" && method === "GET") {
+        try {
+          const id = url.searchParams.get("job_id");
+          log(`CODEX STATUS: ${id}`);
+          const result = await waitForCodex(id, req, res);
+          if (!res.destroyed) return sendJson(res, 200, result);
+          return;
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      }
+
+      if (route === "/codex/cancel" && method === "POST") {
+        try {
+          const body = await readBody(req);
+          if (!body || typeof body !== "object" || Array.isArray(body)
+              || Object.keys(body).some((key) => key !== "job_id") || typeof body.job_id !== "string") {
+            return sendJson(res, 400, { error: "Supply job_id." });
+          }
+          log(`CODEX CANCEL: ${body.job_id}`);
+          return sendJson(res, 200, cancelJob(body.job_id));
+        } catch (err) {
+          return sendJson(res, 400, { error: err.message });
+        }
+      }
+
       if (route === "/sysinfo" && method === "GET") {
         log("sysinfo requested");
         return sendJson(res, 200, sysinfo());
