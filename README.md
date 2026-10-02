@@ -31,8 +31,8 @@ prints in that terminal, live. Press `Ctrl+C` to shut the door instantly.
 
 - **Locked with a random secret token**, generated fresh on every run. No token,
   no access — the server rejects the request. Connect it through the private dialog.
-- **You see everything.** Every command, file write, and open prints live in your
-  terminal.
+- **Visible activity.** Every bridge action prints live in your terminal.
+  Delegated Codex jobs keep their detailed diagnostics in private local files.
 - **Instant off switch.** `Ctrl+C` closes the door immediately. A new run means a
   brand-new URL and token; nothing lingers.
 - The tunnel is a [Cloudflare quick-tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/)
