@@ -13,6 +13,10 @@
 //   GET  /read?path=    -> read a file back
 //   GET  /ls?path=      -> list a directory
 //   POST /open          -> open a file/app/url with the OS default {target}
+//   GET  /agents        -> check local Codex and Claude Code readiness
+//   POST /agents/start  -> delegate {agent?, prompt, cwd?, workspace_write?}
+//   GET  /agents/status -> wait up to 20 seconds for a job {job_id in query}
+//   POST /agents/cancel -> request cancellation {job_id}
 //   POST /codex/start   -> start a local Codex task {prompt, cwd?, workspace_write?}
 //   GET  /codex/status  -> wait up to 20 seconds for a job {job_id in query}
 //   POST /codex/cancel  -> request cancellation {job_id}
@@ -25,6 +29,7 @@ const crypto = require("node:crypto");
 const { exec, spawn } = require("node:child_process");
 const { URL } = require("node:url");
 const { startJob, getStatus, cancelJob } = require("./codex");
+const { listAgents } = require("./agents");
 
 const MAX_OUTPUT = 20000;
 const MAX_FILE_READ = 100000;
@@ -41,21 +46,25 @@ const CAPABILITIES = {
   codex_start: "start a local Codex task using this computer's sign-in",
   codex_status: "wait for a local Codex task and collect its result",
   codex_cancel: "stop a local Codex task",
+  agents: "discover installed and signed-in local Codex and Claude Code agents",
+  agent_start: "delegate a task to a ready local agent",
+  agent_status: "wait for a local agent task and collect its result",
+  agent_cancel: "stop a local agent task",
 };
 
 const CODEX_TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"]);
 
-function codexReceipt(id) {
-  const { diagnostics_directory, diagnostics_available, ...receipt } = getStatus(id);
+function codexReceipt(id, expectedAgent) {
+  const { diagnostics_directory, diagnostics_available, ...receipt } = getStatus(id, expectedAgent);
   return receipt;
 }
 
-async function waitForCodex(id, req, res) {
+async function waitForCodex(id, req, res, expectedAgent) {
   const deadline = Date.now() + 20000;
-  let status = codexReceipt(id);
+  let status = codexReceipt(id, expectedAgent);
   while (!CODEX_TERMINAL.has(status.state) && Date.now() < deadline && !req.aborted && !res.destroyed) {
     await new Promise((resolve) => setTimeout(resolve, 250));
-    status = codexReceipt(id);
+    status = codexReceipt(id, expectedAgent);
   }
   return status;
 }
@@ -241,33 +250,43 @@ function startServer({ port, token }) {
     }
 
     try {
-      if (route === "/codex/start" && method === "POST") {
+      if (route === "/agents" && method === "GET") {
+        log("AGENTS: checking local CLI readiness");
+        return sendJson(res, 200, await listAgents());
+      }
+
+      if (["/codex/start", "/agents/start"].includes(route) && method === "POST") {
         try {
+          const codexOnly = route === "/codex/start";
           const body = await readBody(req);
           if (!body || typeof body !== "object" || Array.isArray(body)
-              || Object.keys(body).some((key) => !["prompt", "cwd", "workspace_write"].includes(key))
+              || Object.keys(body).some((key) => !["prompt", "cwd", "workspace_write", ...(codexOnly ? [] : ["agent"])].includes(key))
               || typeof body.prompt !== "string" || !body.prompt.trim()
               || (body.cwd !== undefined && typeof body.cwd !== "string")
+              || (!codexOnly && body.agent !== undefined && !["auto", "codex", "claude"].includes(body.agent))
               || (body.workspace_write !== undefined && typeof body.workspace_write !== "boolean")) {
-            return sendJson(res, 400, { error: "Supply prompt text, an optional absolute cwd, and optional boolean workspace_write." });
+            return sendJson(res, 400, { error: "Supply prompt text, optional absolute cwd, boolean workspace_write, and a supported agent on /agents/start." });
           }
           const cwd = body.cwd ? expand(body.cwd) : process.cwd();
-          log(`CODEX START (cwd=${cwd}, sandbox=${body.workspace_write ? "workspace-write" : "read-only"})`);
+          const agent = codexOnly ? "codex" : body.agent || "auto";
+          log(`AGENT START (${agent}, cwd=${cwd}, scope=${body.workspace_write ? "workspace-write" : "read-only"})`);
           const result = await startJob({
-            prompt: body.prompt, cwd,
+            prompt: body.prompt, cwd, agent,
             sandbox: body.workspace_write ? "workspace-write" : "read-only",
           });
           return sendJson(res, 202, result);
         } catch (err) {
+          if (err.errorType === "agent_unavailable") return sendJson(res, 409,
+            { error: err.message, error_type: err.errorType, started: false, agents: err.agents });
           return sendJson(res, 400, { error: err.message });
         }
       }
 
-      if (route === "/codex/status" && method === "GET") {
+      if (["/codex/status", "/agents/status"].includes(route) && method === "GET") {
         try {
           const id = url.searchParams.get("job_id");
-          log(`CODEX STATUS: ${id}`);
-          const result = await waitForCodex(id, req, res);
+          log(`AGENT STATUS: ${id}`);
+          const result = await waitForCodex(id, req, res, route === "/codex/status" ? "codex" : undefined);
           if (!res.destroyed) return sendJson(res, 200, result);
           return;
         } catch (err) {
@@ -275,15 +294,15 @@ function startServer({ port, token }) {
         }
       }
 
-      if (route === "/codex/cancel" && method === "POST") {
+      if (["/codex/cancel", "/agents/cancel"].includes(route) && method === "POST") {
         try {
           const body = await readBody(req);
           if (!body || typeof body !== "object" || Array.isArray(body)
               || Object.keys(body).some((key) => key !== "job_id") || typeof body.job_id !== "string") {
             return sendJson(res, 400, { error: "Supply job_id." });
           }
-          log(`CODEX CANCEL: ${body.job_id}`);
-          return sendJson(res, 200, cancelJob(body.job_id));
+          log(`AGENT CANCEL: ${body.job_id}`);
+          return sendJson(res, 200, cancelJob(body.job_id, route === "/codex/cancel" ? "codex" : undefined));
         } catch (err) {
           return sendJson(res, 400, { error: err.message });
         }

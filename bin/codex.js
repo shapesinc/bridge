@@ -37,8 +37,8 @@ async function main(args) {
       } else throw new Error(`Unknown option: ${flag}`);
     }
     result = await startJob(options);
-  } else if (command === "status" && rest.length === 1) result = getStatus(rest[0]);
-  else if (command === "cancel" && rest.length === 1) result = cancelJob(rest[0]);
+  } else if (command === "status" && rest.length === 1) result = getStatus(rest[0], "codex");
+  else if (command === "cancel" && rest.length === 1) result = cancelJob(rest[0], "codex");
   else throw new Error("Expected start, status JOB_ID, or cancel JOB_ID; use --help.");
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
