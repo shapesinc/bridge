@@ -24,8 +24,8 @@ BRIDGE https://something-random.trycloudflare.com AbC123secretkey
 
 **Open Connect Computer in Shapes and enter the URL and token privately. Never
 paste the `BRIDGE …` line or token into chat messages.** Leave the
-terminal open — it's what keeps the door open. Every action your Shape runs
-prints in that terminal, live. Press `Ctrl+C` to shut the door instantly.
+terminal open — it's what keeps the door open. Every bridge request
+prints in that terminal, live. Press `Ctrl+C` to disconnect remote access.
 
 ## Is it safe?
 
@@ -33,8 +33,9 @@ prints in that terminal, live. Press `Ctrl+C` to shut the door instantly.
   no access — the server rejects the request. Connect it through the private dialog.
 - **Visible activity.** Every bridge action prints live in your terminal.
   Delegated Codex jobs keep their detailed diagnostics in private local files.
-- **Instant off switch.** `Ctrl+C` closes the door immediately. A new run means a
-  brand-new URL and token; nothing lingers.
+- **Disconnect immediately.** `Ctrl+C` closes bridge access. A new run means a
+  brand-new URL and token. Codex jobs already started continue until completion
+  or cancellation; cancel them first if you also want that work to stop.
 - The tunnel is a [Cloudflare quick-tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/)
   — no account, no signup, temporary. The `cloudflared` helper is downloaded once
   and cached under `~/.shapes-bridge/`.
