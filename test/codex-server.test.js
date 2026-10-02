@@ -13,8 +13,9 @@ async function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "shapes-native-codex-"));
   const executable = path.join(dir, "fake-codex");
   fs.writeFileSync(executable, `#!${process.execPath}
-if(process.argv.includes('--version')) { console.log('codex-cli test'); process.exit(0); }
+if(process.argv.includes('--version')) { console.log('codex-cli 0.200.0'); process.exit(0); }
 if(process.argv.includes('--help')) { console.log('--json --sandbox --ephemeral'); process.exit(0); }
+if(process.argv.includes('login')) { console.log('Logged in using ChatGPT'); process.exit(0); }
 let prompt='';process.stdin.on('data',b=>prompt+=b);process.stdin.on('end',()=>{
   if(prompt==='wait') { setInterval(()=>{},1000); return; }
   if(prompt==='fail') { process.stderr.write('private diagnostic'); process.exit(2); }

@@ -14,7 +14,7 @@ function fixture(t, body) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "shapes-codex-test-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const executable = path.join(dir, "fake-codex");
-  fs.writeFileSync(executable, `#!${process.execPath}\nif(process.argv.includes('--version')) { console.log('codex-cli test'); process.exit(0); }\nif(process.argv.includes('--help')) { console.log('--json --sandbox --ephemeral'); process.exit(0); }\n${body}`, { mode: 0o700 });
+  fs.writeFileSync(executable, `#!${process.execPath}\nif(process.argv.includes('--version')) { console.log('codex-cli 0.200.0'); process.exit(0); }\nif(process.argv.includes('--help')) { console.log('--json --sandbox --ephemeral'); process.exit(0); }\nif(process.argv.includes('login')) { console.log('Logged in using ChatGPT'); process.exit(0); }\n${body}`, { mode: 0o700 });
   const prompt = path.join(dir, "prompt.txt");
   fs.writeFileSync(prompt, "Please say hello. $(touch NEVER) `whoami`\n");
   const env = { ...process.env, SHAPES_CODEX_BINARY: executable, SHAPES_CODEX_JOB_DIR: path.join(dir, "jobs") };
@@ -128,7 +128,7 @@ test("old Codex binaries are rejected before job creation", (t) => {
   fs.writeFileSync(f.env.SHAPES_CODEX_BINARY, `#!${process.execPath}\nconsole.log(process.argv.includes('--version') ? 'codex-cli 0.34.0' : '--json --sandbox');`);
   const result = spawnSync(process.execPath, [CLI, "start", "--cwd", f.dir, "--prompt-file", f.prompt], { env: f.env, encoding: "utf8" });
   assert.equal(result.status, 1);
-  assert.match(JSON.parse(result.stderr).error, /older CLIs are unsupported/);
+  assert.match(JSON.parse(result.stderr).error, /lacks required headless controls/);
 });
 
 test("write mode rejects a primary checkout including subdirectories and symlinks", (t) => {

@@ -6,21 +6,18 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn, spawnSync } = require("node:child_process");
 const { StringDecoder } = require("node:string_decoder");
+const { selectAgent, argumentsFor } = require("./agents");
 
 const MAX_OUTPUT = 64 * 1024;
 const MAX_PROMPT = 64 * 1024;
 const TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const BUNDLED = [
-  "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
-  "/Applications/Codex.app/Contents/Resources/codex",
-];
 
 function privateDir(directory) {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const stat = fs.lstatSync(directory);
   if (!stat.isDirectory() || stat.isSymbolicLink() || (process.getuid && stat.uid !== process.getuid())) {
-    throw new Error("Codex job storage must be a directory owned by the current user, not a symlink.");
+    throw new Error("Agent job storage must be a directory owned by the current user, not a symlink.");
   }
   fs.chmodSync(directory, 0o700);
   return directory;
@@ -51,24 +48,6 @@ function loadState(directory) {
   return JSON.parse(fs.readFileSync(path.join(directory, "state.json"), "utf8"));
 }
 
-function binary() {
-  const candidates = process.env.SHAPES_CODEX_BINARY
-    ? [process.env.SHAPES_CODEX_BINARY]
-    : [...BUNDLED, ...(process.env.PATH || "").split(path.delimiter).map((dir) => path.join(dir, "codex"))];
-  for (const candidate of candidates) {
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      const probe = spawnSync(candidate, ["--version"], { encoding: "utf8", timeout: 5000, maxBuffer: 4096 });
-      if (probe.status !== 0 || !/codex-cli\s/.test(probe.stdout)) continue;
-      const help = spawnSync(candidate, ["exec", "--help"], { encoding: "utf8", timeout: 5000, maxBuffer: 65536 });
-      if (help.status === 0 && ["--json", "--sandbox", "--ephemeral"].every((flag) => help.stdout.includes(flag))) {
-        return fs.realpathSync(candidate);
-      }
-    } catch {}
-  }
-  throw new Error("A current Codex CLI was not found (older CLIs are unsupported). Install/sign in to Codex, or set SHAPES_CODEX_BINARY to its current executable.");
-}
-
 function validateCwd(value, sandbox) {
   if (!value || !path.isAbsolute(value)) throw new Error("--cwd must be an explicit absolute directory.");
   const cwd = fs.realpathSync(value);
@@ -88,8 +67,8 @@ function validateCwd(value, sandbox) {
   return cwd;
 }
 
-async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "read-only", timeoutSeconds = 1800 }) {
-  if (process.platform === "win32") throw new Error("The Codex job launcher currently requires macOS or Linux.");
+async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex" }) {
+  if (process.platform === "win32") throw new Error("The local agent launcher currently requires macOS or Linux.");
   if (!["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
   cwd = validateCwd(cwd, sandbox);
   const timeout = Number(timeoutSeconds);
@@ -104,17 +83,20 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
   }
   if (typeof prompt !== "string" || Buffer.byteLength(prompt) > MAX_PROMPT) throw new Error("Prompt must be text no larger than 64 KiB.");
   if (!prompt.trim()) throw new Error("Prompt must not be empty.");
-  const executable = binary();
+  const selected = await selectAgent(agent, cwd);
+  agent = selected.id;
+  const executable = selected.executable;
   const id = crypto.randomUUID();
   const directory = privateDir(path.join(root(), id));
-  writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable }));
-  saveState(directory, { id, status: "queued", cwd, sandbox, createdAt: new Date().toISOString() });
+  writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable, agent }));
+  saveState(directory, { id, status: "queued", cwd, sandbox, agent, createdAt: new Date().toISOString() });
   const child = spawn(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
     detached: true, stdio: "ignore", env: { ...process.env, SHAPES_CODEX_JOB_DIR: root() },
   });
   await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
   child.unref();
-  return { job_id: id, state: "queued", cwd, sandbox };
+  return { job_id: id, state: "queued", cwd, sandbox, agent,
+    ...(agent === "claude" ? { permission_scope: sandbox === "read-only" ? "read-only-tools" : "accept-edits" } : {}) };
 }
 
 function alive(pid) {
@@ -137,25 +119,30 @@ function bounded(value, budget, tail = false) {
   return text;
 }
 
-function getStatus(id) {
+function getStatus(id, expectedAgent) {
   const directory = jobDir(id);
   const state = loadState(directory);
+  const agent = state.agent || "codex";
+  if (expectedAgent && agent !== expectedAgent) throw new Error("This job belongs to a different local agent.");
   if (!TERMINAL.has(state.status)) {
     const lost = state.supervisorPid ? !alive(state.supervisorPid) : Date.now() - Date.parse(state.createdAt) > 30000;
     if (lost) {
       state.status = "failed";
-      state.error = "Local Codex supervisor exited before reporting completion.";
+      state.error = "Local agent supervisor exited before reporting completion.";
       state.finishedAt = new Date().toISOString();
     }
   }
   const final = readOutput(directory, "result.txt");
   const finalResult = bounded(final, 8000);
   return {
-    job_id: id, state: state.status,
+    job_id: id, state: state.status, agent,
     final: finalResult, error: state.error ? bounded(state.error, 1000) : null,
-    cwd: state.cwd, sandbox: state.sandbox, thread_id: state.threadId || null,
+    cwd: state.cwd, sandbox: state.sandbox, thread_id: typeof state.threadId === "string" ? bounded(state.threadId, 512) : null,
     created_at: state.createdAt, finished_at: state.finishedAt || null,
     exit_code: state.exitCode ?? null,
+    error_type: state.errorType || null,
+    permission_denials: state.permissionDenials || 0,
+    ...(agent === "claude" ? { permission_scope: state.sandbox === "read-only" ? "read-only-tools" : "accept-edits" } : {}),
     cancel_requested: fs.existsSync(path.join(directory, "cancel")),
     diagnostics_available: fs.existsSync(path.join(directory, "stdout.log")) || fs.existsSync(path.join(directory, "stderr.log")),
     diagnostics_directory: directory,
@@ -163,11 +150,11 @@ function getStatus(id) {
   };
 }
 
-function cancelJob(id) {
+function cancelJob(id, expectedAgent) {
   const directory = jobDir(id);
-  const state = getStatus(id);
+  const state = getStatus(id, expectedAgent);
   if (!TERMINAL.has(state.state)) writePrivate(path.join(directory, "cancel"), "cancel\n");
-  return { job_id: id, state: state.state, cancel_requested: !TERMINAL.has(state.state) || state.cancel_requested };
+  return { job_id: id, state: state.state, agent: state.agent, cancel_requested: !TERMINAL.has(state.state) || state.cancel_requested };
 }
 
 async function supervise(id) {
@@ -183,6 +170,7 @@ async function supervise(id) {
   }
   const state = loadState(directory);
   const request = JSON.parse(fs.readFileSync(path.join(directory, "request.json"), "utf8"));
+  const agent = request.agent || "codex";
   let child;
   let poll;
   let deadline;
@@ -218,6 +206,29 @@ async function supervise(id) {
   function event(line) {
     try {
       const value = JSON.parse(line);
+      if (agent === "claude") {
+        if (value.type === "system" && value.subtype === "init" && typeof value.session_id === "string") state.threadId = value.session_id;
+        if (value.type === "system" && value.subtype === "permission_denied") {
+          state.permissionDenials = (state.permissionDenials || 0) + 1;
+          state.errorType = "permission_denied";
+          turnFailed = true;
+        }
+        if (value.type !== "result") return;
+        if (typeof value.session_id === "string") state.threadId = value.session_id;
+        state.permissionDenials = Math.max(state.permissionDenials || 0, Array.isArray(value.permission_denials) ? value.permission_denials.length : 0);
+        const denied = state.permissionDenials > 0;
+        const success = value.subtype === "success" && value.is_error === false && typeof value.result === "string" && Boolean(value.result.trim());
+        if (!success || denied) {
+          turnFailed = true;
+          state.errorType = denied ? "permission_denied" : "agent_error";
+          return;
+        }
+        turnCompleted = true;
+        const result = Buffer.from(value.result);
+        state.resultTruncated = result.length > MAX_OUTPUT;
+        writePrivate(path.join(directory, "result.txt"), result.subarray(0, MAX_OUTPUT));
+        return;
+      }
       if (value.type === "thread.started") state.threadId = value.thread_id;
       if (value.type === "turn.completed") { turnCompleted = true; state.usage = value.usage; }
       if (value.type === "turn.failed" || value.type === "error") turnFailed = true;
@@ -232,11 +243,8 @@ async function supervise(id) {
     Object.assign(state, { supervisorPid: process.pid, status: "running", startedAt: new Date().toISOString() });
     saveState(directory, state);
     if (fs.existsSync(path.join(directory, "cancel"))) { finish("cancelled"); return; }
-    child = spawn(request.executable, [
-      "-a", "never", "exec", "--json", "--color", "never", "--sandbox", request.sandbox,
-      "-c", "sandbox_workspace_write.writable_roots=[]",
-      "--skip-git-repo-check", "--cd", request.cwd, "-",
-    ], { cwd: request.cwd, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+    child = spawn(request.executable, argumentsFor(agent, request),
+      { cwd: request.cwd, detached: true, stdio: ["pipe", "pipe", "pipe"] });
     child.stdin.on("error", () => {}); // Early CLI exits can close stdin before the prompt is consumed.
     child.stdin.end(request.prompt);
     child.stdout.on("data", (chunk) => {
@@ -266,11 +274,15 @@ async function supervise(id) {
     const success = exit.exitCode === 0 && turnCompleted && !turnFailed;
     finish(stopped || (success ? "completed" : "failed"), {
       ...exit,
-      ...(!stopped && !success ? { error: "Codex did not complete successfully. Inspect the private local diagnostics directory." } : {}),
+      ...(!stopped && !success ? {
+        error: state.errorType === "permission_denied" ? "The local agent was blocked by configured tool permissions. Inspect its local permissions before retrying."
+          : "The local agent did not complete successfully. Inspect the private local diagnostics directory.",
+        errorType: state.errorType || (exit.exitCode === 0 ? "missing_completion" : "process_error"),
+      } : {}),
     });
   } catch (error) {
     if (child) killGroup("SIGKILL");
-    finish("failed", { error: error.message });
+    finish("failed", { error: "The local agent process could not finish. Inspect the private local diagnostics directory.", errorType: "process_error" });
   }
 }
 
