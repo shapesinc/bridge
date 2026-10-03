@@ -34,6 +34,10 @@ the service never depends on an `npx` cache or an open terminal. Run `install`
 again to update it without pairing again. Bare `npx --yes --package=https://github.com/shapesinc/bridge/archive/refs/heads/main.tar.gz shapes-bridge`
 starts setup on a new computer and shows status on an existing installation.
 
+Older instructions using `npx github:shapesinc/bridge` are also supported. The
+package includes a `bridge` command alias so npm can choose the setup command
+even though this package also contains the separate `shapes-codex` command.
+
 ## Controls and computer permissions
 
 The installer creates a local command that works without npm or network access.
