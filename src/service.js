@@ -45,11 +45,11 @@ function serviceDefinition({ platform = process.platform, home = os.homedir(), d
   };
   if (platform === "linux") return {
     file: path.join(home, ".config", "systemd", "user", `${LABEL}.service`),
-    content: `[Unit]\nDescription=Shapes computer connection\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${unitCommandQuote(node)} ${unitCommandQuote(cli)} daemon\nWorkingDirectory=${unitQuote(home)}\nEnvironment=${unitQuote(`PATH=${envPath}`)}\nEnvironment=${unitQuote(`SHAPES_BRIDGE_HOME=${dir}`)}\nRestart=always\nRestartSec=10\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`,
+    content: `[Unit]\nDescription=shapes.inc computer connection\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${unitCommandQuote(node)} ${unitCommandQuote(cli)} daemon\nWorkingDirectory=${unitQuote(home)}\nEnvironment=${unitQuote(`PATH=${envPath}`)}\nEnvironment=${unitQuote(`SHAPES_BRIDGE_HOME=${dir}`)}\nRestart=always\nRestartSec=10\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`,
   };
   if (platform === "win32") return {
     file: path.join(dir, "service-task.xml"),
-    content: `<?xml version="1.0" encoding="UTF-16"?>\n<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${xml(user)}</UserId></LogonTrigger></Triggers><Principals><Principal id="Author"><UserId>${xml(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure><StartWhenAvailable>true</StartWhenAvailable></Settings><Actions Context="Author"><Exec><Command>${xml(node)}</Command><Arguments>${xml(`"${cli}" daemon --state-dir "${dir}"`)}</Arguments><WorkingDirectory>${xml(home)}</WorkingDirectory></Exec></Actions></Task>\n`,
+    content: `<?xml version="1.0" encoding="UTF-16"?>\n<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>shapes.inc computer connection</Description></RegistrationInfo><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>${xml(user)}</UserId></LogonTrigger></Triggers><Principals><Principal id="Author"><UserId>${xml(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure><StartWhenAvailable>true</StartWhenAvailable></Settings><Actions Context="Author"><Exec><Command>${xml(node)}</Command><Arguments>${xml(`"${cli}" daemon --state-dir "${dir}"`)}</Arguments><WorkingDirectory>${xml(home)}</WorkingDirectory></Exec></Actions></Task>\n`,
   };
   throw new Error(`Background installation is not supported on ${platform}.`);
 }
@@ -57,7 +57,7 @@ function serviceDefinition({ platform = process.platform, home = os.homedir(), d
 function command(binary, args, { optional = false } = {}) {
   const result = spawnSync(binary, args, { encoding: "utf8", windowsHide: true });
   if (!optional && (result.error || result.status !== 0)) {
-    throw new Error(`${binary} could not configure the Shapes background service: ${(result.error?.message || result.stderr || result.stdout || "unknown error").trim()}`);
+    throw new Error(`${binary} could not configure the shapes.inc background service: ${(result.error?.message || result.stderr || result.stdout || "unknown error").trim()}`);
   }
   return result;
 }
@@ -84,7 +84,7 @@ function assertServiceOwner(definition = serviceDefinition()) {
   const cli = runtimePaths().cli;
   const expected = process.platform === "linux" ? unitCommandQuote(cli) : xml(cli);
   if (!current.includes(expected)) {
-    throw new Error("Another Shapes Bridge installation owns this background service. Pause or uninstall that installation before using a different --state-dir.");
+    throw new Error("Another shapes.inc Bridge installation owns this background service. Pause or uninstall that installation before using a different --state-dir.");
   }
 }
 

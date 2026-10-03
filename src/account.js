@@ -8,7 +8,7 @@ function validateApi(value) {
   const url = new URL(value);
   if (url.username || url.password || url.search || url.hash ||
       (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))) {
-    throw new Error("The Shapes API must use HTTPS (HTTP is allowed only on localhost for development).");
+    throw new Error("The shapes.inc API must use HTTPS (HTTP is allowed only on localhost for development).");
   }
   return url.href.replace(/\/$/, "");
 }
@@ -22,7 +22,7 @@ async function apiRequest(api, route, body, token, method = "POST", timeoutMs = 
     redirect: "error",
   });
   if (!response.ok) {
-    const error = new Error(`Shapes connection request failed (HTTP ${response.status}).`);
+    const error = new Error(`shapes.inc connection request failed (HTTP ${response.status}).`);
     error.status = response.status;
     throw error;
   }
@@ -33,7 +33,7 @@ async function pairDevice({ api = DEFAULT_API, name = os.hostname(), onCode, sle
   const pairing = await apiRequest(api, "/pairings", { name, platform: process.platform });
   const verification = new URL(pairing.verification_uri_complete);
   if (verification.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(verification.hostname)) {
-    throw new Error("Shapes returned an insecure approval URL.");
+    throw new Error("shapes.inc returned an insecure approval URL.");
   }
   await onCode(pairing);
   const deadline = Date.now() + Math.min(pairing.expires_in || 600, 600) * 1000;

@@ -20,7 +20,7 @@ test("npx can infer setup from the packed package without an explicit executable
     // This exercises npm's real package-to-bin inference used by the legacy
     // `npx github:shapesinc/bridge` command, without downloading or installing a service.
     const output = execFileSync("npx", ["--yes", pkg, "--help"], { cwd: dir, env, encoding: "utf8" });
-    assert.match(output, /Shapes Bridge\n/);
+    assert.match(output, /shapes\.inc Bridge\n/);
     assert.match(output, /install\s+Pair once/);
     // The original explicit sidekick command must remain independently selectable.
     const codex = execFileSync("npx", ["--yes", `--package=${pkg}`, "shapes-codex", "--help"], { cwd: dir, env, encoding: "utf8" });

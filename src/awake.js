@@ -11,7 +11,7 @@ function keepAwake({ enabled = true, platform = process.platform, spawnProcess =
     args = ["-i", "-w", String(process.pid)];
   } else if (platform === "linux") {
     command = "systemd-inhibit";
-    args = ["--what=idle:sleep", "--who=Shapes Bridge", "--why=Computer connection enabled", "--mode=block", "sleep", "infinity"];
+    args = ["--what=idle:sleep", "--who=shapes.inc Bridge", "--why=Computer connection enabled", "--mode=block", "sleep", "infinity"];
   } else if (platform === "win32") {
     command = "powershell.exe";
     args = ["-NoProfile", "-NonInteractive", "-Command", `Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class ShapesAwake { [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint flags); }'; if ([ShapesAwake]::SetThreadExecutionState(2147483649) -eq 0) { exit 1 }; Write-Output ready; while (Get-Process -Id ${process.pid} -ErrorAction SilentlyContinue) { Start-Sleep -Seconds 5 }`];

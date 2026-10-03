@@ -40,20 +40,20 @@ function showStatus() {
   const status = readState("status");
   const recent = status?.updated_at && Date.now() - Date.parse(status.updated_at) < 90000;
   const connection = config.paused ? "paused" : config.revoked ? "revoked" : recent ? status.connection : "offline";
-  log(`Shapes Bridge: ${connection}\nComputer: ${config.name}\nKeep awake: ${config.keep_awake === false ? "off" : "on"}`);
+  log(`shapes.inc Bridge: ${connection}\nComputer: ${config.name}\nKeep awake: ${config.keep_awake === false ? "off" : "on"}`);
   if (status?.last_heartbeat) log(`Last connected: ${status.last_heartbeat}`);
   if (recent && status?.permissions) {
     for (const [name, value] of Object.entries(status.permissions)) log(`${name.replace(/_/g, " ")}: ${value}`);
   }
   if (recent && status?.error) log(status.error);
-  log("Manage computers and chat access in Shapes. Local controls: status, pause, resume, permissions, logs, uninstall.");
+  log("Manage computers and chat access in shapes.inc. Local controls: status, pause, resume, permissions, logs, uninstall.");
 }
 
 async function install() {
   ensureStateDir();
   let config = readState("config");
   if (!config?.device_token || config.revoked) {
-    log("Connect this computer once to your Shapes account. Approve access for each chat in Shapes.");
+    log("Connect this computer once to your shapes.inc account. Approve access for each chat in shapes.inc.");
     config = await pairDevice({
       api: validateApi(option("--api-url", DEFAULT_API)),
       name: option("--name", undefined),
@@ -77,7 +77,7 @@ async function install() {
     status = readState("status");
   } while (Date.now() < deadline && status?.connection !== "connected" && status?.connection !== "revoked");
   if (!status) throw new Error("The background service has not started. Run logs for details. Use the default install location; macOS may block background apps stored in Downloads or Desktop.");
-  if (status.connection === "connected") log("Connected. You can close this terminal. Shapes starts automatically when you sign in to this computer.");
+  if (status.connection === "connected") log("Connected. You can close this terminal. shapes.inc starts automatically when you sign in to this computer.");
   else log("Setup saved. The background service is still connecting; it will retry automatically. Run status or logs to check progress.");
   log("Keep awake is " + (config.keep_awake ? "on (display lock and lid settings stay in place)." : "off."));
   log("On macOS, approve native permission prompts for the background runner. Run permissions to check or finish setup.");
@@ -102,11 +102,11 @@ async function main() {
     return;
   }
   if (["--help", "help", "-h"].includes(command)) {
-    log("Shapes Bridge\n  install       Pair once and install the background connection\n  status        Connection and native permission status\n  pause         Disconnect and stop automatic startup\n  resume        Reconnect and restore automatic startup\n  permissions [accessibility|screen_recording|full_disk_access|automation]\n                Ask the installed background runner for OS access\n  awake on|off  Keep the computer awake while connected\n  logs          Recent local activity (may contain private command text)\n  uninstall     Revoke account access and remove the background service\n  foreground    Temporary legacy connection until the terminal closes\n\nInstall options: --name <name>, --no-open, --no-awake\nDevelopment: --api-url http://127.0.0.1:<port>, --state-dir <directory>");
+    log("shapes.inc Bridge\n  install       Pair once and install the background connection\n  status        Connection and native permission status\n  pause         Disconnect and stop automatic startup\n  resume        Reconnect and restore automatic startup\n  permissions [accessibility|screen_recording|full_disk_access|automation]\n                Ask the installed background runner for OS access\n  awake on|off  Keep the computer awake while connected\n  logs          Recent local activity (may contain private command text)\n  uninstall     Revoke account access and remove the background service\n  foreground    Temporary legacy connection until the terminal closes\n\nInstall options: --name <name>, --no-open, --no-awake\nDevelopment: --api-url http://127.0.0.1:<port>, --state-dir <directory>");
     return;
   }
   const config = readState("config");
-  if (!config?.device_token) throw new Error("Run install first to connect this computer to Shapes.");
+  if (!config?.device_token) throw new Error("Run install first to connect this computer to shapes.inc.");
   if (command === "pause") {
     stopService();
     writeState("config", { ...config, paused: true });
@@ -114,7 +114,7 @@ async function main() {
     catch { log("Computer access is stopped locally. Account status will update when its last heartbeat expires."); }
     log("Paused. This computer is disconnected and will stay paused after restart. Run resume to reconnect.");
   } else if (command === "resume") {
-    if (config.revoked) throw new Error("This computer was removed from Shapes. Run install to reconnect.");
+    if (config.revoked) throw new Error("This computer was removed from shapes.inc. Run install to reconnect.");
     writeState("config", { ...config, paused: false });
     startService(); log("Reconnecting in the background. Automatic startup restored.");
   } else if (command === "permissions") {
@@ -136,12 +136,12 @@ async function main() {
     if (!config.revoked) {
       try { await apiRequest(config.api, "/devices/current", undefined, config.device_token, "DELETE"); }
       catch (error) {
-        if (error.status !== 401) throw new Error("Background connection stopped. Could not remove it from your account; reconnect to the internet and run uninstall again, or remove it in Shapes settings.");
+        if (error.status !== 401) throw new Error("Background connection stopped. Could not remove it from your account; reconnect to the internet and run uninstall again, or remove it in shapes.inc settings.");
       }
     }
     removeState("config"); removeState("status"); removeState("permission-request");
-    log("Disconnected and removed from your Shapes account. Automatic startup is removed. Local runtime and private logs remain in " + stateDir() + ".");
+    log("Disconnected and removed from your shapes.inc account. Automatic startup is removed. Local runtime and private logs remain in " + stateDir() + ".");
   } else throw new Error(`Unknown command: ${command}. Run help for available commands.`);
 }
 
-main().catch((error) => { process.stderr.write(`Shapes Bridge: ${error.message}\n`); process.exitCode = 1; });
+main().catch((error) => { process.stderr.write(`shapes.inc Bridge: ${error.message}\n`); process.exitCode = 1; });
