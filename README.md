@@ -5,44 +5,117 @@
 Your Shape lives in the chat. The bridge is a tiny program you run on your
 computer that lets your Shape reach *this machine* — run a command, read or
 write a file, open an app — over a secure, token-locked door that only you
-control. You run one command, connect it privately in Shapes, and your Shape
-can act for you. Close the terminal and the door vanishes.
+control. Connect it once to your Shapes account, then allow it in the chats
+where you want to use it. The connection runs in the background, survives a
+closed terminal, and starts again when you sign in to your computer.
 
 ## Run it
 
-You need [Node.js](https://nodejs.org) 18+ (nothing else — no Python, no setup).
+You need [Node.js](https://nodejs.org) 18+. No DMG, Python, or administrator
+installation is required.
 
 ```bash
-npx github:shapesinc/bridge
+npx --yes --package=https://github.com/shapesinc/bridge/archive/refs/heads/main.tar.gz shapes-bridge install
 ```
 
-It prints one line:
+1. Open the approval link printed by the installer (it also opens your browser).
+2. Sign in to Shapes and approve the matching confirmation code.
+3. Approve computer permissions in your operating system when prompted.
+4. Choose this computer in **Connect Computer** in a chat. You can use the same
+   saved computer in other chats without installing or pairing it again.
 
-```
-BRIDGE https://something-random.trycloudflare.com AbC123secretkey
+The installer reports **Connected** only after the background process has
+contacted Shapes. You can close the terminal. Changing networks or restarting
+the tunnel automatically updates the endpoint without changing your account
+pairing or existing chat grants.
+
+The installed code and a private Node runtime live in `~/.shapes-bridge/runtime`;
+the service never depends on an `npx` cache or an open terminal. Run `install`
+again to update it without pairing again. Bare `npx --yes --package=https://github.com/shapesinc/bridge/archive/refs/heads/main.tar.gz shapes-bridge`
+starts setup on a new computer and shows status on an existing installation.
+
+## Controls and computer permissions
+
+The installer creates a local command that works without npm or network access.
+On macOS and Linux:
+
+```bash
+~/.shapes-bridge/shapes-bridge status
 ```
 
-**Open Connect Computer in Shapes and enter the URL and token privately. Never
-paste the `BRIDGE …` line or token into chat messages.** Leave the
-terminal open — it's what keeps the door open. Every bridge request
-prints in that terminal, live. Press `Ctrl+C` to disconnect remote access.
+On Windows (Command Prompt):
+
+```cmd
+"%USERPROFILE%\.shapes-bridge\shapes-bridge.cmd" status
+```
+
+Replace `status` with any of these commands. No shell profile changes are made.
+
+- `status`: show connection and native permission status.
+- `pause`: disconnect immediately and remain paused across computer restarts.
+- `resume`: reconnect and restore startup at sign-in.
+- `permissions`: request Accessibility and Screen Recording from the installed
+  background process. Use `permissions full_disk_access` or
+  `permissions automation` to open the corresponding macOS settings panel.
+- `awake off` / `awake on`: disable or enable prevention of idle system sleep.
+- `logs`: show recent private activity logs.
+- `uninstall`: stop the service, revoke the account's device credential, and
+  remove automatic startup. Private local logs and runtime files remain for
+  review; remove `~/.shapes-bridge` yourself if you no longer need them. If offline,
+  the local service still stops; run `uninstall` again when online to finish
+  account revocation.
+
+On macOS, grant access to the stable installed **Shapes Bridge** runner when
+the OS requests it. Setup requests permissions from the background service;
+granting Terminal access does not establish that the service has access.
+Accessibility and Screen Recording use native preflight checks. Full Disk
+Access and Automation are separate OS decisions; Automation is also per app,
+so their status remains **unknown** rather than claiming blanket permission.
+The OS may require restarting the connection after a grant (`pause`, then
+`resume`). Password, secure-input, lock-screen, and system-protected UI remain
+subject to OS restrictions. The bridge does not bypass these protections.
+
+Background startup uses a macOS LaunchAgent, Linux user systemd service, or
+Windows Task Scheduler task in the signed-in user's interactive session.
+Linux requires a working user systemd session; graphical control depends on
+the desktop and display server. Windows and Linux report macOS-specific TCC
+permissions as unsupported. Cross-platform service definitions are tested with
+fixtures; real desktop and restart acceptance requires each supported OS.
+
+Keep-awake is enabled by default and can be disabled at setup with `--no-awake`.
+It prevents idle system sleep while the service runs, using `caffeinate`,
+`systemd-inhibit`, or Windows `SetThreadExecutionState`. It does not unlock the
+screen, keep the display lit, override a closed laptop lid, power on a shut-down
+computer, or maintain a connection without internet. The service reconnects
+after wake or network recovery. Automatic startup begins after user sign-in;
+there is no desktop session available before sign-in.
 
 ## Is it safe?
 
-- **Locked with a random secret token**, generated fresh on every run. No token,
-  no access — the server rejects the request. Connect it through the private dialog.
-- **Visible activity.** Every bridge action prints live in your terminal.
+- **Account pairing and chat consent are separate.** Pairing saves the computer
+  to your account; a chat receives access only after an explicit chat grant.
+  The persistent device credential stays in private local state and is never
+  printed in the terminal, browser approval URL, or chat message.
+- **Locked with a random secret token**, generated fresh on each background
+  process start. The server rejects machine actions without it. Endpoint and
+  token changes are registered over the authenticated account connection.
+- **Visible activity.** Bridge actions are recorded in private local logs.
   Delegated agent jobs keep their detailed diagnostics in private local files.
-- **Disconnect immediately.** `Ctrl+C` closes bridge access. A new run means a
-  brand-new URL and token. Agent jobs already started continue until completion
+- **Disconnect immediately.** `pause` closes remote bridge access. Removing the
+  computer in Shapes revokes its device credential; the service notices at its
+  next heartbeat and stops serving. Agent jobs already started continue until completion
   or cancellation; cancel them first if you also want that work to stop.
 - The tunnel is a [Cloudflare quick-tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/)
   — no account, no signup, temporary. The `cloudflared` helper is downloaded once
   and cached under `~/.shapes-bridge/`.
 
-> Treat the `BRIDGE …` line like a password: it grants access to this computer
-> for as long as the terminal stays open. Enter it only in Connect Computer,
-> and quit when you're done.
+There are no new inference calls for pairing, heartbeats, native permission
+checks, or keep-awake: **$0/day added provider inference spend**. Existing task
+and local-agent execution charges still depend on the work you request.
+
+For temporary legacy URL/token connections, run `foreground`. This mode ends
+when its terminal closes. Enter its secret only in the private connection
+dialog, never a chat message.
 
 ## What your Shape can do
 
@@ -67,21 +140,31 @@ These map 1:1 to the `SHAPES_BRIDGE` tool in the Shapes app.
 
 ## Troubleshooting
 
-- **Shape says it can't connect?** The terminal probably got closed. Run the
-  command again and reconnect through Connect Computer.
-- **Wrong token / 401?** Reconnect with the current URL and token through Connect Computer.
-- **Want to stop?** `Ctrl+C` in the terminal. The door closes immediately.
+- **Shape says it can't connect?** Run `status`. Resume a paused connection;
+  check the network and `logs` if it says reconnecting. There is no need to pair again.
+- **Computer removed / revoked?** Run `install` to approve a new pairing.
+- **Permissions denied?** Run `permissions` on that computer and approve the OS
+  prompt. Full Disk Access and per-app Automation may need separate grants.
+- **Installed but offline on macOS?** Use the default location. The OS may
+  prevent a background service from loading code stored in Downloads or Desktop.
+- **Want to stop?** Run `pause`, or `uninstall` to also revoke account access.
 
 ## Development
 
 ```bash
 git clone https://github.com/shapesinc/bridge
 cd bridge
-node bin/cli.js
+node bin/cli.js --help
 ```
 
 Zero runtime dependencies — just Node's standard library. The only external
 piece is the `cloudflared` tunnel binary, fetched on first run.
+
+For isolated development, `install --api-url http://127.0.0.1:8098 --state-dir
+/absolute/private/test-directory --no-open` uses a local pairing service.
+Remote API origins require HTTPS and redirects are rejected. Only one
+background Shapes Bridge service may be installed per OS user; stop the
+previous test installation before choosing a different state directory.
 
 Run `npm test` for the local CLI fixtures and authenticated HTTP tests; they
 make no inference calls. A 2026-10-02 smoke test also exercised a real temporary
@@ -100,8 +183,8 @@ local Codex and Claude Code, then delegate using the agent's existing sign-in
 and settings. You do not need to supply executable paths or shell commands.
 If the computer is not connected, the Shape's **Connect your computer** link
 opens the private setup dialog. **Connect and continue** resumes the request
-after connection succeeds. Restart an older bridge with the current package
-and reconnect to add these endpoints.
+after connection succeeds. Update an older bridge with `install` to add new
+endpoints without changing the saved account pairing.
 
 Discovery runs only version, help, and authentication-status checks. `ready`
 means installed, compatible, and signed in; it does **not** establish provider

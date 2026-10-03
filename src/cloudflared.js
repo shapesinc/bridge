@@ -10,7 +10,8 @@ const path = require("node:path");
 const https = require("node:https");
 const { spawnSync } = require("node:child_process");
 
-const CACHE_DIR = path.join(os.homedir(), ".shapes-bridge");
+const { stateDir } = require("./state");
+const CACHE_DIR = stateDir();
 const RELEASE_BASE = "https://github.com/cloudflare/cloudflared/releases/latest/download";
 
 function assetFor(platform, arch) {
