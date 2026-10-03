@@ -50,6 +50,13 @@ async function startTunnel({ port, log = () => {} }) {
         reject(new Error(`tunnel exited early (code ${code})`));
       }
     });
+    child.on("error", (error) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      }
+    });
   });
 }
 
