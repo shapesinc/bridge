@@ -37,7 +37,7 @@ function banner(url, token) {
     [
       "",
       bar,
-      "  Computer bridge LIVE. Open Connect Computer in Shapes:",
+      "  Computer bridge LIVE. Open Connect Computer in shapes.inc:",
       "",
       `   ${line}`,
       "",
@@ -51,7 +51,7 @@ function banner(url, token) {
 }
 
 async function main() {
-  log("Shapes computer bridge");
+  log("shapes.inc computer bridge");
   const token = crypto.randomBytes(18).toString("base64url");
   const port = (await findOpenPort(8078)) || (await findOpenPort(0));
 

@@ -45,7 +45,7 @@ function serviceDefinition({ platform = process.platform, home = os.homedir(), d
   };
   if (platform === "linux") return {
     file: path.join(home, ".config", "systemd", "user", `${LABEL}.service`),
-    content: `[Unit]\nDescription=Shapes computer connection\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${unitCommandQuote(node)} ${unitCommandQuote(cli)} daemon\nWorkingDirectory=${unitQuote(home)}\nEnvironment=${unitQuote(`PATH=${envPath}`)}\nEnvironment=${unitQuote(`SHAPES_BRIDGE_HOME=${dir}`)}\nRestart=always\nRestartSec=10\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`,
+    content: `[Unit]\nDescription=shapes.inc computer connection\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${unitCommandQuote(node)} ${unitCommandQuote(cli)} daemon\nWorkingDirectory=${unitQuote(home)}\nEnvironment=${unitQuote(`PATH=${envPath}`)}\nEnvironment=${unitQuote(`SHAPES_BRIDGE_HOME=${dir}`)}\nRestart=always\nRestartSec=10\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`,
   };
   if (platform === "win32") return {
     file: path.join(dir, "service-task.xml"),
@@ -57,7 +57,7 @@ function serviceDefinition({ platform = process.platform, home = os.homedir(), d
 function command(binary, args, { optional = false } = {}) {
   const result = spawnSync(binary, args, { encoding: "utf8", windowsHide: true });
   if (!optional && (result.error || result.status !== 0)) {
-    throw new Error(`${binary} could not configure the Shapes background service: ${(result.error?.message || result.stderr || result.stdout || "unknown error").trim()}`);
+    throw new Error(`${binary} could not configure the shapes.inc background service: ${(result.error?.message || result.stderr || result.stdout || "unknown error").trim()}`);
   }
   return result;
 }
@@ -84,7 +84,7 @@ function assertServiceOwner(definition = serviceDefinition()) {
   const cli = runtimePaths().cli;
   const expected = process.platform === "linux" ? unitCommandQuote(cli) : xml(cli);
   if (!current.includes(expected)) {
-    throw new Error("Another Shapes Bridge installation owns this background service. Pause or uninstall that installation before using a different --state-dir.");
+    throw new Error("Another shapes.inc Bridge installation owns this background service. Pause or uninstall that installation before using a different --state-dir.");
   }
 }
 

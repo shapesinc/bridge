@@ -102,14 +102,14 @@ async function runDaemon({ serve = startServer, tunnelFactory = startTunnel, req
             } catch (error) {
               if (error.status === 401) {
                 writeState("config", { ...config, revoked: true });
-                connection = "revoked"; lastError = "This computer was removed from Shapes. Run install to reconnect."; status();
+                connection = "revoked"; lastError = "This computer was removed from shapes.inc. Run install to reconnect."; status();
                 log(lastError);
                 tunnel.child.kill(); server.closeAllConnections?.(); server.close(); awake.stop();
                 while (!stopping) await sleep(60000);
                 return;
               }
               connection = "reconnecting"; lastError = error.message; status();
-              log("Waiting for Shapes; retrying automatically.");
+              log("Waiting for shapes.inc; retrying automatically.");
             }
             if (!stopping && !tunnelExited) await sleep(heartbeatMs);
           }
