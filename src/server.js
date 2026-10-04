@@ -28,7 +28,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { exec, spawn } = require("node:child_process");
 const { URL } = require("node:url");
-const { startJob, getStatus, cancelJob } = require("./codex");
+const { startJob, getStatus, cancelJob, respondJob } = require("./codex");
 const { listAgents } = require("./agents");
 
 const MAX_OUTPUT = 20000;
@@ -59,10 +59,10 @@ function codexReceipt(id, expectedAgent) {
   return receipt;
 }
 
-async function waitForCodex(id, req, res, expectedAgent) {
-  const deadline = Date.now() + 20000;
+async function waitForCodex(id, req, res, expectedAgent, immediate = false) {
+  const deadline = Date.now() + (immediate ? 0 : 20000);
   let status = codexReceipt(id, expectedAgent);
-  while (!CODEX_TERMINAL.has(status.state) && Date.now() < deadline && !req.aborted && !res.destroyed) {
+  while (!CODEX_TERMINAL.has(status.state) && status.state !== "waiting_on_user" && Date.now() < deadline && !req.aborted && !res.destroyed) {
     await new Promise((resolve) => setTimeout(resolve, 250));
     status = codexReceipt(id, expectedAgent);
   }
@@ -241,7 +241,7 @@ function startServer({ port, token }) {
       return sendJson(res, 200, { ok: true });
     }
     if (route === "/capabilities" && method === "GET") {
-      return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES });
+      return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: { interactive_codex: true } });
     }
 
     // Everything below requires the token.
@@ -260,11 +260,12 @@ function startServer({ port, token }) {
           const codexOnly = route === "/codex/start";
           const body = await readBody(req);
           if (!body || typeof body !== "object" || Array.isArray(body)
-              || Object.keys(body).some((key) => !["prompt", "cwd", "workspace_write", ...(codexOnly ? [] : ["agent"])].includes(key))
+              || Object.keys(body).some((key) => !["prompt", "cwd", "workspace_write", "interactive", ...(codexOnly ? [] : ["agent"])].includes(key))
               || typeof body.prompt !== "string" || !body.prompt.trim()
               || (body.cwd !== undefined && typeof body.cwd !== "string")
               || (!codexOnly && body.agent !== undefined && !["auto", "codex", "claude"].includes(body.agent))
-              || (body.workspace_write !== undefined && typeof body.workspace_write !== "boolean")) {
+              || (body.workspace_write !== undefined && typeof body.workspace_write !== "boolean")
+              || (body.interactive !== undefined && typeof body.interactive !== "boolean")) {
             return sendJson(res, 400, { error: "Supply prompt text, optional absolute cwd, boolean workspace_write, and a supported agent on /agents/start." });
           }
           const cwd = body.cwd ? expand(body.cwd) : process.cwd();
@@ -272,6 +273,7 @@ function startServer({ port, token }) {
           log(`AGENT START (${agent}, cwd=${cwd}, scope=${body.workspace_write ? "workspace-write" : "read-only"})`);
           const result = await startJob({
             prompt: body.prompt, cwd, agent,
+            interactive: body.interactive === true,
             sandbox: body.workspace_write ? "workspace-write" : "read-only",
           });
           return sendJson(res, 202, result);
@@ -286,11 +288,27 @@ function startServer({ port, token }) {
         try {
           const id = url.searchParams.get("job_id");
           log(`AGENT STATUS: ${id}`);
-          const result = await waitForCodex(id, req, res, route === "/codex/status" ? "codex" : undefined);
+          const result = await waitForCodex(id, req, res, route === "/codex/status" ? "codex" : undefined, url.searchParams.get("wait") === "0");
           if (!res.destroyed) return sendJson(res, 200, result);
           return;
         } catch (err) {
           return sendJson(res, 400, { error: err.message });
+        }
+      }
+
+      // Human UI service only. Deliberately absent from the model's capabilities
+      // actions: a task may request consent, but cannot answer its own prompt.
+      if (route === "/agents/respond" && method === "POST") {
+        try {
+          const body = await readBody(req);
+          if (!body || typeof body !== "object" || Array.isArray(body)
+              || Object.keys(body).some((key) => !["job_id", "request_id", "response"].includes(key))
+              || typeof body.job_id !== "string" || typeof body.request_id !== "string") {
+            return sendJson(res, 400, { error: "Supply job_id, request_id, and a response." });
+          }
+          return sendJson(res, 200, respondJob(body.job_id, body.request_id, body.response));
+        } catch (error) {
+          return sendJson(res, error.statusCode || 400, { error: error.message });
         }
       }
 
