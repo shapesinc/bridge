@@ -213,8 +213,10 @@ All agent endpoints require the same `X-Token` header as other machine actions:
 - `POST /agents/start` accepts a required `prompt` (up to 64 KiB), optional
   `agent` (`auto`, `codex`, or `claude`; default `auto`), absolute `cwd`
   (default: bridge working directory), and boolean `workspace_write`
-  (default: false). It returns HTTP 202 with `job_id`, `agent`, `state: "queued"`,
-  `cwd`, and `sandbox`. Claude receipts also identify `permission_scope`.
+  (default: false). The authenticated shapes.inc integration can also set
+  `interactive: true` for Codex. It returns HTTP 202 with `job_id`, `agent`,
+  `state: "queued"`, `interactive`, `cwd`, and `sandbox`. Claude receipts also
+  identify `permission_scope`; Claude continues to use its headless runner.
 - If no requested agent is ready, start returns HTTP 409 with
   `error_type: "agent_unavailable"`, `started: false`, and sanitized `agents`.
   No job was created. `auto` chooses a ready agent before execution; it never
@@ -222,12 +224,15 @@ All agent endpoints require the same `X-Token` header as other machine actions:
 - `GET /agents/status?job_id=…` waits up to 20 seconds for a terminal result
   and returns HTTP 200 with the current state, `agent`, `final`, `error`,
   `error_type`, `permission_denials` count, and `thread_id` when reported.
+  `waiting_on_user` returns immediately with a bounded `pending_requests` form;
+  `wait=0` makes any status read immediate. Pending forms are private to the
+  authenticated requesting human, not model tool context or other room members.
 - `POST /agents/cancel` accepts `{"job_id":"…"}`. `cancel_requested` confirms
   the request, not that the process stopped. Check status afterward.
 
 Native responses exclude raw logs and local diagnostic paths. Poll until
-`completed`, `failed`, `cancelled`, or `timed_out`; queued and running jobs are
-not completed work. `completed` confirms a successful agent turn, not that a
+`completed`, `failed`, `cancelled`, or `timed_out`; queued, running, and
+`waiting_on_user` jobs are not completed work. `completed` confirms a successful agent turn, not that a
 purchase or other requested external effect occurred; verify that from the
 actual task result. Codex browser/app permission rejections produce `failed`
 with `error_type: "permission_denied"`, a positive `permission_denials` count,
@@ -248,24 +253,58 @@ Its receipt says `permission_scope: "read-only-tools"` to distinguish this.
 For edits, set `workspace_write: true` and a dedicated Git worktree path. The
 launcher refuses writes in a repository's primary checkout; create the worktree
 first. A directory outside Git can also be used, but has no Git worktree
-protection. Codex uses the workspace-write sandbox with approvals set to
-`never` and extra configured shell writable roots cleared. Its rules, MCP
+protection. Headless Codex uses the workspace-write sandbox with approvals set
+to `never`; interactive Codex uses `on-request` with the human reviewer.
+Extra configured shell writable roots are cleared. Its rules, MCP
 configuration, and model preferences are retained; the shell sandbox does not
 constrain external MCP services.
 
-Codex's background `exec` stream is not an interactive approval channel. It
-cannot show or answer a browser permission prompt through the shapes.inc chat;
-an assistant message saying it asked a question is not proof that a usable
-prompt appeared. The bridge saves `thread_id` as soon as Codex reports it, so
-the existing task can be found while running. Once a task fails on permission,
-open that saved task in Codex on the connected computer to review access and
-continue there. The [desktop thread link](https://learn.chatgpt.com/docs/reference/commands)
-is `codex://threads/THREAD_ID`; it opens the task without approving or restarting
-anything. Browser site permissions and the task's approval settings remain
-under the user's control. The bridge never retries through another browser or
-agent to bypass a denial. Deterministic status detection makes no extra AI calls.
+Interactive Codex jobs use a bidirectional
+[app-server session](https://learn.chatgpt.com/docs/app-server), keeping the
+same thread and task alive during native browser permission requests and user
+questions. They require Codex 0.160.0 or later with app-server support;
+unsupported clients return an update instruction before creating a job.
+The human answers the form in the shapes.inc chat. The backend
+checks the actor, room, original computer connection and still-pending request,
+then calls `POST /agents/respond` with `{job_id, request_id, response}`. The
+response is `{decision: "accept" | "decline" | "cancel", values: {...}}`.
+This endpoint is deliberately absent from the model tool's actions. The bridge
+revalidates against the original native request and accepts each request ID
+once. Cancel stops the job; answering resumes it without starting the task over.
+Native asynchronous questions are recognized only from structured
+`agentMessage` items with `delivery: "async"` and `questions`. If their turn has
+already ended, the job stays waiting. Explicit answers then start one
+continuation in the same thread containing only those answers, never a replay
+of the original task. Question-like prose alone does not create an approval.
 
-Incremental provider cost, estimated October 4, 2026: detection itself adds
+The bridge advertises `features.interactive_codex` on `/capabilities`. Existing
+clients and shared computers retain their established headless behavior. The
+new personal-job integration monitors completion with deterministic polling and
+reports the final result in the original turn. Worker restarts do not replay
+tasks; pending jobs remain inspectable through their authenticated room UI.
+
+Supported prompts are MCP primitive forms, native user questions and one-time
+command approvals. Unknown schemas, URL authentication, device-verification
+proofs and broader filesystem grants stop with `unsupported_approval`;
+ordinary chat consent cannot satisfy them. Hard organization/safety denials
+remain denials. Neither a textual question nor an exit code proves permission
+was granted. Native request IDs, metadata and raw logs are not public receipts.
+Native action-level approval details (`tool_title`, `tool_description` and
+`tool_params`) are shown intact as bounded plain text; an oversized action is
+not approvable through a shortened summary. Other native metadata stays private.
+Browser approval uses the native conversation/turn scope, never a fabricated
+global grant; only command approval is labeled "Allow once".
+The computer owner still controls local code and the token-protected bridge;
+this UI is not an isolation boundary against arbitrary same-user code execution.
+
+The bridge saves `thread_id` immediately. If native access remains blocked,
+the [desktop task link](https://learn.chatgpt.com/docs/reference/commands)
+`codex://threads/THREAD_ID` opens the saved task without granting permission or
+retrying it. The bridge never switches browser or agent to bypass a denial.
+
+Incremental provider cost, estimated October 4, 2026: approval handling and
+deterministic monitoring add no inference calls (**$0/day directly**). For
+legacy clients still polling through the model, detection itself adds
 **$0/day**, but returning the task ID in earlier status replies adds an estimated
 20–40 input tokens per receipt. Fleet traffic and the affected engine mix have
 not been measured; the two inspected incident jobs are not a traffic baseline.
@@ -275,10 +314,21 @@ context (six total exposures), this is 120–240 input tokens/job. Using current
 uncached or $0.50/M cached input tokens gives **$0.006–$0.12/day at 100 jobs/day**
 or **$0.06–$1.20/day at 1,000 jobs/day**. These are explicit scenarios, not an
 observed bill; more polls, other engines, or cache writes change the estimate.
-No classifier, output generation, retry, embedding, or retrieval is added.
+No classifier, extra report generation, retry, embedding, or retrieval is added
+by the monitoring transport; the existing source turn receives the final result.
 Avoided retries/final replies are excluded from these gross increases. Local
-agent plan usage and user credits are separate; neither rate is changed. Tests
-use fake agents and incur $0 in evaluation inference spend.
+agent plan usage and user credits are separate; neither rate is changed.
+Completing a formerly blocked task uses additional inference on the local
+agent account; its engine, token usage, subscription allowance and affected
+daily task volume are unknown. As a usage-priced illustration only, an
+additional 10,000 input / 2,000 output tokens at Opus 5's $5/M input and $25/M
+output would cost $0.10/task ($10/day at 100 such tasks or $100/day at 1,000),
+or $0.055/task if all input receives the $0.50/M cache-read price. Actual
+continuations can be much shorter or longer; these are not shapes.inc provider
+charges or changes to user credit pricing. Automated tests use fake agents
+($0 in evaluation inference spend). One bounded, question-only validation
+probe used the existing local Codex account and its configured gpt-6-astra
+engine; that is one-time local account usage, not recurring shapes.inc spend.
 
 Claude write jobs use `--permission-mode acceptEdits` for this run, so ordinary
 requested edits can proceed. Explicit deny/ask rules, managed policy, MCP

@@ -6,7 +6,8 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn, spawnSync } = require("node:child_process");
 const { StringDecoder } = require("node:string_decoder");
-const { selectAgent, argumentsFor } = require("./agents");
+const { selectAgent, argumentsFor, verifyInteractiveCodex } = require("./agents");
+const { normalizeRequest, nativeResponse } = require("./approvals");
 
 const MAX_OUTPUT = 64 * 1024;
 const MAX_PROMPT = 64 * 1024;
@@ -79,7 +80,7 @@ function validateCwd(value, sandbox) {
   return cwd;
 }
 
-async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex" }) {
+async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex", interactive = false }) {
   if (process.platform === "win32") throw new Error("The local agent launcher currently requires macOS or Linux.");
   if (!["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
   cwd = validateCwd(cwd, sandbox);
@@ -97,17 +98,20 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
   if (!prompt.trim()) throw new Error("Prompt must not be empty.");
   const selected = await selectAgent(agent, cwd);
   agent = selected.id;
+  if (typeof interactive !== "boolean") throw new Error("interactive must be boolean.");
+  interactive = interactive && agent === "codex";
+  if (interactive) await verifyInteractiveCodex(selected, cwd);
   const executable = selected.executable;
   const id = crypto.randomUUID();
   const directory = privateDir(path.join(root(), id));
-  writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable, agent }));
-  saveState(directory, { id, status: "queued", cwd, sandbox, agent, createdAt: new Date().toISOString() });
+  writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable, agent, interactive }));
+  saveState(directory, { id, status: "queued", cwd, sandbox, agent, interactive, createdAt: new Date().toISOString() });
   const child = spawn(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
     detached: true, stdio: "ignore", env: { ...process.env, SHAPES_CODEX_JOB_DIR: root() },
   });
   await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
   child.unref();
-  return { job_id: id, state: "queued", cwd, sandbox, agent,
+  return { job_id: id, state: "queued", cwd, sandbox, agent, interactive,
     ...(agent === "claude" ? { permission_scope: sandbox === "read-only" ? "read-only-tools" : "accept-edits" } : {}) };
 }
 
@@ -147,7 +151,7 @@ function getStatus(id, expectedAgent) {
   const final = readOutput(directory, "result.txt");
   const finalResult = bounded(final, 8000);
   return {
-    job_id: id, state: state.status, agent,
+    job_id: id, state: state.status, agent, interactive: state.interactive === true,
     final: finalResult, error: state.error ? bounded(state.error, 1000) : null,
     cwd: state.cwd, sandbox: state.sandbox, thread_id: typeof state.threadId === "string" ? bounded(state.threadId, 512) : null,
     created_at: state.createdAt, finished_at: state.finishedAt || null,
@@ -161,7 +165,36 @@ function getStatus(id, expectedAgent) {
     diagnostics_available: fs.existsSync(path.join(directory, "stdout.log")) || fs.existsSync(path.join(directory, "stderr.log")),
     diagnostics_directory: directory,
     output_truncated: Boolean(state.stdoutTruncated || state.stderrTruncated || state.resultTruncated || finalResult !== final),
+    // Display one pending prompt at a time, keeping receipts bounded. The next
+    // native request becomes visible after the current one is answered.
+    ...(state.interactive ? { pending_requests: TERMINAL.has(state.status) ? [] : (state.pendingRequests || []).slice(0, 1) } : {}),
   };
+}
+
+function respondJob(id, requestId, response) {
+  const directory = jobDir(id);
+  const state = getStatus(id);
+  if (!UUID.test(requestId || "") || state.state !== "waiting_on_user" || state.cancel_requested
+      || !state.pending_requests?.some((request) => request.id === requestId)) {
+    const error = new Error("This request is no longer waiting for a response.");
+    error.statusCode = 409;
+    throw error;
+  }
+  const request = JSON.parse(fs.readFileSync(path.join(directory, `${requestId}.request.json`), "utf8"));
+  // Validate against the original native schema, not fields supplied by a caller.
+  const result = nativeResponse(request.native, request.display, response);
+  const file = path.join(directory, `${requestId}.response.json`);
+  const temporary = `${file}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify({ result, cancel: response.decision === "cancel" }), { mode: 0o600, flag: "wx" });
+    fs.linkSync(temporary, file); // Atomic publication, and only the first response wins.
+  } catch (error) {
+    if (error.code === "EEXIST") { error.statusCode = 409; error.message = "This request already has a response."; }
+    throw error;
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+  return { job_id: id, request_id: requestId, accepted: true };
 }
 
 function cancelJob(id, expectedAgent) {
@@ -169,6 +202,119 @@ function cancelJob(id, expectedAgent) {
   const state = getStatus(id, expectedAgent);
   if (!TERMINAL.has(state.state)) writePrivate(path.join(directory, "cancel"), "cancel\n");
   return { job_id: id, state: state.state, agent: state.agent, cancel_requested: !TERMINAL.has(state.state) || state.cancel_requested };
+}
+
+async function superviseInteractive(directory, state, request) {
+  const { createCodexRpcSession } = require("./codex-rpc");
+  const pending = new Map();
+  let stopped, failed = false, timer, poll, session;
+  const logs = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  const persist = () => {
+    state.pendingRequests = [...pending.values()].map((value) => value.display);
+    if (!stopped) state.status = pending.size ? "waiting_on_user" : "running";
+    saveState(directory, state);
+  };
+  const clearRequest = (nativeId) => {
+    for (const [id, value] of pending) {
+      if (value.native.id !== nativeId) continue;
+      pending.delete(id);
+      fs.rmSync(path.join(directory, `${id}.request.json`), { force: true });
+      fs.rmSync(path.join(directory, `${id}.response.json`), { force: true });
+    }
+    persist();
+  };
+  const stop = (status) => {
+    if (stopped) return;
+    stopped = status;
+    // Closing owns only this job's app-server process group, including workers.
+    void session?.close();
+  };
+  const onSignal = () => stop("cancelled");
+  Object.assign(state, { supervisorPid: process.pid, status: "running", startedAt: new Date().toISOString() });
+  persist();
+  try {
+    if (fs.existsSync(path.join(directory, "cancel"))) { stopped = "cancelled"; return; }
+    session = createCodexRpcSession({
+      executable: request.executable, cwd: request.cwd, sandbox: request.sandbox,
+      onEvent(value) {
+        if (value.type === "thread.started") { state.threadId = value.thread_id; persist(); }
+        if (value.type === "item.completed" && isCodexPermissionDenial(value.item)) {
+          state.permissionDenials = (state.permissionDenials || 0) + 1;
+          state.errorType = "permission_denied";
+          failed = true;
+          persist();
+        }
+        if (value.type === "turn.failed") failed = true;
+        if (value.type === "item.completed" && value.item?.type === "agent_message") {
+          const result = Buffer.from(value.item.text || "");
+          state.resultTruncated = result.length > MAX_OUTPUT;
+          writePrivate(path.join(directory, "result.txt"), result.subarray(0, MAX_OUTPUT));
+        }
+      },
+      onDiagnostic(kind, chunk) {
+        if (!Object.prototype.hasOwnProperty.call(logs, kind)) return;
+        const combined = Buffer.concat([logs[kind], Buffer.from(chunk)]);
+        if (combined.length > MAX_OUTPUT) state[`${kind}Truncated`] = true;
+        logs[kind] = combined.subarray(Math.max(0, combined.length - MAX_OUTPUT));
+        writePrivate(path.join(directory, `${kind}.log`), logs[kind]);
+      },
+      onServerRequest(native) {
+        try {
+          if (stopped || pending.size >= 16 || Buffer.byteLength(JSON.stringify(native)) > 128 * 1024) throw new Error("Unsupported approval request.");
+          const display = normalizeRequest(native);
+          pending.set(display.id, { native, display });
+          writePrivate(path.join(directory, `${display.id}.request.json`), JSON.stringify({ native, display }));
+          persist();
+        } catch {
+          failed = true;
+          state.errorType = "unsupported_approval";
+          state.error = "This request requires approval in the local app. The computer task stopped without granting it.";
+          stop("failed");
+        }
+      },
+      onRequestResolved({ id: nativeId }) { clearRequest(nativeId); },
+    });
+    process.once("SIGTERM", onSignal);
+    process.once("SIGINT", onSignal);
+    poll = setInterval(() => {
+      if (fs.existsSync(path.join(directory, "cancel"))) { stop("cancelled"); return; }
+      if (stopped) return;
+      for (const [id, value] of pending) {
+        const file = path.join(directory, `${id}.response.json`);
+        if (!fs.existsSync(file)) continue;
+        try {
+          const response = JSON.parse(fs.readFileSync(file, "utf8"));
+          if (response.cancel) { stop("cancelled"); return; }
+          session.respond(value.native.id, response.result);
+          clearRequest(value.native.id);
+        } catch {
+          failed = true;
+          state.error = "The local agent could not accept the response. The task stopped.";
+          stop("failed");
+        }
+      }
+    }, 100);
+    timer = setTimeout(() => stop("timed_out"), request.timeout * 1000);
+    const completion = session.start(request.prompt);
+    state.agentPid = session.child?.pid;
+    persist();
+    const result = await completion;
+    Object.assign(state, { usage: result.usage, exitCode: result.exitCode, signal: result.signal });
+    if (result.status !== "completed") failed = true;
+  } catch {
+    failed = true;
+    state.error ||= "The local agent did not complete successfully. Inspect the private local diagnostics directory.";
+  } finally {
+    clearInterval(poll); clearTimeout(timer);
+    process.removeListener("SIGTERM", onSignal); process.removeListener("SIGINT", onSignal);
+    await session?.close();
+    for (const value of [...pending.values()]) clearRequest(value.native.id);
+    state.pendingRequests = [];
+    state.status = stopped || (failed ? "failed" : "completed");
+    state.finishedAt = new Date().toISOString();
+    if (state.status === "failed" && state.errorType === "permission_denied") state.error = "The local agent was blocked by tool permissions.";
+    saveState(directory, state);
+  }
 }
 
 async function supervise(id) {
@@ -185,6 +331,7 @@ async function supervise(id) {
   const state = loadState(directory);
   const request = JSON.parse(fs.readFileSync(path.join(directory, "request.json"), "utf8"));
   const agent = request.agent || "codex";
+  if (agent === "codex" && request.interactive) return superviseInteractive(directory, state, request);
   let child;
   let poll;
   let deadline;
@@ -310,4 +457,4 @@ async function supervise(id) {
   }
 }
 
-module.exports = { startJob, getStatus, cancelJob, supervise, validateCwd, MAX_OUTPUT };
+module.exports = { startJob, getStatus, cancelJob, respondJob, supervise, validateCwd, MAX_OUTPUT };

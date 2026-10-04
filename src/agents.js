@@ -141,6 +141,18 @@ async function selectAgent(id, cwd) {
   throw error;
 }
 
+async function verifyInteractiveCodex(selected, cwd) {
+  const version = selected.version?.split(".").map(Number);
+  const help = await probe(selected.executable, ["app-server", "--help"], cwd);
+  if (help.failed || help.code !== 0 || !help.output.includes("--listen")
+      || !version || (version[0] === 0 && version[1] < 160)) {
+    const error = new Error("Update Codex on this computer to use interactive permissions and questions.");
+    error.errorType = "agent_unavailable";
+    error.agents = [{ ...publicAgent(selected), available: false, status: "unsupported", reason: error.message }];
+    throw error;
+  }
+}
+
 function argumentsFor(agent, request) {
   if (agent === "codex") return [
     "-a", "never", "exec", "--json", "--color", "never", "--sandbox", request.sandbox,
@@ -162,4 +174,4 @@ function argumentsFor(agent, request) {
   return args;
 }
 
-module.exports = { listAgents, selectAgent, inspectAgent, argumentsFor, desktopClaudeCandidates };
+module.exports = { listAgents, selectAgent, inspectAgent, argumentsFor, desktopClaudeCandidates, verifyInteractiveCodex };
