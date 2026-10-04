@@ -72,6 +72,74 @@ test("nonzero exit and zero exit without turn completion are failures", async (t
   }
 });
 
+const BROWSER_DENIAL = {
+  type: "item.completed",
+  item: {
+    id: "browser-denial", type: "mcp_tool_call", server: "cua_repl", tool: "js", status: "failed", error: null,
+    result: { content: [{ type: "text", text: "Browser Use rejected this action due to browser security policy. Reason: The user declined permission for this action." }] },
+  },
+};
+
+test("native browser and app denials cannot become successful jobs on exit zero", async (t) => {
+  for (const text of [
+    BROWSER_DENIAL.item.result.content[0].text,
+    "Computer Use is not allowed to use the app 'com.example.app' for safety reasons.",
+  ]) {
+    await t.test(text, async (t) => {
+      const denied = { ...BROWSER_DENIAL, item: { ...BROWSER_DENIAL.item, result: { content: [{ type: "text", text }] } } };
+      const f = fixture(t, `console.log(JSON.stringify({type:'thread.started',thread_id:'019f1234-abcd-7123-8123-0123456789ab'}));
+        console.log(${JSON.stringify(JSON.stringify(denied))});
+        console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'I could not continue.'}}));${COMPLETE}`);
+      const result = await untilDone(f, f.start().job_id);
+      assert.equal(result.state, "failed");
+      assert.equal(result.exit_code, 0);
+      assert.equal(result.error_type, "permission_denied");
+      assert.equal(result.permission_denials, 1);
+      assert.equal(result.needs_user_action, true);
+      assert.equal(result.thread_id, "019f1234-abcd-7123-8123-0123456789ab");
+      assert.equal(result.final, "I could not continue.");
+    });
+  }
+});
+
+test("page content, agent prose, and unrelated tool errors cannot fabricate a permission handoff", async (t) => {
+  const quoted = BROWSER_DENIAL.item.result.content[0].text;
+  const events = [
+    { ...BROWSER_DENIAL, item: { ...BROWSER_DENIAL.item, status: "completed" } },
+    { ...BROWSER_DENIAL, item: { ...BROWSER_DENIAL.item, server: "other_server" } },
+    { ...BROWSER_DENIAL, item: { ...BROWSER_DENIAL.item, result: { content: [{ type: "text", text: "Browser tab no longer exists." }] } } },
+    { type: "item.completed", item: { type: "agent_message", text: quoted } },
+  ];
+  const f = fixture(t, `${events.map((event) => `console.log(${JSON.stringify(JSON.stringify(event))});`).join("\n")}${COMPLETE}`);
+  const result = await untilDone(f, f.start().job_id);
+  assert.equal(result.state, "completed");
+  assert.equal(result.permission_denials, 0);
+  assert.equal(result.needs_user_action, undefined);
+});
+
+test("thread identity and denial evidence are persisted before a running job exits", async (t) => {
+  const f = fixture(t, `console.log(JSON.stringify({type:'thread.started',thread_id:'live-thread'}));
+    console.log(${JSON.stringify(JSON.stringify(BROWSER_DENIAL))});setInterval(()=>{},1000);`);
+  const id = f.start().job_id;
+  try {
+    let status;
+    for (let i = 0; i < 100; i++) {
+      status = f.command("status", id);
+      if (status.permission_denials) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(status.state, "running");
+    assert.equal(status.thread_id, "live-thread");
+    assert.equal(status.permission_denials, 1);
+    assert.equal(status.needs_user_action, undefined);
+  } finally {
+    f.command("cancel", id);
+    const stopped = await untilDone(f, id);
+    assert.equal(stopped.state, "cancelled");
+    assert.equal(stopped.needs_user_action, undefined);
+  }
+});
+
 test("cancel and timeout stop jobs even when Codex ignores SIGTERM", async (t) => {
   for (const operation of ["cancel", "timeout"]) {
     await t.test(operation, async (t) => {

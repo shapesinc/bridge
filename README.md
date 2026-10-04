@@ -227,7 +227,12 @@ All agent endpoints require the same `X-Token` header as other machine actions:
 
 Native responses exclude raw logs and local diagnostic paths. Poll until
 `completed`, `failed`, `cancelled`, or `timed_out`; queued and running jobs are
-not completed work. Only `completed` confirms success. Claude requires an
+not completed work. `completed` confirms a successful agent turn, not that a
+purchase or other requested external effect occurred; verify that from the
+actual task result. Codex browser/app permission rejections produce `failed`
+with `error_type: "permission_denied"`, a positive `permission_denials` count,
+and `needs_user_action: true`, even if the CLI exits zero after explaining the
+blocker. Cancellation and timeout retain their own states. Claude requires an
 explicit successful result, a nonempty final answer, exit code zero, and no
 reported permission denials. Assistant text or tool activity alone never
 counts as completion. Error details remain in private local diagnostics.
@@ -247,6 +252,19 @@ protection. Codex uses the workspace-write sandbox with approvals set to
 `never` and extra configured shell writable roots cleared. Its rules, MCP
 configuration, and model preferences are retained; the shell sandbox does not
 constrain external MCP services.
+
+Codex's background `exec` stream is not an interactive approval channel. It
+cannot show or answer a browser permission prompt through the shapes.inc chat;
+an assistant message saying it asked a question is not proof that a usable
+prompt appeared. The bridge saves `thread_id` as soon as Codex reports it, so
+the existing task can be found while running. Once a task fails on permission,
+open that saved task in Codex on the connected computer to review access and
+continue there. The [desktop thread link](https://learn.chatgpt.com/docs/reference/commands)
+is `codex://threads/THREAD_ID`; it opens the task without approving or restarting
+anything. Browser site permissions and the task's approval settings remain
+under the user's control. The bridge never retries through another browser or
+agent to bypass a denial. Deterministic status detection adds **$0/day** in
+provider inference spend and makes no extra AI calls.
 
 Claude write jobs use `--permission-mode acceptEdits` for this run, so ordinary
 requested edits can proceed. Explicit deny/ask rules, managed policy, MCP

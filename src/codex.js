@@ -13,6 +13,18 @@ const MAX_PROMPT = 64 * 1024;
 const TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+// Only inspect failed native tool results. A page or an agent's prose can quote
+// a denial without establishing that the runtime actually refused an action.
+function isCodexPermissionDenial(item) {
+  if (item?.type !== "mcp_tool_call" || item.server !== "cua_repl" || item.status !== "failed") return false;
+  const content = item.result?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((part) => part?.type === "text" && typeof part.text === "string" && (
+    part.text.startsWith("Browser Use rejected this action due to browser security policy.")
+    || /^Computer Use is not allowed to use the app '[^'\n]+' for safety reasons\.$/.test(part.text.trim())
+  ));
+}
+
 function privateDir(directory) {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const stat = fs.lstatSync(directory);
@@ -142,6 +154,8 @@ function getStatus(id, expectedAgent) {
     exit_code: state.exitCode ?? null,
     error_type: state.errorType || null,
     permission_denials: state.permissionDenials || 0,
+    ...(state.errorType === "permission_denied" && state.status === "failed"
+      ? { needs_user_action: true } : {}),
     ...(agent === "claude" ? { permission_scope: state.sandbox === "read-only" ? "read-only-tools" : "accept-edits" } : {}),
     cancel_requested: fs.existsSync(path.join(directory, "cancel")),
     diagnostics_available: fs.existsSync(path.join(directory, "stdout.log")) || fs.existsSync(path.join(directory, "stderr.log")),
@@ -229,7 +243,17 @@ async function supervise(id) {
         writePrivate(path.join(directory, "result.txt"), result.subarray(0, MAX_OUTPUT));
         return;
       }
-      if (value.type === "thread.started") state.threadId = value.thread_id;
+      if (value.type === "thread.started" && typeof value.thread_id === "string") {
+        state.threadId = value.thread_id;
+        // The desktop task must be discoverable while the job is still running.
+        saveState(directory, state);
+      }
+      if (value.type === "item.completed" && isCodexPermissionDenial(value.item)) {
+        state.permissionDenials = (state.permissionDenials || 0) + 1;
+        state.errorType = "permission_denied";
+        turnFailed = true;
+        saveState(directory, state);
+      }
       if (value.type === "turn.completed") { turnCompleted = true; state.usage = value.usage; }
       if (value.type === "turn.failed" || value.type === "error") turnFailed = true;
       if (value.type === "item.completed" && value.item?.type === "agent_message") {
@@ -275,7 +299,7 @@ async function supervise(id) {
     finish(stopped || (success ? "completed" : "failed"), {
       ...exit,
       ...(!stopped && !success ? {
-        error: state.errorType === "permission_denied" ? "The local agent was blocked by configured tool permissions. Inspect its local permissions before retrying."
+        error: state.errorType === "permission_denied" ? "The local agent was blocked by tool permissions. This background runner cannot handle interactive approval; review access in the local agent before continuing."
           : "The local agent did not complete successfully. Inspect the private local diagnostics directory.",
         errorType: state.errorType || (exit.exitCode === 0 ? "missing_completion" : "process_error"),
       } : {}),
