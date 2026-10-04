@@ -63,6 +63,20 @@ test("MCP form constraints reject widened or missing answers", () => {
   }
 });
 
+test("required MCP strings allow an explicit empty value unless constrained, while native questions need an answer", () => {
+  const request = browser();
+  request.params.requestedSchema = { type: "object", required: ["notes", "choice"], properties: {
+    notes: { type: "string" }, choice: { type: "string", enum: ["", "Other"] },
+  } };
+  const display = normalizeRequest(request);
+  assert.throws(() => nativeResponse(request, display, { decision: "accept", values: {} }));
+  assert.deepEqual(nativeResponse(request, display, { decision: "accept", values: { notes: "", choice: "" } }).content, { notes: "", choice: "" });
+  request.params.requestedSchema.properties.notes.minLength = 1;
+  assert.throws(() => nativeResponse(request, normalizeRequest(request), { decision: "accept", values: { notes: "", choice: "" } }));
+  const question = { method: "item/tool/requestUserInput", params: { questions: [{ id: "size", question: "Which size?" }] } };
+  assert.throws(() => nativeResponse(question, normalizeRequest(question), { decision: "accept", values: { size: "" } }));
+});
+
 test("unsupported verification, schemas, secrets and oversized prompts never become approvable", () => {
   for (const mode of ["openai/userVerification", "url"]) {
     const request = browser(); request.params.mode = mode;

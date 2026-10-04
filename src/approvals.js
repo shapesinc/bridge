@@ -58,6 +58,7 @@ function formFields(schema) {
     }
     if (property.type === "string") {
       const choices = options(property);
+      field.min_length ??= 0;
       field.max_length = Math.min(field.max_length ?? 4000, 4000);
       return { ...field, type: choices ? "select" : "text", ...(choices ? { options: choices } : {}) };
     }
@@ -106,7 +107,7 @@ function normalizeRequest(request) {
         value: text(option.label, 500), label: text(option.description ? `${option.label} — ${option.description}` : option.label, 1000),
       })) : undefined;
       if (choices && choices.length > 30) throw new Error("Too many options.");
-      return { id: key(question.id), label: text(question.question, 1000), required: true, max_length: 4000,
+      return { id: key(question.id), label: text(question.question, 1000), required: true, min_length: 1, max_length: 4000,
         type: choices ? "select" : "text", ...(choices ? { options: choices, allow_custom: question.isOther === true } : {}) };
     });
   } else if (request.method === "item/commandExecution/requestApproval") {
@@ -144,7 +145,7 @@ function validateValue(field, property, value) {
         || (property?.maxItems != null && value.length > property.maxItems)) throw new Error("Choose valid options.");
   } else {
     text(value, 4000);
-    if ((field.required && !value.trim())
+    if ((field.required && !property && !value.trim())
         || (property?.minLength != null && [...value].length < property.minLength)
         || (property?.maxLength != null && [...value].length > property.maxLength)
         || (field.options && !field.allow_custom && !field.options.some((option) => option.value === value))) throw new Error("Enter a valid answer.");
