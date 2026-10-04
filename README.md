@@ -263,8 +263,22 @@ continue there. The [desktop thread link](https://learn.chatgpt.com/docs/referen
 is `codex://threads/THREAD_ID`; it opens the task without approving or restarting
 anything. Browser site permissions and the task's approval settings remain
 under the user's control. The bridge never retries through another browser or
-agent to bypass a denial. Deterministic status detection adds **$0/day** in
-provider inference spend and makes no extra AI calls.
+agent to bypass a denial. Deterministic status detection makes no extra AI calls.
+
+Incremental provider cost, estimated October 4, 2026: detection itself adds
+**$0/day**, but returning the task ID in earlier status replies adds an estimated
+20–40 input tokens per receipt. Fleet traffic and the affected engine mix have
+not been measured; the two inspected incident jobs are not a traffic baseline.
+With three status reads per job and full reuse of prior receipts in later
+context (six total exposures), this is 120–240 input tokens/job. Using current
+[OpenRouter catalog](https://openrouter.ai/api/v1/models) Opus 5 rates of $5/M
+uncached or $0.50/M cached input tokens gives **$0.006–$0.12/day at 100 jobs/day**
+or **$0.06–$1.20/day at 1,000 jobs/day**. These are explicit scenarios, not an
+observed bill; more polls, other engines, or cache writes change the estimate.
+No classifier, output generation, retry, embedding, or retrieval is added.
+Avoided retries/final replies are excluded from these gross increases. Local
+agent plan usage and user credits are separate; neither rate is changed. Tests
+use fake agents and incur $0 in evaluation inference spend.
 
 Claude write jobs use `--permission-mode acceptEdits` for this run, so ordinary
 requested edits can proceed. Explicit deny/ask rules, managed policy, MCP
