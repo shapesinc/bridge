@@ -15,6 +15,7 @@ if (stateIndex !== -1) {
 const { stateDir, ensureStateDir, readState, writeState, removeState } = require("../src/state");
 const { DEFAULT_API, validateApi, pairDevice, apiRequest } = require("../src/account");
 const { startService, stopService, runtimePaths } = require("../src/service");
+const { routeBrowserCommand, routeStatusLine } = require("../src/browser-route/command");
 
 const log = (value) => process.stdout.write(`${value}\n`);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -24,6 +25,16 @@ function option(name, fallback) {
   if (index === -1) return fallback;
   if (!argv[index + 1] || argv[index + 1].startsWith("--")) throw new Error(`${name} needs a value.`);
   return argv[index + 1];
+}
+
+function ask(question) {
+  const readline = require("node:readline");
+  const prompt = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    let answered = false;
+    prompt.on("close", () => { if (!answered) resolve(""); });
+    prompt.question(question, (answer) => { answered = true; prompt.close(); resolve(answer); });
+  });
 }
 
 function openBrowser(url) {
@@ -41,12 +52,13 @@ function showStatus() {
   const recent = status?.updated_at && Date.now() - Date.parse(status.updated_at) < 90000;
   const connection = config.paused ? "paused" : config.revoked ? "revoked" : recent ? status.connection : "offline";
   log(`shapes.inc Bridge: ${connection}\nComputer: ${config.name}\nKeep awake: ${config.keep_awake === false ? "off" : "on"}`);
+  log(routeStatusLine(config, recent && !config.paused && !config.revoked ? status : null));
   if (status?.last_heartbeat) log(`Last connected: ${status.last_heartbeat}`);
   if (recent && status?.permissions) {
     for (const [name, value] of Object.entries(status.permissions)) log(`${name.replace(/_/g, " ")}: ${value}`);
   }
   if (recent && status?.error) log(status.error);
-  log("Manage computers and chat access in shapes.inc. Local controls: status, pause, resume, permissions, logs, uninstall.");
+  log("Manage computers and chat access in shapes.inc. Local controls: status, pause, resume, permissions, route-browser, logs, uninstall.");
 }
 
 async function install() {
@@ -102,7 +114,7 @@ async function main() {
     return;
   }
   if (["--help", "help", "-h"].includes(command)) {
-    log("shapes.inc Bridge\n  install       Pair once and install the background connection\n  status        Connection and native permission status\n  pause         Disconnect and stop automatic startup\n  resume        Reconnect and restore automatic startup\n  permissions [accessibility|screen_recording|full_disk_access|automation]\n                Ask the installed background runner for OS access\n  awake on|off  Keep the computer awake while connected\n  logs          Recent local activity (may contain private command text)\n  uninstall     Revoke account access and remove the background service\n  foreground    Temporary legacy connection until the terminal closes\n\nInstall options: --name <name>, --no-open, --no-awake\nDevelopment: --api-url http://127.0.0.1:<port>, --state-dir <directory>");
+    log("shapes.inc Bridge\n  install       Pair once and install the background connection\n  status        Connection and native permission status\n  pause         Disconnect and stop automatic startup\n  resume        Reconnect and restore automatic startup\n  permissions [accessibility|screen_recording|full_disk_access|automation]\n                Ask the installed background runner for OS access\n  awake on|off  Keep the computer awake while connected\n  route-browser on|off [--yes]\n                Let your agent's browser use this computer's internet connection\n                for your own messages in shapes.inc; off stops it at once\n  logs          Recent local activity (may contain private command text)\n  uninstall     Revoke account access and remove the background service\n  foreground    Temporary legacy connection until the terminal closes\n\nInstall options: --name <name>, --no-open, --no-awake\nDevelopment: --api-url http://127.0.0.1:<port>, --state-dir <directory>");
     return;
   }
   const config = readState("config");
@@ -130,6 +142,11 @@ async function main() {
     writeState("config", { ...config, keep_awake: argv[1] === "on" });
     if (!config.paused && !config.revoked) startService();
     log(`Keep awake ${argv[1]}.`);
+  } else if (command === "route-browser") {
+    await routeBrowserCommand({
+      action: argv[1], yes: argv.includes("--yes"), config, request: apiRequest,
+      writeConfig: (next) => writeState("config", next), restart: () => startService(), ask, log,
+    });
   } else if (command === "uninstall") {
     stopService({ remove: true });
     writeState("config", { ...config, paused: true });

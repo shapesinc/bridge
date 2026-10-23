@@ -62,6 +62,8 @@ Replace `status` with any of these commands. No shell profile changes are made.
   background process. Use `permissions full_disk_access` or
   `permissions automation` to open the corresponding macOS settings panel.
 - `awake off` / `awake on`: disable or enable prevention of idle system sleep.
+- `route-browser on` / `route-browser off`: let your agent's browser use this
+  computer's internet connection, or stop it at once (see below).
 - `logs`: show recent private activity logs.
 - `uninstall`: stop the service, revoke the account's device credential, and
   remove automatic startup. Private local logs and runtime files remain for
@@ -93,6 +95,41 @@ screen, keep the display lit, override a closed laptop lid, power on a shut-down
 computer, or maintain a connection without internet. The service reconnects
 after wake or network recovery. Automatic startup begins after user sign-in;
 there is no desktop session available before sign-in.
+
+## Agent browsing through this computer
+
+When your agent opens sites for you in its cloud browser, it can use this
+computer's internet connection instead of a shared one. Sites then see your
+home internet and location, as if you were browsing yourself: prices, stock
+and delivery are for where you are. It is off until you turn it on:
+
+```bash
+~/.shapes-bridge/shapes-bridge route-browser on
+```
+
+- **You choose, on this computer.** `route-browser on` explains what it does
+  and asks before anything changes. It can't be turned on from a chat.
+- **Only your own messages in shapes.inc.** Routines, automatic follow-ups and
+  other people in a shared chat never use it.
+- **Off at once.** `route-browser off` stops it on this computer first, even
+  without internet, and every open connection drops immediately. `pause` and
+  `uninstall` stop it too.
+- **What Bridge sees:** the names of the sites and how many bytes went each
+  way, never page contents. The site's encryption runs between the agent's
+  browser and the site (plain `http://` pages are the exception, as with any
+  proxy). Logs keep counts only, no site names.
+- **Your own network stays out of it.** Bridge refuses your router, printers,
+  NAS, anything on this computer, and other private addresses, checked after
+  its own DNS lookup so a public name pointing inside is refused too. Only the
+  web's ports (80 and 443) are allowed, up to 2 GB a day.
+- **Nothing is opened on your computer.** Bridge holds one outgoing, encrypted
+  connection to the shapes.inc relay; the Cloudflare tunnel isn't involved.
+  When this computer is asleep or offline, the agent's browser uses its usual
+  connection.
+
+`status` shows `Agent browsing through this computer: on` (with how many
+connections are open now) or `off`. It adds no inference calls: **$0/day added
+provider inference spend**.
 
 ## Is it safe?
 

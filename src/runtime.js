@@ -9,6 +9,7 @@ const { apiRequest } = require("./account");
 const { stateDir, readState, writeState, removeState } = require("./state");
 const { keepAwake } = require("./awake");
 const { getPermissions, requestPermissions } = require("./permissions");
+const { startBrowserRoute } = require("./browser-route");
 
 function enablePrivateLog() {
   const file = path.join(stateDir(), "service.log");
@@ -29,24 +30,45 @@ function enablePrivateLog() {
 
 async function runDaemon({ serve = startServer, tunnelFactory = startTunnel, request = apiRequest,
   permissions = getPermissions, requestNativePermissions = requestPermissions, awakeFactory = keepAwake,
-  signal, heartbeatMs = 30000, retryMs = 1000 } = {}) {
+  routeFactory = startBrowserRoute, signal, heartbeatMs = 30000, retryMs = 1000, routeStatusMs = 1000 } = {}) {
   const config = readState("config");
   if (!config?.device_token) throw new Error("Run shapes-bridge install to connect this computer.");
-  let stopping = false, server, tunnel, awake, permissionBusy = false;
+  let previous = null;
+  try { previous = readState("status"); } catch { /* A damaged status file only loses today's byte count. */ }
+  let stopping = false, server, tunnel, awake, route, routeStatusTimer, permissionBusy = false;
   let permissionState = {}, connection = "starting", lastHeartbeat = null, lastError = null, registeredEndpoint = null;
   let wake;
   const sleep = (ms) => new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
     wake = () => { clearTimeout(timer); resolve(); };
   });
+  const routeStatus = () => {
+    const current = route?.status();
+    return {
+      browser_route: current?.state || "off", browser_route_open: current?.open || 0,
+      browser_route_bytes_today: current?.bytes_today || 0, browser_route_day: current?.day || new Date().toDateString(),
+    };
+  };
   const status = () => writeState("status", {
     pid: process.pid, device_id: config.device_id, name: config.name,
     local_port: server?.address()?.port || null,
     connection, last_heartbeat: lastHeartbeat, updated_at: new Date().toISOString(),
-    permissions: permissionState, error: lastError,
+    permissions: permissionState, error: lastError, ...routeStatus(),
   });
+  // Route activity comes in bursts (a page opens dozens of connections): write status at most once a second.
+  const routeChanged = () => {
+    if (routeStatusTimer) return;
+    routeStatusTimer = setTimeout(() => {
+      routeStatusTimer = null;
+      try { status(); } catch { /* A full disk must not crash the connection. */ }
+    }, routeStatusMs);
+    routeStatusTimer.unref();
+  };
   const log = (message) => process.stdout.write(`[${new Date().toISOString()}] ${message}\n`);
-  const shutdown = () => { stopping = true; wake?.(); tunnel?.child.kill(); server?.closeAllConnections?.(); server?.close(); awake?.stop(); };
+  const shutdown = () => {
+    stopping = true; wake?.(); route?.stop(); clearTimeout(routeStatusTimer); routeStatusTimer = null;
+    tunnel?.child.kill(); server?.closeAllConnections?.(); server?.close(); awake?.stop();
+  };
   if (signal?.aborted) stopping = true;
   signal?.addEventListener("abort", shutdown, { once: true });
   process.on("SIGINT", shutdown);
@@ -80,6 +102,15 @@ async function runDaemon({ serve = startServer, tunnelFactory = startTunnel, req
     server = await serve({ port: 0, token });
     awake = awakeFactory({ enabled: config.keep_awake !== false });
     await refreshPermissions();
+    // Agent browsing through this computer: only with the person's own consent (route-browser on).
+    if (config.route_browser === true && !stopping) {
+      route = routeFactory({
+        config, request, log, onChange: routeChanged,
+        // A 401 means this computer was removed: run the next heartbeat now so revocation is handled once, there.
+        onRevoked: () => wake?.(),
+        usage: previous?.browser_route_day ? { day: previous.browser_route_day, bytes: previous.browser_route_bytes_today } : undefined,
+      });
+    }
     const permissionTimer = setInterval(() => {
       if (fs.existsSync(path.join(stateDir(), "permission-request.json"))) void refreshPermissions();
     }, 1000);
@@ -104,7 +135,7 @@ async function runDaemon({ serve = startServer, tunnelFactory = startTunnel, req
                 writeState("config", { ...config, revoked: true });
                 connection = "revoked"; lastError = "This computer was removed from shapes.inc. Run install to reconnect."; status();
                 log(lastError);
-                tunnel.child.kill(); server.closeAllConnections?.(); server.close(); awake.stop();
+                route?.stop(); tunnel.child.kill(); server.closeAllConnections?.(); server.close(); awake.stop();
                 while (!stopping) await sleep(60000);
                 return;
               }

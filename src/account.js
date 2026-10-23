@@ -24,6 +24,8 @@ async function apiRequest(api, route, body, token, method = "POST", timeoutMs = 
   if (!response.ok) {
     const error = new Error(`shapes.inc connection request failed (HTTP ${response.status}).`);
     error.status = response.status;
+    // shapes.inc explains some refusals ({code, error}); callers show that text, never the raw body.
+    try { error.body = await response.json(); } catch { /* Not JSON: the status is enough. */ }
     throw error;
   }
   return response.json();

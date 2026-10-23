@@ -41,3 +41,15 @@ test("redirects cannot forward the saved device token to another host", async ()
   try { await assert.rejects(apiRequest(`http://127.0.0.1:${server.address().port}`, "/devices/heartbeat", {}, "secret")); }
   finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); }
 });
+
+test("a refusal keeps shapes.inc's code and reason for the CLI to show", async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(403, { "content-type": "application/json" });
+    res.end(JSON.stringify({ success: false, code: "not_available", error: "Not on your account yet." }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    await assert.rejects(apiRequest(`http://127.0.0.1:${server.address().port}`, "/devices/browser-route", { enabled: true }, "secret"),
+      { status: 403, body: { success: false, code: "not_available", error: "Not on your account yet." } });
+  } finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); }
+});
