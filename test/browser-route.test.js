@@ -360,6 +360,36 @@ test("the route asks shapes.inc for a new token whenever the relay refuses one",
   }
 });
 
+test("the early refresh hands the relay its fresh token on the open connection, and a reconnect uses it", async (t) => {
+  const texts = [];
+  const server = await wsServer({ onConnection: (peer) => {
+    peer.on("frame", (frame) => { if (frame.opcode === 0x1) texts.push(JSON.parse(frame.payload)); });
+  } });
+  let calls = 0;
+  const route = startBrowserRoute({
+    config: { api: "https://api.shapes.inc", device_token: "saved-identity" },
+    // The first token is short-lived so its 80% refresh lands inside the test; the next one lasts.
+    request: async () => {
+      calls++;
+      return { success: true, enabled: true, relay_url: server.url, relay_token: `token-${calls}`, expires_in: calls === 1 ? 0.1 : 43200 };
+    },
+    deviceFactory: (options) => startDevice({ ...options, retryMs: 1 }),
+    minRefreshMs: 0,
+  });
+  t.after(() => { route.stop(); server.close(); });
+
+  await until(() => texts.length === 1, "the in-band token");
+  assert.deepEqual(texts, [{ type: "token", token: "token-2" }]);
+  // No reconnect: the same connection carries on with the new token.
+  assert.deepEqual(server.attempts, ["Bearer token-1"]);
+  assert.equal(route.status().state, "on");
+
+  server.peers[0].socket.destroy();
+  await until(() => server.attempts.length === 2 && route.status().state === "on", "the reconnect");
+  assert.equal(server.attempts[1], "Bearer token-2");
+  assert.equal(calls, 2);
+});
+
 test("the route stays off when shapes.inc doesn't offer it, and hands a 401 to revocation", async () => {
   const config = { api: "https://api.shapes.inc", device_token: "saved-identity" };
   let devices = 0;

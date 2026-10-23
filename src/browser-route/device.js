@@ -50,12 +50,13 @@ const today = () => new Date().toDateString();
  *   onActivity(event): {type: "open" | "close" | "refused" | "connected" | "offline", host?, reason?, bytes?}.
  *   onTokenRefused(): the relay refused the token (close code 4401, or HTTP 401 on connect). Instead of
  *     reconnecting with the same token, the device waits for update({token}) with a fresh one.
- *     Without it, the device stops reconnecting.
+ *     Without it, the device stops reconnecting. A refused in-band token (see update) also closes with 4401.
  */
 function startDevice({ url, token, ports = WEB_PORTS, dailyBytes = Infinity, usage: initialUsage, allowPrivate = false,
   lookup = dns.lookup, onActivity = () => {}, onTokenRefused, reconnect = true, connect: openSocket = connectWebSocket,
   retryMs = 1_000, idleTimeoutMs = IDLE_TIMEOUT_MS } = {}) {
   let socket;
+  let socketUrl; // the relay the open socket went to
   let stopped = false;
   let paused = false;
   let waitingForToken = false;
@@ -128,6 +129,7 @@ function startDevice({ url, token, ports = WEB_PORTS, dailyBytes = Infinity, usa
       return;
     }
     socket = current;
+    socketUrl = url;
     const mux = new Mux((bytes) => current.readyState === OPEN && current.send(bytes));
     mux.onOpen = serve(mux);
     current.on("open", () => {
@@ -161,13 +163,20 @@ function startDevice({ url, token, ports = WEB_PORTS, dailyBytes = Infinity, usa
       clearTimeout(retryTimer);
       socket?.terminate();
     },
-    /** A fresh token (and relay address) for the next connection; connects now if one was being waited for. */
+    /**
+     * A fresh token (and relay address). While connected to that same relay, the token goes over the open
+     * connection ({"type":"token"} text frame), so the relay extends it instead of closing it at the old
+     * token's expiry; it's also kept for the next connection. Connects now if one was being waited for.
+     */
     update(next = {}) {
+      const fresh = next.token && next.token !== token;
       if (next.url) url = next.url;
       if (next.token) token = next.token;
       if (waitingForToken && !stopped) {
         waitingForToken = false;
         connect();
+      } else if (fresh && socket?.readyState === OPEN && socketUrl === url) {
+        socket.sendText(JSON.stringify({ type: "token", token }));
       }
     },
     pause() { paused = true; },

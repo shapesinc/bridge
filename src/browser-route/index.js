@@ -116,7 +116,8 @@ function startBrowserRoute({ config, request, log = () => {}, onChange = () => {
     attempts = 0;
     if (device) device.update(grant);
     else device = deviceFactory({ url: grant.url, token: grant.token, dailyBytes, usage: lastUsage, onActivity, onTokenRefused });
-    // Ask for the next token at 80% of this one's life, so a reconnect never uses an expired one.
+    // Ask for the next token at 80% of this one's life. The device hands it to the relay over the open
+    // connection (which then stays up past the old token's expiry) and uses it for any reconnect.
     schedule(Math.max(minRefreshMs, grant.expiresInMs * 0.8));
   }
 

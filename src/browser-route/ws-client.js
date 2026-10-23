@@ -128,6 +128,12 @@ class WebSocketClient extends EventEmitter {
     return this.socket.write(encodeFrame(BINARY, data));
   }
 
+  /** Sends one text message (the relay's control messages, such as a fresh token). */
+  sendText(text) {
+    if (this.readyState !== OPEN) return false;
+    return this.socket.write(encodeFrame(TEXT, Buffer.from(String(text), "utf8")));
+  }
+
   /** Starts the closing handshake; the socket is dropped if the relay doesn't answer within 5 s. */
   close(code = 1000, reason = "") {
     if (this.readyState === CONNECTING) return this.terminate();
