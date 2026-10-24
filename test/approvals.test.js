@@ -101,3 +101,46 @@ test("commands offer only native one-time choices and show the exact command", (
   assert.throws(() => nativeResponse(request, display, { decision: "accept" }));
   assert.deepEqual(nativeResponse(request, display, { decision: "decline" }), { decision: "decline" });
 });
+
+test("native personal questions and MCP metadata carry explicit autofill semantics without answering", () => {
+  const ref = { section: "contact", field: "email" };
+  const native = { method: "item/tool/requestUserInput", params: { subject: "self", questions: [
+    { id: "reach", question: "Your email", autofill: ref },
+  ] } };
+  const display = normalizeRequest(native);
+  assert.equal(display.subject, "self");
+  assert.deepEqual(display.fields[0].autofill, ref);
+  assert.throws(() => nativeResponse(native, display, {}));
+  assert.deepEqual(nativeResponse(native, display, { decision: "accept", values: { reach: "synthetic@example.invalid" } }),
+    { answers: { reach: { answers: ["synthetic@example.invalid"] } } });
+
+  const mcp = browser();
+  mcp.params.requestedSchema = { type: "object", required: ["reach"], properties: { reach: { type: "string", format: "email" } } };
+  mcp.params._meta["shapes.inc/autofill"] = { subject: "self", fields: { reach: ref } };
+  const mcpDisplay = normalizeRequest(mcp);
+  assert.equal(mcpDisplay.subject, "self");
+  assert.deepEqual(mcpDisplay.fields[0].autofill, ref);
+  assert.deepEqual(nativeResponse(mcp, mcpDisplay, { decision: "accept", values: { reach: "synthetic@example.invalid" } }),
+    { action: "accept", content: { reach: "synthetic@example.invalid" } });
+  assert.deepEqual(nativeResponse(mcp, mcpDisplay, { decision: "cancel", values: {} }), { action: "cancel", content: null });
+});
+
+test("unannotated, other-person, secret, invalid and permission fields never become autofill", () => {
+  const question = { id: "email", question: "Your email", autofill: { section: "contact", field: "email" } };
+  for (const subject of [undefined, "other", "SELF", true]) {
+    const display = normalizeRequest({ method: "item/tool/requestUserInput", params: { subject, questions: [question] } });
+    assert.equal(display.fields[0].autofill, undefined);
+    assert.equal(display.subject, subject === "other" ? "other" : undefined);
+  }
+  for (const autofill of [{ section: "contact", field: "password" }, { section: "travel", field: "card_number" },
+    { section: "contact", field: "email", owner: "other" }, { section: "__proto__", field: "email" }, null]) {
+    const display = normalizeRequest({ method: "item/tool/requestUserInput", params: { subject: "self", questions: [{ ...question, autofill }] } });
+    assert.equal(display.fields[0].autofill, undefined);
+  }
+  assert.throws(() => normalizeRequest({ method: "item/tool/requestUserInput", params: { subject: "self", questions: [{ ...question, isSecret: true }] } }));
+  const permission = browser();
+  permission.params._meta["shapes.inc/autofill"] = { subject: "self", fields: { email: question.autofill } };
+  assert.equal(normalizeRequest(permission).subject, undefined);
+  const duplicate = normalizeRequest({ method: "item/tool/requestUserInput", params: { subject: "self", questions: [question, { ...question, id: "second" }] } });
+  assert.equal(duplicate.fields.some((field) => field.autofill), false);
+});

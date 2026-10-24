@@ -155,13 +155,13 @@ test("nonblocking questions stay pending while other work continues", async (t) 
   assert.equal((await running).status, "completed");
 });
 
-function asyncQuestionFixture(t, { early = false, multiple = false } = {}) {
+function asyncQuestionFixture(t, { early = false, multiple = false, autofill = false } = {}) {
   return fixture(t, `
     if(m.method==='turn/start'){
       const starts=input.filter(x=>x.method==='turn/start');
       if(starts.length===1){
         reply(m,{turn:{id:'turn-1'}});
-        const question=id=>({id,type:'agentMessage',text:'Which fixture word?',phase:'final_answer',delivery:'async',questions:[{title:'Which fixture word?',options:['Alpha','Beta']}]});
+        const question=id=>({id,type:'agentMessage',text:'Which fixture word?',phase:'final_answer',delivery:'async',${autofill ? "subject:'self'," : ""}questions:[{title:'Which fixture word?',options:['Alpha','Beta']${autofill ? ",autofill:{section:'personal',field:'first_name'}" : ""}}]});
         const items=[question('question-1')${multiple ? ",question('question-2')" : ""}];
         for(const item of items)send({method:'item/completed',params:{threadId:'thread-1',turnId:'turn-1',item}});
         send({method:'thread/tokenUsage/updated',params:{threadId:'thread-1',turnId:'turn-1',tokenUsage:{last:{inputTokens:10,outputTokens:2},total:{inputTokens:30,outputTokens:5,totalTokens:35}}}});
@@ -205,6 +205,21 @@ test("native async question survives final text and resumes once after a late an
   assert.doesNotMatch(starts[1].params.input[0].text, /Original task/);
   assert.equal(f.input().some((message) => message.id === request.id), false);
   assert.equal(f.events.filter((event) => event.type === "turn.completed").length, 1);
+});
+
+test("async question metadata survives the real RPC producer and only resumes on a human response", async (t) => {
+  const { normalizeRequest, nativeResponse } = require("../src/approvals");
+  const f = asyncQuestionFixture(t, { autofill: true });
+  const running = f.session.start("Synthetic personal details question");
+  await until(() => f.requests.length === 1);
+  const request = f.requests[0];
+  const display = normalizeRequest(request);
+  assert.equal(display.subject, "self");
+  assert.deepEqual(display.fields[0].autofill, { section: "personal", field: "first_name" });
+  assert.equal(f.input().filter((message) => message.method === "turn/start").length, 1);
+  f.session.respond(request.id, nativeResponse(request, display, { decision: "accept", values: { "question-1": "Alpha" } }));
+  assert.equal((await running).status, "completed");
+  assert.equal(f.input().filter((message) => message.method === "turn/start").length, 2);
 });
 
 test("an early async answer waits for the active turn to finish", async (t) => {

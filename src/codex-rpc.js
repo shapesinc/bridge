@@ -100,11 +100,14 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
         && Array.isArray(item.questions) && item.questions.length) {
       const id = `bridge-async:${randomUUID()}`;
       const questions = item.questions.map((question, index) => ({ id: `question-${index + 1}`,
-        header: `Question ${index + 1}`, question: question.title, isOther: true, isSecret: false,
+        header: `Question ${index + 1}`, question: question.title, isOther: true, isSecret: question.isSecret === true,
+        ...(question.autofill === undefined ? {} : { autofill: question.autofill }),
         options: question.options == null ? null : question.options.map((label) => ({ label, description: "" })) }));
       if (!onServerRequest) throw new Error("This client cannot present asynchronous questions.");
       const request = { id, method: "item/tool/requestUserInput", params: {
-        threadId, turnId, itemId: item.id, isBlocking: false, questions } };
+        threadId, turnId, itemId: item.id, isBlocking: false, questions,
+        ...(item.subject === undefined ? {} : { subject: item.subject }),
+        ...(item._meta === undefined ? {} : { _meta: item._meta }) } };
       pending.set(id, request);
       asyncQuestions.set(id, questions);
       callback(onServerRequest, request);
