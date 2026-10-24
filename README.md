@@ -1,13 +1,19 @@
-# Shapes Bridge
+# shapes.inc Bridge
 
-**Give your Shape hands on your own computer — with your consent.**
+**Give your shapes hands on your own computer — with your consent.**
 
-Your Shape lives in the chat. The bridge is a tiny program you run on your
-computer that lets your Shape reach *this machine* — run a command, read or
-write a file, open an app — over a secure, token-locked door that only you
-control. Connect it once to your Shapes account, then allow it in the chats
-where you want to use it. The connection runs in the background, survives a
-closed terminal, and starts again when you sign in to your computer.
+Your shapes live in the chat. shapes.inc Bridge is a small app you run on your
+computer that lets them reach *this machine* — run a command, read or write a
+file, open an app — over a secure, token-locked door that only you control.
+Connect it once to your shapes.inc account, then allow it in the chats where
+you want to use it. The connection runs in the background, survives a closed
+terminal, and starts again when you sign in to your computer.
+
+On macOS it installs as **shapes.inc Bridge** in `~/Applications`, with the
+shapes.inc icon in Finder, Spotlight, Login Items and permission prompts.
+Opening the app restarts the connection (or resumes it when paused). On Linux
+it adds a **shapes.inc Bridge** launcher entry; on Windows it registers a
+**shapes.inc Bridge** scheduled task.
 
 ## Run it
 
@@ -19,19 +25,20 @@ npx --yes --package=https://github.com/shapesinc/bridge/archive/refs/heads/main.
 ```
 
 1. Open the approval link printed by the installer (it also opens your browser).
-2. Sign in to Shapes and approve the matching confirmation code.
+2. Sign in to shapes.inc and approve the matching confirmation code.
 3. Approve computer permissions in your operating system when prompted.
 4. Choose this computer in **Connect Computer** in a chat. You can use the same
    saved computer in other chats without installing or pairing it again.
 
 The installer reports **Connected** only after the background process has
-contacted Shapes. You can close the terminal. Changing networks or restarting
+contacted shapes.inc. You can close the terminal. Changing networks or restarting
 the tunnel automatically updates the endpoint without changing your account
 pairing or existing chat grants.
 
-The installed code and a private Node runtime live in `~/.shapes-bridge/runtime`;
-the service never depends on an `npx` cache or an open terminal. Run `install`
-again to update it without pairing again. Bare `npx --yes --package=https://github.com/shapesinc/bridge/archive/refs/heads/main.tar.gz shapes-bridge`
+The installed code and a private Node runtime live inside the app bundle on
+macOS (`~/Applications/shapes.inc Bridge.app`) and in `~/.shapes-bridge/runtime`
+on Linux and Windows; the service never depends on an `npx` cache or an open
+terminal. Run `update` (or `install` again) to update it without pairing again. Bare `npx --yes --package=https://github.com/shapesinc/bridge/archive/refs/heads/main.tar.gz shapes-bridge`
 starts setup on a new computer and shows status on an existing installation.
 
 Older instructions using `npx github:shapesinc/bridge` are also supported. The
@@ -55,7 +62,11 @@ On Windows (Command Prompt):
 
 Replace `status` with any of these commands. No shell profile changes are made.
 
-- `status`: show connection and native permission status.
+- `status`: show connection, version and native permission status.
+- `restart`: restart the background connection. Opening the macOS app or the
+  Linux launcher entry does the same.
+- `update`: download the latest shapes.inc Bridge and reinstall it without
+  pairing again.
 - `pause`: disconnect immediately and remain paused across computer restarts.
 - `resume`: reconnect and restore startup at sign-in.
 - `permissions`: request Accessibility and Screen Recording from the installed
@@ -69,8 +80,8 @@ Replace `status` with any of these commands. No shell profile changes are made.
   the local service still stops; run `uninstall` again when online to finish
   account revocation.
 
-On macOS, grant access to the stable installed **Shapes Bridge** runner when
-the OS requests it. Setup requests permissions from the background service;
+On macOS, grant access to the installed **shapes.inc Bridge** app when the OS
+requests it. Setup requests permissions from the background service;
 granting Terminal access does not establish that the service has access.
 Accessibility and Screen Recording use native preflight checks. Full Disk
 Access and Automation are separate OS decisions; Automation is also per app,
@@ -79,8 +90,11 @@ The OS may require restarting the connection after a grant (`pause`, then
 `resume`). Password, secure-input, lock-screen, and system-protected UI remain
 subject to OS restrictions. The bridge does not bypass these protections.
 
-Background startup uses a macOS LaunchAgent, Linux user systemd service, or
-Windows Task Scheduler task in the signed-in user's interactive session.
+Background startup uses a macOS LaunchAgent (listed in Login Items as
+shapes.inc Bridge), Linux user systemd service, or Windows Task Scheduler task
+in the signed-in user's interactive session. When the account removes this
+computer, the service stops and removes its own automatic startup; run `install`
+to connect it again.
 Linux requires a working user systemd session; graphical control depends on
 the desktop and display server. Windows and Linux report macOS-specific TCC
 permissions as unsupported. Cross-platform service definitions are tested with
@@ -106,7 +120,7 @@ there is no desktop session available before sign-in.
 - **Visible activity.** Bridge actions are recorded in private local logs.
   Delegated agent jobs keep their detailed diagnostics in private local files.
 - **Disconnect immediately.** `pause` closes remote bridge access. Removing the
-  computer in Shapes revokes its device credential; the service notices at its
+  computer in shapes.inc revokes its device credential; the service notices at its
   next heartbeat and stops serving. Agent jobs already started continue until completion
   or cancellation; cancel them first if you also want that work to stop.
 - The tunnel is a [Cloudflare quick-tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/)
@@ -121,9 +135,9 @@ For temporary legacy URL/token connections, run `foreground`. This mode ends
 when its terminal closes. Enter its secret only in the private connection
 dialog, never a chat message.
 
-## What your Shape can do
+## What your shapes can do
 
-These map 1:1 to the `SHAPES_BRIDGE` tool in the Shapes app.
+These map 1:1 to the `SHAPES_BRIDGE` tool in shapes.inc.
 
 | Action    | What it does                                    | Bridge endpoint  |
 | --------- | ----------------------------------------------- | ---------------- |
@@ -167,12 +181,12 @@ piece is the `cloudflared` tunnel binary, fetched on first run.
 For isolated development, `install --api-url http://127.0.0.1:8098 --state-dir
 /absolute/private/test-directory --no-open` uses a local pairing service.
 Remote API origins require HTTPS and redirects are rejected. Only one
-background Shapes Bridge service may be installed per OS user; stop the
+background shapes.inc Bridge service may be installed per OS user; stop the
 previous test installation before choosing a different state directory.
 
 Run `npm test` for the local CLI fixtures and authenticated HTTP tests; they
 make no inference calls. A 2026-10-02 smoke test also exercised a real temporary
-tunnel, the Shapes connection service (with isolated test membership and
+tunnel, the shapes.inc connection service (with isolated test membership and
 storage), and the installed CLI: token checks and cross-member rejection
 passed, discovery identified signed-in Codex and signed-out Claude Code,
 Claude was rejected before creating a job, and `auto` completed a Codex
@@ -180,9 +194,9 @@ read-only file task with the expected answer. Claude execution is covered by
 structured fixtures; live Claude inference remains unverified while it is
 signed out.
 
-## Let your Shape use local Codex or Claude Code
+## Let your shapes use local Codex or Claude Code
 
-Ask your Shape to use an agent on your computer for a task. Shapes can discover
+Ask a shape to use an agent on your computer for a task. Shapes can discover
 local Codex and Claude Code, then delegate using the agent's existing sign-in
 and settings. You do not need to supply executable paths or shell commands.
 If the computer is not connected, the Shape's **Connect your computer** link
@@ -193,7 +207,7 @@ endpoints without changing the saved account pairing.
 Discovery runs only version, help, and authentication-status checks. `ready`
 means installed, compatible, and signed in; it does **not** establish provider
 availability, quota, or task success. No prompt is sent during discovery, and
-no account identity, authentication output, or credentials are copied to Shapes.
+no account identity, authentication output, or credentials are copied to shapes.inc.
 Sign in to the agent locally if it reports `auth_required`.
 
 On macOS, Codex discovery checks its ChatGPT/Codex app bundles and PATH. Claude

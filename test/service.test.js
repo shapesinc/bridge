@@ -5,14 +5,15 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { serviceDefinition, launcherContent, runtimePaths } = require("../src/service");
+const { serviceDefinition, launcherContent, runtimePaths, infoPlist, desktopEntry, buildMacApp, APP_NAME } = require("../src/service");
 const { writeState, readState } = require("../src/state");
 
 test("macOS startup uses stable installed files, survives exit, and escapes home paths", () => {
   const result = serviceDefinition({ platform: "darwin", home: "/Users/A & B", dir: "/Users/A & B/.shapes-bridge", envPath: "/usr/bin:/some path" });
   assert.match(result.content, /<key>KeepAlive<\/key><true\/>/);
   assert.match(result.content, /<key>RunAtLoad<\/key><true\/>/);
-  assert.match(result.content, /A &amp; B\/.shapes-bridge\/runtime\/Shapes Bridge/);
+  assert.match(result.content, /A &amp; B\/Applications\/shapes\.inc Bridge\.app\/Contents\/MacOS\/shapes\.inc Bridge/);
+  assert.match(result.content, /<key>AssociatedBundleIdentifiers<\/key><array><string>inc\.shapes\.bridge<\/string><\/array>/);
   assert.match(result.content, /<key>Umask<\/key><integer>63/);
   assert.match(result.content, /<string>daemon<\/string>/);
   assert.doesNotMatch(result.content, /npx|device_token/);
@@ -53,6 +54,7 @@ test("installed local launcher runs offline and forwards shell metacharacters li
   const paths = runtimePaths(dir);
   try {
     fs.mkdirSync(path.dirname(paths.cli), { recursive: true });
+    fs.mkdirSync(path.dirname(paths.node), { recursive: true });
     fs.symlinkSync(process.execPath, paths.node);
     fs.writeFileSync(paths.cli, "process.stdout.write(JSON.stringify({args:process.argv.slice(2),state:process.env.SHAPES_BRIDGE_HOME}))");
     fs.writeFileSync(paths.launcher, launcherContent(dir), { mode: 0o700 });
@@ -79,4 +81,48 @@ test("account credentials are atomically stored with private filesystem modes", 
     if (previous === undefined) delete process.env.SHAPES_BRIDGE_HOME; else process.env.SHAPES_BRIDGE_HOME = previous;
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("macOS app bundle is a visible app: shapes.inc name, icon, hidden Dock item, and an open hook", () => {
+  const plist = infoPlist({ dir: "/Users/A & B/.shapes-bridge", home: "/Users/A & B" });
+  assert.match(plist, /<key>CFBundleIdentifier<\/key><string>inc\.shapes\.bridge<\/string>/);
+  assert.match(plist, /<key>CFBundleName<\/key><string>shapes\.inc Bridge<\/string>/);
+  assert.match(plist, /<key>CFBundleIconFile<\/key><string>shapes\.inc Bridge<\/string>/);
+  assert.match(plist, /<key>LSUIElement<\/key><true\/>/);
+  assert.match(plist, /NODE_OPTIONS<\/key><string>--require "\/Users\/A &amp; B\/Applications\/shapes\.inc Bridge\.app\/Contents\/Resources\/runtime\/bin\/open\.js"<\/string>/);
+  assert.match(plist, /NSAppleEventsUsageDescription/);
+  // A custom state directory keeps its own app beside it instead of ~/Applications.
+  assert.equal(runtimePaths("/tmp/custom", "darwin", "/Users/A & B").app, "/tmp/custom/shapes.inc Bridge.app");
+  assert.equal(runtimePaths("/Users/A & B/.shapes-bridge", "darwin", "/Users/A & B").app, "/Users/A & B/Applications/shapes.inc Bridge.app");
+});
+
+test("Linux launcher entry and renamed runners carry the shapes.inc name", () => {
+  const entry = desktopEntry({ dir: '/home/a "b"/.shapes-bridge', home: '/home/a "b"' });
+  assert.match(entry, /^Name=shapes\.inc Bridge$/m);
+  assert.match(entry, /^Exec="\/home\/a \\"b\\"\/\.shapes-bridge\/shapes-bridge" open$/m);
+  assert.match(entry, /^Icon=\/home\/a "b"\/\.shapes-bridge\/runtime\/shapes\.inc Bridge\.png$/m);
+  assert.equal(path.basename(runtimePaths("/home/x/.shapes-bridge", "linux", "/home/x").node), "shapes.inc-bridge");
+  assert.equal(path.basename(runtimePaths("C:/Users/x/.shapes-bridge", "win32", "C:/Users/x").node), "shapes.inc Bridge.exe");
+  assert.match(serviceDefinition({ platform: "linux", home: "/home/x", dir: "/home/x/.shapes-bridge" }).content, /Description=shapes\.inc Bridge/);
+  assert.match(serviceDefinition({ platform: "win32", home: "C:/Users/x", dir: "C:/Users/x/.shapes-bridge" }).content, /<Description>shapes\.inc Bridge<\/Description>/);
+});
+
+test("macOS app bundle build stages, swaps, signs and leaves a runnable renamed Node", { skip: process.platform !== "darwin" }, () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-app-"));
+  const paths = runtimePaths(base, "darwin");
+  const signed = [];
+  try {
+    fs.mkdirSync(paths.app, { recursive: true });
+    fs.writeFileSync(path.join(paths.app, "stale"), "old install");
+    buildMacApp(path.resolve(__dirname, ".."), paths, { sign: (app) => signed.push(app) });
+    assert.deepEqual(signed, [`${paths.app}.staging`]);
+    assert.equal(fs.existsSync(path.join(paths.app, "stale")), false);
+    assert.equal(fs.existsSync(`${paths.app}.staging`), false);
+    assert.equal(fs.existsSync(paths.cli), true);
+    assert.equal(fs.existsSync(paths.icon), true);
+    assert.match(fs.readFileSync(paths.plist, "utf8"), /CFBundleExecutable<\/key><string>shapes\.inc Bridge/);
+    assert.equal(path.basename(paths.node), APP_NAME);
+    const run = spawnSync(paths.node, ["-e", "process.stdout.write(String(1 + 1))"], { encoding: "utf8" });
+    assert.equal(run.stdout, "2", run.stderr);
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });

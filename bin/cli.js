@@ -14,7 +14,7 @@ if (stateIndex !== -1) {
 }
 const { stateDir, ensureStateDir, readState, writeState, removeState } = require("../src/state");
 const { DEFAULT_API, validateApi, pairDevice, apiRequest } = require("../src/account");
-const { startService, stopService, runtimePaths } = require("../src/service");
+const { startService, stopService, runtimePaths, APP_NAME } = require("../src/service");
 
 const log = (value) => process.stdout.write(`${value}\n`);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -39,14 +39,15 @@ function showStatus() {
   if (!config) { log("This computer is not connected. Run: npx --yes --package=https://github.com/shapesinc/bridge/archive/refs/heads/main.tar.gz shapes-bridge install"); return; }
   const status = readState("status");
   const recent = status?.updated_at && Date.now() - Date.parse(status.updated_at) < 90000;
-  const connection = config.paused ? "paused" : config.revoked ? "revoked" : recent ? status.connection : "offline";
-  log(`shapes.inc Bridge: ${connection}\nComputer: ${config.name}\nKeep awake: ${config.keep_awake === false ? "off" : "on"}`);
+  const connection = config.paused ? "paused" : config.revoked ? "removed from your account" : recent ? status.connection : "offline";
+  log(`shapes.inc Bridge: ${connection}\nComputer: ${config.name}\nVersion: ${require("../package.json").version}\nKeep awake: ${config.keep_awake === false ? "off" : "on"}`);
+  if (config.revoked) log("Run install to connect this computer again.");
   if (status?.last_heartbeat) log(`Last connected: ${status.last_heartbeat}`);
   if (recent && status?.permissions) {
     for (const [name, value] of Object.entries(status.permissions)) log(`${name.replace(/_/g, " ")}: ${value}`);
   }
-  if (recent && status?.error) log(status.error);
-  log("Manage computers and chat access in shapes.inc. Local controls: status, pause, resume, permissions, logs, uninstall.");
+  if (recent && status?.error && !config.revoked) log(status.error);
+  log("Manage computers and chat access in shapes.inc. Local controls: status, restart, pause, resume, update, permissions, logs, uninstall.");
 }
 
 async function install() {
@@ -77,18 +78,30 @@ async function install() {
     status = readState("status");
   } while (Date.now() < deadline && status?.connection !== "connected" && status?.connection !== "revoked");
   if (!status) throw new Error("The background service has not started. Run logs for details. Use the default install location; macOS may block background apps stored in Downloads or Desktop.");
-  if (status.connection === "connected") log("Connected. You can close this terminal. shapes.inc starts automatically when you sign in to this computer.");
+  if (status.connection === "connected") log("Connected. You can close this terminal. shapes.inc Bridge starts automatically when you sign in to this computer.");
   else log("Setup saved. The background service is still connecting; it will retry automatically. Run status or logs to check progress.");
   log("Keep awake is " + (config.keep_awake ? "on (display lock and lid settings stay in place)." : "off."));
   log("On macOS, approve native permission prompts for the background runner. Run permissions to check or finish setup.");
-  log(`Local controls (no internet required): "${runtimePaths().launcher}" status | pause | resume | permissions | logs | uninstall\nInstalled runner: ${runtimePaths().node}`);
+  if (process.platform === "darwin") log(`${APP_NAME} is installed in ${runtimePaths().app}. Open it any time to restart the connection.`);
+  log(`Local controls (no internet required): "${runtimePaths().launcher}" status | restart | pause | resume | update | permissions | logs | uninstall`);
   showStatus();
+}
+
+async function waitForConnection(timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  let status;
+  do {
+    await delay(1000);
+    status = readState("status");
+  } while (Date.now() < deadline && status?.connection !== "connected" && status?.connection !== "revoked");
+  return status;
 }
 
 async function main() {
   const command = argv[0] || (readState("config") ? "status" : "install");
   if (command === "install" || command === "setup") return install();
   if (command === "status") return showStatus();
+  if (command === "open") { await require("../src/open").openApp({ log }); return; }
   if (command === "foreground") { require("./foreground"); return; }
   if (command === "daemon") {
     const { runDaemon, enablePrivateLog } = require("../src/runtime");
@@ -102,7 +115,7 @@ async function main() {
     return;
   }
   if (["--help", "help", "-h"].includes(command)) {
-    log("shapes.inc Bridge\n  install       Pair once and install the background connection\n  status        Connection and native permission status\n  pause         Disconnect and stop automatic startup\n  resume        Reconnect and restore automatic startup\n  permissions [accessibility|screen_recording|full_disk_access|automation]\n                Ask the installed background runner for OS access\n  awake on|off  Keep the computer awake while connected\n  logs          Recent local activity (may contain private command text)\n  uninstall     Revoke account access and remove the background service\n  foreground    Temporary legacy connection until the terminal closes\n\nInstall options: --name <name>, --no-open, --no-awake\nDevelopment: --api-url http://127.0.0.1:<port>, --state-dir <directory>");
+    log("shapes.inc Bridge\n  install       Pair once and install the background connection\n  status        Connection and native permission status\n  restart       Restart the background connection\n  update        Install the latest shapes.inc Bridge without pairing again\n  open          What opening the app does: restart, or resume when paused\n  pause         Disconnect and stop automatic startup\n  resume        Reconnect and restore automatic startup\n  permissions [accessibility|screen_recording|full_disk_access|automation]\n                Ask the installed background runner for OS access\n  awake on|off  Keep the computer awake while connected\n  logs          Recent local activity (may contain private command text)\n  uninstall     Revoke account access and remove the background service\n  foreground    Temporary legacy connection until the terminal closes\n\nInstall options: --name <name>, --no-open, --no-awake\nDevelopment: --api-url http://127.0.0.1:<port>, --state-dir <directory>");
     return;
   }
   const config = readState("config");
@@ -113,6 +126,27 @@ async function main() {
     try { await apiRequest(config.api, "/devices/offline", {}, config.device_token, "POST", 2500); }
     catch { log("Computer access is stopped locally. Account status will update when its last heartbeat expires."); }
     log("Paused. This computer is disconnected and will stay paused after restart. Run resume to reconnect.");
+  } else if (command === "restart") {
+    if (config.revoked) throw new Error("This computer was removed from shapes.inc. Run install to reconnect.");
+    if (config.paused) throw new Error("This computer is paused. Run resume to reconnect.");
+    removeState("status");
+    startService();
+    log("Restarting the background connection…");
+    const status = await waitForConnection();
+    if (!status) throw new Error("The background service has not started. Run logs for details.");
+    showStatus();
+  } else if (command === "update") {
+    if (config.revoked) throw new Error("This computer was removed from shapes.inc. Run install to reconnect.");
+    log("Downloading the latest shapes.inc Bridge…");
+    const update = await require("../src/update").downloadRuntime();
+    try {
+      if (config.paused) { stopService(); require("../src/service").copyRuntime(update.source); log(`Updated to ${update.version}. This computer stays paused; run resume to reconnect.`); return; }
+      removeState("status");
+      startService({ install: true, source: update.source });
+      log(`Updated to ${update.version}. Reconnecting in the background…`);
+      await waitForConnection();
+      showStatus();
+    } finally { update.cleanup(); }
   } else if (command === "resume") {
     if (config.revoked) throw new Error("This computer was removed from shapes.inc. Run install to reconnect.");
     writeState("config", { ...config, paused: false });

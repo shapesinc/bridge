@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 "use strict";
 
-// shapes-bridge — give your Shape hands on your own computer, with your consent.
+// shapes.inc Bridge — give your shapes hands on your own computer, with your consent.
 //
 //   npx github:shapesinc/bridge
 //
