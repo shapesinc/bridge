@@ -87,7 +87,7 @@ async function install() {
   showStatus();
 }
 
-async function waitForConnection(timeoutMs = 20000) {
+async function waitForConnection(timeoutMs = 45000) {
   const deadline = Date.now() + timeoutMs;
   let status;
   do {
