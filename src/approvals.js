@@ -3,6 +3,7 @@
 // Convert native, pending requests into a small display contract. Responses are
 // reconstructed from the original request, never forwarded as arbitrary RPC.
 const crypto = require("node:crypto");
+const { projectAutofill } = require("./autofill");
 const own = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const reserved = new Set(["__proto__", "prototype", "constructor"]);
@@ -123,7 +124,9 @@ function normalizeRequest(request) {
     throw new Error("Unsupported native approval request.");
   }
   if (new Set(fields.map((field) => field.id)).size !== fields.length) throw new Error("Duplicate approval field.");
+  const subject = kind === "input" ? projectAutofill(p, fields, request.method) : undefined;
   const result = { id: crypto.randomUUID(), kind, title, message, fields,
+    ...(subject ? { subject } : {}),
     choices: (choices || (kind === "input" ? ["accept", "cancel"] : ["accept", "decline", "cancel"])).map((id) => ({ id,
       label: id === "accept" ? (kind === "input" ? "Continue" : request.method === "item/commandExecution/requestApproval" ? "Allow once" : "Allow") : id === "decline" ? "Deny" : "Cancel task" })) };
   if (Buffer.byteLength(JSON.stringify(result)) > 16000) throw new Error("Approval request is too large.");
