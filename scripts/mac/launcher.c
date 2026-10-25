@@ -19,8 +19,16 @@
 extern char **environ;
 static pid_t child = 0;
 
-static void forward(int signal) {
-  if (child > 0) kill(child, signal);
+// A stop request goes to the runtime first; if it has not exited within the
+// grace period it is killed, so a restart never leaves an orphaned runtime.
+static void escalate(int sig) {
+  (void)sig;
+  if (child > 0) kill(child, SIGKILL);
+}
+
+static void forward(int sig) {
+  if (child > 0) kill(child, sig);
+  if (sig == SIGTERM || sig == SIGINT || sig == SIGHUP) { signal(SIGALRM, escalate); alarm(10); }
 }
 
 int main(int argc, char **argv) {

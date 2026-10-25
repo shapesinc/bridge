@@ -122,7 +122,11 @@ async function main() {
   if (command === "daemon") {
     const { runDaemon, enablePrivateLog } = require("../src/runtime");
     ensureStateDir(); enablePrivateLog();
-    return runDaemon();
+    try { await runDaemon(); } finally {
+      // Nothing useful outlives the connection loop; never linger as an
+      // orphaned process behind a stray handle after a stop or restart.
+      process.exit(process.exitCode || 0);
+    }
   }
   if (command === "logs") {
     const file = path.join(stateDir(), "service.log");
