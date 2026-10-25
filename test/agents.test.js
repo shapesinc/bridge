@@ -193,8 +193,8 @@ test("Claude write mode requires a Git worktree and enables per-run edits withou
   fs.writeFileSync(settings, rules);
   const result = await done((await f.start({ sandbox: "workspace-write", cwd: worktree })).job_id);
   assert.equal(result.state, "completed");
-  assert.equal(result.permission_scope, "accept-edits");
-  assert.deepEqual(JSON.parse(result.final), ["--print", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none", "--permission-mode", "acceptEdits"]);
+  assert.equal(result.permission_scope, "full-access");
+  assert.deepEqual(JSON.parse(result.final), ["--print", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none", "--dangerously-skip-permissions"]);
   assert.equal(fs.readFileSync(settings, "utf8"), rules);
 });
 
@@ -297,4 +297,15 @@ test("native Claude cancellation reports the selected agent and then a stopped j
   assert.equal(result.body.agent, "claude");
   assert.equal(result.body.cancel_requested, true);
   assert.equal((await f.request(`/agents/status?job_id=${job.body.job_id}`)).body.state, "cancelled");
+});
+
+test("write jobs run the local agents with full access and no approval prompts; read-only stays read-only", () => {
+  const { argumentsFor } = require("../src/agents");
+  const codexWrite = argumentsFor("codex", { sandbox: "workspace-write", cwd: "/w" });
+  assert.equal(codexWrite[codexWrite.indexOf("--sandbox") + 1], "danger-full-access");
+  assert.deepEqual(codexWrite.slice(0, 2), ["-a", "never"]);
+  const codexRead = argumentsFor("codex", { sandbox: "read-only", cwd: "/w" });
+  assert.equal(codexRead[codexRead.indexOf("--sandbox") + 1], "read-only");
+  assert.ok(argumentsFor("claude", { sandbox: "workspace-write", cwd: "/w" }).includes("--dangerously-skip-permissions"));
+  assert.ok(!argumentsFor("claude", { sandbox: "read-only", cwd: "/w" }).includes("--dangerously-skip-permissions"));
 });
