@@ -68,7 +68,7 @@ async function install() {
   writeState("config", config);
   log("Installing the background connection for your account…");
   removeState("status");
-  startService({ install: true });
+  await startService({ install: true, log });
   writeState("permission-request", {});
   log("Background startup is installed. Waiting for the connection…");
   const deadline = Date.now() + 45000;
@@ -130,7 +130,7 @@ async function main() {
     if (config.revoked) throw new Error("This computer was removed from shapes.inc. Run install to reconnect.");
     if (config.paused) throw new Error("This computer is paused. Run resume to reconnect.");
     removeState("status");
-    startService();
+    await startService();
     log("Restarting the background connection…");
     const status = await waitForConnection();
     if (!status) throw new Error("The background service has not started. Run logs for details.");
@@ -140,9 +140,9 @@ async function main() {
     log("Downloading the latest shapes.inc Bridge…");
     const update = await require("../src/update").downloadRuntime();
     try {
-      if (config.paused) { stopService(); require("../src/service").copyRuntime(update.source); log(`Updated to ${update.version}. This computer stays paused; run resume to reconnect.`); return; }
+      if (config.paused) { stopService(); await require("../src/service").copyRuntime(update.source, { log }); log(`Updated to ${update.version}. This computer stays paused; run resume to reconnect.`); return; }
       removeState("status");
-      startService({ install: true, source: update.source });
+      await startService({ install: true, source: update.source, log });
       log(`Updated to ${update.version}. Reconnecting in the background…`);
       await waitForConnection();
       showStatus();
@@ -150,7 +150,7 @@ async function main() {
   } else if (command === "resume") {
     if (config.revoked) throw new Error("This computer was removed from shapes.inc. Run install to reconnect.");
     writeState("config", { ...config, paused: false });
-    startService(); log("Reconnecting in the background. Automatic startup restored.");
+    await startService(); log("Reconnecting in the background. Automatic startup restored.");
   } else if (command === "permissions") {
     if (config.paused || config.revoked) throw new Error("Resume the computer connection before requesting native permissions.");
     const permission = argv[1];
@@ -162,7 +162,7 @@ async function main() {
   } else if (command === "awake") {
     if (!["on", "off"].includes(argv[1])) throw new Error("Use awake on or awake off.");
     writeState("config", { ...config, keep_awake: argv[1] === "on" });
-    if (!config.paused && !config.revoked) startService();
+    if (!config.paused && !config.revoked) await startService();
     log(`Keep awake ${argv[1]}.`);
   } else if (command === "uninstall") {
     stopService({ remove: true });

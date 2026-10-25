@@ -47,7 +47,7 @@ async function openApp({ readState, writeState, startService, notifier = notify,
   notifier(decision.message);
   if (decision.openPage) { opener(); return decision; }
   if (decision.action === "resume") write("config", { ...config, paused: false });
-  start();
+  await start();
   const deadline = Date.now() + waitMs;
   let status = state("status");
   while (Date.now() < deadline && status?.connection !== "connected" && status?.connection !== "revoked") {

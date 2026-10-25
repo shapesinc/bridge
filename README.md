@@ -9,10 +9,13 @@ Connect it once to your shapes.inc account, then allow it in the chats where
 you want to use it. The connection runs in the background, survives a closed
 terminal, and starts again when you sign in to your computer.
 
-On macOS it installs as **shapes.inc Bridge** in `~/Applications`, with the
-shapes.inc icon in Finder, Spotlight, Login Items and permission prompts.
-Opening the app restarts the connection (or resumes it when paused). On Linux
-it adds a **shapes.inc Bridge** launcher entry; on Windows it registers a
+On macOS it installs as **shapes.inc Bridge** in `~/Applications`: the signed,
+notarized app from the latest GitHub release (Developer ID: Circle Labs, Inc.),
+with the shapes.inc icon in Finder, Spotlight, Login Items and permission
+prompts. Opening the app restarts the connection (or resumes it when paused).
+If the release cannot be downloaded, the installer builds an unsigned copy from
+your own Node, which macOS lists as an unidentified developer. On Linux it adds
+a **shapes.inc Bridge** launcher entry; on Windows it registers a
 **shapes.inc Bridge** scheduled task.
 
 ## Run it
@@ -107,6 +110,16 @@ screen, keep the display lit, override a closed laptop lid, power on a shut-down
 computer, or maintain a connection without internet. The service reconnects
 after wake or network recovery. Automatic startup begins after user sign-in;
 there is no desktop session available before sign-in.
+
+## Releasing the macOS app
+
+`scripts/build-mac-release.sh` downloads the official Node build for both Mac
+architectures (checksums verified), assembles the bundle with the signed
+launcher (`scripts/mac/launcher.c`, prebuilt as `assets/mac-launcher`), signs
+runtime and app with the Developer ID certificate and hardened runtime, notarizes
+and staples, and writes `dist/shapes.inc-Bridge-macos.zip`. Upload that file to a
+GitHub release; the installer always fetches the latest release asset and
+refuses anything not signed by the shapes.inc team or older than itself.
 
 ## Is it safe?
 

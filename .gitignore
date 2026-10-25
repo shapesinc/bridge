@@ -4,3 +4,4 @@ node_modules/
 .shapes-bridge/
 cloudflared
 cloudflared.exe
+dist/

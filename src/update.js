@@ -44,4 +44,4 @@ async function downloadRuntime({ url = RUNTIME_ARCHIVE, into = fs.mkdtempSync(pa
   return { source, version: JSON.parse(fs.readFileSync(path.join(source, "package.json"), "utf8")).version, cleanup: () => fs.rmSync(into, { recursive: true, force: true }) };
 }
 
-module.exports = { RUNTIME_ARCHIVE, extractArchive, downloadRuntime };
+module.exports = { RUNTIME_ARCHIVE, downloadFile: download, extractArchive, downloadRuntime };

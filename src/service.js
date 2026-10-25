@@ -8,6 +8,12 @@ const { stateDir, ensureStateDir } = require("./state");
 
 const LABEL = "inc.shapes.bridge";
 const APP_NAME = "shapes.inc Bridge";
+const RUNTIME_NAME = "shapes.inc Bridge Runtime";
+// Signed, notarized app built by scripts/build-mac-release.sh and published as a
+// GitHub release asset. The installer prefers it so Login Items and permission
+// prompts show a known developer; a local ad-hoc build is the fallback.
+const TEAM_ID = "GMW3D75476";
+const SIGNED_APP_URL = "https://github.com/shapesinc/bridge/releases/latest/download/shapes.inc-Bridge-macos.zip";
 const TASK_NAME = "shapes.inc Bridge";
 const LEGACY_TASK_NAME = "Shapes Bridge";
 const VERSION = require("../package.json").version;
@@ -29,7 +35,10 @@ function runtimePaths(dir = stateDir(), platform = process.platform, home = os.h
     const runtime = path.join(app, "Contents", "Resources", "runtime");
     return {
       app, runtime, launcher,
-      node: path.join(app, "Contents", "MacOS", APP_NAME),
+      // The signed launcher is the bundle's main executable; Node is a child
+      // runtime so every permission prompt is attributed to the app.
+      appExecutable: path.join(app, "Contents", "MacOS", APP_NAME),
+      node: path.join(app, "Contents", "MacOS", RUNTIME_NAME),
       cli: path.join(runtime, "bin", "cli.js"),
       plist: path.join(app, "Contents", "Info.plist"),
       icon: path.join(app, "Contents", "Resources", `${APP_NAME}.icns`),
@@ -58,12 +67,7 @@ function launcherContent(dir = stateDir(), platform = process.platform, home = o
   return `#!/bin/sh\nSHAPES_BRIDGE_HOME=${quote(dir)} exec ${quote(paths.node)} ${quote(paths.cli)} "$@"\n`;
 }
 
-function infoPlist({ dir = stateDir(), home = os.homedir() } = {}) {
-  const paths = runtimePaths(dir, "darwin", home);
-  // Opening the app from Finder or Spotlight starts Node with no script;
-  // LaunchServices applies this environment only to that launch path, so the
-  // open hook restarts the connection while launchd's daemon launch is untouched.
-  const openHook = path.join(paths.runtime, "bin", "open.js");
+function infoPlist() {
   return `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>
 <key>CFBundleName</key><string>${APP_NAME}</string>
 <key>CFBundleDisplayName</key><string>${APP_NAME}</string>
@@ -77,7 +81,6 @@ function infoPlist({ dir = stateDir(), home = os.homedir() } = {}) {
 <key>LSMinimumSystemVersion</key><string>11.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
-<key>LSEnvironment</key><dict><key>NODE_OPTIONS</key><string>--require "${xml(openHook)}"</string></dict>
 <key>NSAppleEventsUsageDescription</key><string>shapes.inc Bridge controls apps on this computer for the chats you allowed.</string>
 <key>NSHumanReadableCopyright</key><string>© Shapes, Inc.</string>
 </dict></plist>\n`;
@@ -91,13 +94,13 @@ function desktopEntry({ dir = stateDir(), home = os.homedir() } = {}) {
 }
 
 function serviceDefinition({ platform = process.platform, home = os.homedir(), dir = stateDir(), envPath = process.env.PATH || "", user = os.userInfo().username } = {}) {
-  const { node, cli } = runtimePaths(dir, platform, home);
+  const { node, cli, appExecutable } = runtimePaths(dir, platform, home);
   if (platform === "darwin") return {
     file: path.join(home, "Library", "LaunchAgents", `${LABEL}.plist`),
     content: `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>
 <key>Label</key><string>${LABEL}</string>
 <key>AssociatedBundleIdentifiers</key><array><string>${LABEL}</string></array>
-<key>ProgramArguments</key><array><string>${xml(node)}</string><string>${xml(cli)}</string><string>daemon</string></array>
+<key>ProgramArguments</key><array><string>${xml(appExecutable)}</string><string>daemon</string></array>
 <key>WorkingDirectory</key><string>${xml(home)}</string>
 <key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(envPath)}</string><key>SHAPES_BRIDGE_HOME</key><string>${xml(dir)}</string></dict>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>
@@ -146,35 +149,97 @@ function copyFiles(source, runtime) {
   }
 }
 
-function buildMacApp(source, paths, { sign = (app) => command("codesign", ["--force", "--sign", "-", "--identifier", LABEL, app]) } = {}) {
-  // Build next to the installed app, then swap, so a running runner (this
-  // installer, or the daemon) never has its own executable re-signed in place.
-  const staging = `${paths.app}.staging`;
-  const stagedRuntime = path.join(staging, "Contents", "Resources", "runtime");
-  fs.rmSync(staging, { recursive: true, force: true });
-  fs.mkdirSync(path.join(staging, "Contents", "MacOS"), { recursive: true });
-  fs.mkdirSync(stagedRuntime, { recursive: true });
-  copyFiles(source, stagedRuntime);
-  const icon = path.join(stagedRuntime, "assets", "shapes-inc-bridge.icns");
-  if (fs.existsSync(icon)) fs.copyFileSync(icon, path.join(staging, "Contents", "Resources", path.basename(paths.icon)));
-  fs.writeFileSync(path.join(staging, "Contents", "Info.plist"), infoPlist());
-  fs.writeFileSync(path.join(staging, "Contents", "PkgInfo"), "APPL????");
-  const node = path.join(staging, "Contents", "MacOS", APP_NAME);
-  fs.copyFileSync(process.execPath, node);
+function assembleMacApp(source, app, { nodeBinary = process.execPath } = {}) {
+  const runtime = path.join(app, "Contents", "Resources", "runtime");
+  fs.rmSync(app, { recursive: true, force: true });
+  fs.mkdirSync(path.join(app, "Contents", "MacOS"), { recursive: true });
+  fs.mkdirSync(runtime, { recursive: true });
+  copyFiles(source, runtime);
+  const icon = path.join(runtime, "assets", "shapes-inc-bridge.icns");
+  if (fs.existsSync(icon)) fs.copyFileSync(icon, path.join(app, "Contents", "Resources", `${APP_NAME}.icns`));
+  fs.writeFileSync(path.join(app, "Contents", "Info.plist"), infoPlist());
+  fs.writeFileSync(path.join(app, "Contents", "PkgInfo"), "APPL????");
+  const launcher = path.join(app, "Contents", "MacOS", APP_NAME);
+  fs.copyFileSync(path.join(runtime, "assets", "mac-launcher"), launcher);
+  fs.chmodSync(launcher, 0o755);
+  const node = path.join(app, "Contents", "MacOS", RUNTIME_NAME);
+  fs.copyFileSync(nodeBinary, node);
   fs.chmodSync(node, 0o755);
-  sign(staging);
-  const previous = `${paths.app}.previous`;
+  return { app, launcher, node, runtime };
+}
+
+function adHocSign(app) {
+  command("codesign", ["--force", "--sign", "-", "--identifier", `${LABEL}.runtime`, path.join(app, "Contents", "MacOS", RUNTIME_NAME)]);
+  command("codesign", ["--force", "--sign", "-", "--identifier", LABEL, app]);
+}
+
+function swapMacApp(staged, app) {
+  const previous = `${app}.previous`;
   fs.rmSync(previous, { recursive: true, force: true });
-  if (fs.existsSync(paths.app)) fs.renameSync(paths.app, previous);
-  fs.renameSync(staging, paths.app);
+  if (fs.existsSync(app)) fs.renameSync(app, previous);
+  fs.renameSync(staged, app);
   fs.rmSync(previous, { recursive: true, force: true });
 }
 
-function copyRuntime(source = path.resolve(__dirname, "..")) {
+function buildMacApp(source, paths, { sign = adHocSign, nodeBinary } = {}) {
+  // Build next to the installed app, then swap, so a running runner (this
+  // installer, or the daemon) never has its own executable re-signed in place.
+  const staging = `${paths.app}.staging`;
+  assembleMacApp(source, staging, { nodeBinary });
+  sign(staging);
+  swapMacApp(staging, paths.app);
+}
+
+function signedAppInfo(app) {
+  const result = spawnSync("codesign", ["-dv", "--verbose=2", app], { encoding: "utf8" });
+  const text = `${result.stdout || ""}${result.stderr || ""}`;
+  const field = (name) => (text.match(new RegExp(`^${name}=(.*)$`, "m")) || [])[1];
+  return { identifier: field("Identifier"), team: field("TeamIdentifier"), authority: text.includes("Developer ID Application") };
+}
+
+function compareVersions(a, b) {
+  const parse = (value) => String(value).split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const [x, y] = [parse(a), parse(b)];
+  for (let index = 0; index < 3; index++) if ((x[index] || 0) !== (y[index] || 0)) return (x[index] || 0) - (y[index] || 0);
+  return 0;
+}
+
+// Install the signed, notarized release so macOS shows a known developer.
+async function installSignedMacApp(paths, { url = SIGNED_APP_URL, download = require("./update").downloadFile, minimumVersion = VERSION } = {}) {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "shapes-bridge-app-"));
+  try {
+    const archive = path.join(work, "app.zip");
+    await download(url, archive);
+    const unpacked = path.join(work, "unpacked");
+    fs.mkdirSync(unpacked);
+    command("ditto", ["-x", "-k", archive, unpacked]);
+    const bundle = fs.readdirSync(unpacked).map((name) => path.join(unpacked, name)).find((entry) => entry.endsWith(".app"));
+    if (!bundle) throw new Error("the download did not contain an app");
+    const verified = spawnSync("codesign", ["--verify", "--deep", "--strict", bundle], { encoding: "utf8" });
+    if (verified.status !== 0) throw new Error("its signature did not verify");
+    const info = signedAppInfo(bundle);
+    if (info.identifier !== LABEL || info.team !== TEAM_ID || !info.authority) throw new Error("it was not signed by shapes.inc");
+    const version = JSON.parse(fs.readFileSync(path.join(bundle, "Contents", "Resources", "runtime", "package.json"), "utf8")).version;
+    if (compareVersions(version, minimumVersion) < 0) throw new Error(`it is version ${version}, older than this installer (${minimumVersion})`);
+    const staging = `${paths.app}.staging`;
+    fs.rmSync(staging, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(staging), { recursive: true });
+    fs.renameSync(bundle, staging);
+    swapMacApp(staging, paths.app);
+    return { version };
+  } finally { fs.rmSync(work, { recursive: true, force: true }); }
+}
+
+async function copyRuntime(source = path.resolve(__dirname, ".."), { localApp = process.env.SHAPES_BRIDGE_LOCAL_APP === "1", log = () => {} } = {}) {
   const paths = runtimePaths(ensureStateDir());
   if (process.platform === "darwin") {
     fs.mkdirSync(path.dirname(paths.app), { recursive: true });
-    buildMacApp(path.resolve(source) === path.resolve(paths.runtime) ? paths.runtime : source, paths);
+    let installed = false;
+    if (!localApp) {
+      try { const { version } = await installSignedMacApp(paths); installed = true; log(`Installed the signed shapes.inc Bridge ${version}.`); }
+      catch (error) { log(`Could not install the signed shapes.inc Bridge app (${error.message}). Installing a locally built copy; macOS will list it as an unidentified developer.`); }
+    }
+    if (!installed) buildMacApp(path.resolve(source) === path.resolve(paths.runtime) ? paths.runtime : source, paths);
     if (path.resolve(paths.legacyRuntime) !== path.resolve(paths.runtime)) fs.rmSync(paths.legacyRuntime, { recursive: true, force: true });
   } else {
     fs.mkdirSync(paths.runtime, { recursive: true, mode: 0o700 });
@@ -194,7 +259,7 @@ function assertServiceOwner(definition = serviceDefinition()) {
   if (!fs.existsSync(definition.file)) return;
   const current = fs.readFileSync(definition.file, process.platform === "win32" ? "utf16le" : "utf8");
   const paths = runtimePaths();
-  const accepted = [paths.cli, paths.legacyRuntime && path.join(paths.legacyRuntime, "bin", "cli.js")].filter(Boolean)
+  const accepted = [paths.appExecutable, paths.cli, paths.legacyRuntime && path.join(paths.legacyRuntime, "bin", "cli.js")].filter(Boolean)
     .map((cli) => process.platform === "linux" ? unitCommandQuote(cli) : xml(cli));
   if (!accepted.some((expected) => current.includes(expected))) {
     throw new Error("Another shapes.inc Bridge installation owns this background service. Pause or uninstall that installation before using a different --state-dir.");
@@ -241,10 +306,10 @@ function stopService({ remove = false } = {}) {
   if (remove || process.platform === "darwin") fs.rmSync(definition.file, { force: true });
 }
 
-function startService({ install = false, source } = {}) {
+async function startService({ install = false, source, log } = {}) {
   ensureStateDir();
   stopService();
-  if (install) copyRuntime(source);
+  if (install) await copyRuntime(source, { log });
   const definition = serviceDefinition();
   fs.mkdirSync(path.dirname(definition.file), { recursive: true });
   const logFile = path.join(stateDir(), "service.log");
@@ -280,4 +345,4 @@ function disableStartup() {
   else detachedCommand("systemctl", ["--user", "disable", "--now", `${LABEL}.service`]);
 }
 
-module.exports = { LABEL, APP_NAME, TASK_NAME, runtimePaths, launcherContent, infoPlist, desktopEntry, serviceDefinition, assertServiceOwner, buildMacApp, copyRuntime, startService, stopService, disableStartup };
+module.exports = { LABEL, APP_NAME, RUNTIME_NAME, TASK_NAME, TEAM_ID, SIGNED_APP_URL, runtimePaths, launcherContent, infoPlist, desktopEntry, serviceDefinition, assertServiceOwner, assembleMacApp, adHocSign, buildMacApp, installSignedMacApp, compareVersions, copyRuntime, startService, stopService, disableStartup };
