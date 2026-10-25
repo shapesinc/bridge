@@ -162,6 +162,9 @@ function assembleMacApp(source, app, { nodeBinary = process.execPath } = {}) {
   const launcher = path.join(app, "Contents", "MacOS", APP_NAME);
   fs.copyFileSync(path.join(runtime, "assets", "mac-launcher"), launcher);
   fs.chmodSync(launcher, 0o755);
+  // Only the signed copy in MacOS/ may remain: notarization rejects a bundle
+  // that carries an unsigned Mach-O anywhere, and updates fetch a fresh source.
+  fs.rmSync(path.join(runtime, "assets", "mac-launcher"), { force: true });
   const node = path.join(app, "Contents", "MacOS", RUNTIME_NAME);
   fs.copyFileSync(nodeBinary, node);
   fs.chmodSync(node, 0o755);

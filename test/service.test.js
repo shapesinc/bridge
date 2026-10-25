@@ -125,6 +125,8 @@ test("macOS app bundle build stages, swaps, signs, and the launcher runs the bun
     assert.equal(fs.existsSync(`${paths.app}.staging`), false);
     assert.equal(fs.existsSync(paths.cli), true);
     assert.equal(fs.existsSync(paths.icon), true);
+    // No unsigned Mach-O may ride along inside the bundle (notarization rejects it).
+    assert.equal(fs.existsSync(path.join(paths.runtime, "assets", "mac-launcher")), false);
     assert.match(fs.readFileSync(paths.plist, "utf8"), /CFBundleExecutable<\/key><string>shapes\.inc Bridge/);
     assert.equal(path.basename(paths.appExecutable), APP_NAME);
     assert.equal(path.basename(paths.node), RUNTIME_NAME);
