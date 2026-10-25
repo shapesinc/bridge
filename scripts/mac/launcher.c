@@ -34,12 +34,20 @@ int main(int argc, char **argv) {
   snprintf(node, sizeof(node), "%s/shapes.inc Bridge Runtime", dir);
   snprintf(cli, sizeof(cli), "%s/../Resources/runtime/bin/cli.js", dir);
 
-  int forwarded = argc > 1 && strncmp(argv[1], "-psn", 4) != 0 ? argc - 1 : 0;
+  // Older local control scripts pass the CLI path themselves; drop it so the
+  // same bundle works for them. Finder may pass a legacy -psn argument.
+  int first = 1;
+  if (first < argc) {
+    size_t length = strlen(argv[first]);
+    if (length >= 6 && strcmp(argv[first] + length - 6, "cli.js") == 0) first++;
+  }
+  if (first < argc && strncmp(argv[first], "-psn", 4) == 0) first++;
+  int forwarded = argc - first;
   char **args = calloc((size_t)forwarded + 4, sizeof(char *));
   if (!args) return 71;
   args[0] = node;
   args[1] = cli;
-  if (forwarded) memcpy(args + 2, argv + 1, (size_t)forwarded * sizeof(char *));
+  if (forwarded > 0) memcpy(args + 2, argv + first, (size_t)forwarded * sizeof(char *));
   else args[2] = "open";
 
   signal(SIGTERM, forward);

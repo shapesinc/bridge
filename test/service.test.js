@@ -134,5 +134,8 @@ test("macOS app bundle build stages, swaps, signs, and the launcher runs the bun
     const help = spawnSync(paths.appExecutable, ["--help"], { encoding: "utf8", env: { ...process.env, SHAPES_BRIDGE_HOME: base } });
     assert.equal(help.status, 0, help.stderr);
     assert.match(help.stdout, /^shapes\.inc Bridge\n  install/);
+    // An older ~/.shapes-bridge/shapes-bridge script passes the CLI path first; the launcher drops it.
+    const legacy = spawnSync(paths.appExecutable, [paths.cli, "--help"], { encoding: "utf8", env: { ...process.env, SHAPES_BRIDGE_HOME: base } });
+    assert.match(legacy.stdout, /^shapes\.inc Bridge\n  install/);
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
