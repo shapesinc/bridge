@@ -23,6 +23,10 @@ async function guidedPermissionSetup({ readState, writeState, log, platform = pr
   let shown = "";
   let permissions = {};
   let skipped = false;
+  // macOS shows the Accessibility and Screen Recording dialogs only once per
+  // app; after that the grant is a switch in System Settings. Walk the person
+  // through the remaining panes one at a time, in order, opening each once.
+  const opened = new Set();
   const onSkip = skip ? skip().then(() => { skipped = true; }) : null;
   while (Date.now() < deadline && !skipped) {
     await Promise.race([sleep(pollMs), onSkip].filter(Boolean));
@@ -31,7 +35,12 @@ async function guidedPermissionSetup({ readState, writeState, log, platform = pr
     const text = checklist(permissions);
     if (text !== shown) { log(text); shown = text; }
     if (allGranted(permissions)) { log("All computer permissions are set."); return permissions; }
-    writeState("permission-request", { probe: true });
+    const next = PERMISSIONS.find((key) => permissions[key] && permissions[key] !== "granted" && permissions[key] !== "unsupported" && !opened.has(key));
+    if (next) {
+      opened.add(next);
+      log(`Turn on shapes.inc Bridge under ${LABELS[next]} in the System Settings pane that opens.`);
+      writeState("permission-request", { permission: next });
+    } else writeState("permission-request", { probe: true });
   }
   const missing = PERMISSIONS.filter((key) => permissions[key] !== "granted").map((key) => LABELS[key]);
   if (missing.length) log(`Still needed: ${missing.join(", ")}. Run permissions any time to finish, or turn them on in System Settings → Privacy & Security.`);

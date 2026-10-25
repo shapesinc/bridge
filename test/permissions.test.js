@@ -95,7 +95,10 @@ test("guided setup asks once, polls without re-prompting, and stops when everyth
     writeState: (name, value) => { requests.push(value); if (value.probe && ++polls === 2) state.status = { permissions: { accessibility: "granted", screen_recording: "granted", automation: "granted", full_disk_access: "granted" } }; },
   });
   assert.deepEqual(requests[0], {});
-  assert.ok(requests.slice(1).every((value) => value.probe === true));
+  // After the one-shot prompts, the first missing pane is opened once; probes in between.
+  assert.deepEqual(requests[1], { permission: "accessibility" });
+  assert.ok(requests.slice(2).every((value) => value.probe === true || typeof value.permission === "string"));
+  assert.equal(requests.filter((value) => value.permission === "accessibility").length, 1);
   assert.equal(allGranted(result), true);
   assert.match(lines.at(-1), /All computer permissions are set/);
   assert.match(checklist({ accessibility: "granted" }), /Keyboard & mouse: allowed\n  Screen recording: not checked/);
@@ -106,4 +109,19 @@ test("guided setup gives up after the deadline and names what is still missing",
   const result = await guidedPermissionSetup({ platform: "darwin", pollMs: 1, timeoutMs: 5, log: (line) => lines.push(line), readState: () => ({ permissions: { accessibility: "granted" } }), writeState: () => {} });
   assert.equal(allGranted(result), false);
   assert.match(lines.at(-1), /Still needed: Screen recording, Protected files, App control/);
+});
+
+test("guided setup walks the remaining panes in order, one pane per permission", async () => {
+  const perms = { accessibility: "denied", screen_recording: "denied", automation: "granted", full_disk_access: "denied" };
+  const requests = [];
+  let probes = 0;
+  await guidedPermissionSetup({
+    platform: "darwin", pollMs: 1, timeoutMs: 200, log: () => {},
+    readState: () => ({ permissions: { ...perms } }),
+    writeState: (name, value) => {
+      requests.push(value);
+      if (value.probe) { probes++; if (probes === 1) perms.accessibility = "granted"; if (probes === 3) perms.screen_recording = "granted"; if (probes === 5) perms.full_disk_access = "granted"; }
+    },
+  });
+  assert.deepEqual(requests.filter((value) => value.permission).map((value) => value.permission), ["accessibility", "screen_recording", "full_disk_access"]);
 });

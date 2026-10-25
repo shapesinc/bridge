@@ -135,7 +135,7 @@ async function requestPermissions({ permission, platform = process.platform, exe
   if (all || permission === "full_disk_access") {
     // Touch protected data first so the app is already listed in the pane.
     if (fullDisk() !== "granted") await execute("/usr/bin/open", [`x-apple.systempreferences:com.apple.preference.security?${PANELS.full_disk_access}`], { timeout: 10000, maxBuffer: 16384 });
-  } else if (permission) {
+  } else if (permission && permission !== "automation") {
     await execute("/usr/bin/open", [`x-apple.systempreferences:com.apple.preference.security?${PANELS[permission]}`], { timeout: 10000, maxBuffer: 16384 });
   }
   return getPermissions({ platform, execute, fullDisk });
