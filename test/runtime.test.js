@@ -65,10 +65,12 @@ test("tunnel restart updates endpoint without pairing again or changing account 
 
 test("revocation closes the public door, releases awake assertion and prevents reconnect", async () => fixture(async (abort) => {
   const mock = dependencies();
-  let calls = 0;
-  const running = runDaemon({ ...mock.options, signal: abort.signal, request: async () => { calls++; const error = new Error("revoked"); error.status = 401; throw error; } });
+  let calls = 0, startupDisabled = 0;
+  const running = runDaemon({ ...mock.options, signal: abort.signal, disableStartup: () => { startupDisabled++; }, request: async () => { calls++; const error = new Error("revoked"); error.status = 401; throw error; } });
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(readState("config").revoked, true);
+  // The daemon exits instead of idling, and stops relaunching at sign-in.
+  assert.equal(startupDisabled, 1);
   assert.equal(readState("status").connection, "revoked");
   assert.equal(mock.closed(), true);
   assert.equal(mock.awakeStopped(), true);

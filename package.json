@@ -1,7 +1,7 @@
 {
   "name": "@shapesinc/bridge",
-  "version": "0.1.0",
-  "description": "Give your Shape hands on your own computer — a tiny, token-locked bridge you run and control.",
+  "version": "0.2.0",
+  "description": "shapes.inc Bridge: connect your computer to shapes.inc so the chats you allow can use it. A small background app you run and control.",
   "bin": {
     "bridge": "bin/cli.js",
     "shapes-bridge": "bin/cli.js",
@@ -14,6 +14,7 @@
   "files": [
     "bin",
     "src",
+    "assets",
     "README.md",
     "LICENSE"
   ],

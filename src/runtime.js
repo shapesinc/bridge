@@ -9,6 +9,7 @@ const { apiRequest } = require("./account");
 const { stateDir, readState, writeState, removeState } = require("./state");
 const { keepAwake } = require("./awake");
 const { getPermissions, requestPermissions } = require("./permissions");
+const { disableStartup: disableStartupService } = require("./service");
 
 function enablePrivateLog() {
   const file = path.join(stateDir(), "service.log");
@@ -29,7 +30,7 @@ function enablePrivateLog() {
 
 async function runDaemon({ serve = startServer, tunnelFactory = startTunnel, request = apiRequest,
   permissions = getPermissions, requestNativePermissions = requestPermissions, awakeFactory = keepAwake,
-  signal, heartbeatMs = 30000, retryMs = 1000 } = {}) {
+  disableStartup = disableStartupService, signal, heartbeatMs = 30000, retryMs = 1000 } = {}) {
   const config = readState("config");
   if (!config?.device_token) throw new Error("Run shapes-bridge install to connect this computer.");
   let stopping = false, server, tunnel, awake, permissionBusy = false;
@@ -70,9 +71,11 @@ async function runDaemon({ serve = startServer, tunnelFactory = startTunnel, req
   try {
     if (stopping) return;
     if (config.paused || config.revoked) {
+      // Pause and revocation both remove automatic startup; a stray launch
+      // records its state and exits instead of idling in the background.
       connection = config.revoked ? "revoked" : "paused";
       status();
-      while (!stopping) await sleep(60000);
+      if (config.revoked) { try { disableStartup(); } catch { /* best effort */ } }
       return;
     }
     // A fresh per-process secret revokes any old tunnel immediately after restart.
@@ -105,7 +108,8 @@ async function runDaemon({ serve = startServer, tunnelFactory = startTunnel, req
                 connection = "revoked"; lastError = "This computer was removed from shapes.inc. Run install to reconnect."; status();
                 log(lastError);
                 tunnel.child.kill(); server.closeAllConnections?.(); server.close(); awake.stop();
-                while (!stopping) await sleep(60000);
+                // Stop relaunching at sign-in: the account must pair this computer again.
+                try { disableStartup(); } catch { /* best effort */ }
                 return;
               }
               connection = "reconnecting"; lastError = error.message; status();
