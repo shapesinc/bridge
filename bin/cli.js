@@ -69,7 +69,6 @@ async function install() {
   log("Installing the background connection for your account…");
   removeState("status");
   await startService({ install: true, log });
-  writeState("permission-request", {});
   log("Background startup is installed. Waiting for the connection…");
   const deadline = Date.now() + 45000;
   let status;
@@ -78,13 +77,30 @@ async function install() {
     status = readState("status");
   } while (Date.now() < deadline && status?.connection !== "connected" && status?.connection !== "revoked");
   if (!status) throw new Error("The background service has not started. Run logs for details. Use the default install location; macOS may block background apps stored in Downloads or Desktop.");
-  if (status.connection === "connected") log("Connected. You can close this terminal. shapes.inc Bridge starts automatically when you sign in to this computer.");
+  if (status.connection === "connected") log("Connected. shapes.inc Bridge starts automatically when you sign in to this computer.");
   else log("Setup saved. The background service is still connecting; it will retry automatically. Run status or logs to check progress.");
   log("Keep awake is " + (config.keep_awake ? "on (display lock and lid settings stay in place)." : "off."));
-  log("On macOS, approve native permission prompts for the background runner. Run permissions to check or finish setup.");
+  if (!argv.includes("--no-permissions")) await guidedPermissions();
+  log("You can close this terminal.");
   if (process.platform === "darwin") log(`${APP_NAME} is installed in ${runtimePaths().app}. Open it any time to restart the connection.`);
   log(`Local controls (no internet required): "${runtimePaths().launcher}" status | restart | pause | resume | update | permissions | logs | uninstall`);
   showStatus();
+}
+
+function pressEnter() {
+  if (!process.stdin.isTTY) return null;
+  return () => new Promise((resolve) => {
+    const readline = require("node:readline");
+    const rl = readline.createInterface({ input: process.stdin });
+    rl.once("line", () => { rl.close(); resolve(); });
+  });
+}
+
+async function guidedPermissions() {
+  const { guidedPermissionSetup } = require("../src/setup");
+  const permissions = await guidedPermissionSetup({ readState, writeState, log, skip: pressEnter() });
+  if (process.stdin.isTTY) process.stdin.pause();
+  return permissions;
 }
 
 async function waitForConnection(timeoutMs = 45000) {
@@ -115,7 +131,7 @@ async function main() {
     return;
   }
   if (["--help", "help", "-h"].includes(command)) {
-    log("shapes.inc Bridge\n  install       Pair once and install the background connection\n  status        Connection and native permission status\n  restart       Restart the background connection\n  update        Install the latest shapes.inc Bridge without pairing again\n  open          What opening the app does: restart, or resume when paused\n  pause         Disconnect and stop automatic startup\n  resume        Reconnect and restore automatic startup\n  permissions [accessibility|screen_recording|full_disk_access|automation]\n                Ask the installed background runner for OS access\n  awake on|off  Keep the computer awake while connected\n  logs          Recent local activity (may contain private command text)\n  uninstall     Revoke account access and remove the background service\n  foreground    Temporary legacy connection until the terminal closes\n\nInstall options: --name <name>, --no-open, --no-awake\nDevelopment: --api-url http://127.0.0.1:<port>, --state-dir <directory>");
+    log("shapes.inc Bridge\n  install       Pair once and install the background connection\n  status        Connection and native permission status\n  restart       Restart the background connection\n  update        Install the latest shapes.inc Bridge without pairing again\n  open          What opening the app does: restart, or resume when paused\n  pause         Disconnect and stop automatic startup\n  resume        Reconnect and restore automatic startup\n  permissions   Set up every computer permission in one pass (or name one:\n                accessibility, screen_recording, full_disk_access, automation)\n  awake on|off  Keep the computer awake while connected\n  logs          Recent local activity (may contain private command text)\n  uninstall     Revoke account access and remove the background service\n  foreground    Temporary legacy connection until the terminal closes\n\nInstall options: --name <name>, --no-open, --no-awake, --no-permissions\nDevelopment: --api-url http://127.0.0.1:<port>, --state-dir <directory>");
     return;
   }
   const config = readState("config");
@@ -155,10 +171,10 @@ async function main() {
     if (config.paused || config.revoked) throw new Error("Resume the computer connection before requesting native permissions.");
     const permission = argv[1];
     if (permission && !["accessibility", "screen_recording", "full_disk_access", "automation"].includes(permission)) throw new Error("Unknown permission. Run help for the supported permission names.");
-    writeState("permission-request", permission ? { permission } : {});
-    log("Permission setup requested from the installed background runner. Approve the OS prompts on this computer.");
-    log(`If macOS asks you to add the runner manually, choose: ${runtimePaths().node}\nFull Disk Access and Automation are controlled separately in System Settings.`);
-    await delay(2000); showStatus();
+    if (!permission) { await guidedPermissions(); return; }
+    writeState("permission-request", { permission });
+    log("Permission requested from the installed background app. Approve the prompt or turn on shapes.inc Bridge in the System Settings pane that opens.");
+    await delay(3000); showStatus();
   } else if (command === "awake") {
     if (!["on", "off"].includes(argv[1])) throw new Error("Use awake on or awake off.");
     writeState("config", { ...config, keep_awake: argv[1] === "on" });

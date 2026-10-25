@@ -60,7 +60,9 @@ async function runDaemon({ serve = startServer, tunnelFactory = startTunnel, req
       const requested = readState("permission-request");
       if (requested) {
         removeState("permission-request");
-        await requestNativePermissions(requested);
+        // { probe: true } only refreshes the state (the installer polls while
+        // the person grants access); anything else asks the OS.
+        if (!requested.probe) await requestNativePermissions(requested);
       }
       permissionState = { ...await permissions(), background_service: "enabled", keep_awake: awake?.status() || "disabled" };
       status();

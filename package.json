@@ -1,6 +1,6 @@
 {
   "name": "@shapesinc/bridge",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "shapes.inc Bridge: connect your computer to shapes.inc so the chats you allow can use it. A small background app you run and control.",
   "bin": {
     "bridge": "bin/cli.js",
