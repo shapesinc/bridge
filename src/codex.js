@@ -112,7 +112,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
   await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
   child.unref();
   return { job_id: id, state: "queued", cwd, sandbox, agent, interactive,
-    ...(agent === "claude" ? { permission_scope: sandbox === "read-only" ? "read-only-tools" : "accept-edits" } : {}) };
+    ...(agent === "claude" ? { permission_scope: sandbox === "read-only" ? "read-only-tools" : "full-access" } : {}) };
 }
 
 function alive(pid) {
@@ -160,7 +160,7 @@ function getStatus(id, expectedAgent) {
     permission_denials: state.permissionDenials || 0,
     ...(state.errorType === "permission_denied" && state.status === "failed"
       ? { needs_user_action: true } : {}),
-    ...(agent === "claude" ? { permission_scope: state.sandbox === "read-only" ? "read-only-tools" : "accept-edits" } : {}),
+    ...(agent === "claude" ? { permission_scope: state.sandbox === "read-only" ? "read-only-tools" : "full-access" } : {}),
     cancel_requested: fs.existsSync(path.join(directory, "cancel")),
     diagnostics_available: fs.existsSync(path.join(directory, "stdout.log")) || fs.existsSync(path.join(directory, "stderr.log")),
     diagnostics_directory: directory,

@@ -18,7 +18,7 @@ const done=(status='completed',items=[])=>send({method:'turn/completed',params:{
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
   const m=JSON.parse(line); input.push(m);fs.writeFileSync(${JSON.stringify(path.join(dir, "input.json"))},JSON.stringify(input));
   if(m.method==='initialize'){reply(m,{});return;}
-  if(m.method==='thread/start'){reply(m,{thread:{id:'thread-1'},approvalPolicy:'on-request',approvalsReviewer:'user'});send({method:'thread/started',params:{thread:{id:'thread-1'}}});return;}
+  if(m.method==='thread/start'){reply(m,{thread:{id:'thread-1'},approvalPolicy:'never'});send({method:'thread/started',params:{thread:{id:'thread-1'}}});return;}
   ${body}
 });`, { mode: 0o700 });
   const events = [], requests = [], resolved = [];
@@ -72,8 +72,9 @@ test("native browser request waits for an explicit response and resumes the same
   assert.equal(f.events.find((event) => event.type === "item.completed").item.type, "agent_message");
   assert.deepEqual(f.resolved, [{ id: 0, reason: "answered" }]);
   const thread = f.input().find((message) => message.method === "thread/start").params;
-  assert.equal(thread.approvalPolicy, "on-request");
-  assert.equal(thread.approvalsReviewer, "user");
+  // No per-command approvals: computer access granted to the chat is the consent.
+  assert.equal(thread.approvalPolicy, "never");
+  assert.equal(Object.hasOwn(thread, "approvalsReviewer"), false);
   assert.equal(thread.sandbox, "read-only");
   assert.equal(Object.hasOwn(thread, "model"), false);
   assert.equal(f.input().filter((message) => message.method === "turn/start").length, 1);

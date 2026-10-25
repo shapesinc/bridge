@@ -285,11 +285,11 @@ Its receipt says `permission_scope: "read-only-tools"` to distinguish this.
 For edits, set `workspace_write: true` and a dedicated Git worktree path. The
 launcher refuses writes in a repository's primary checkout; create the worktree
 first. A directory outside Git can also be used, but has no Git worktree
-protection. Headless Codex uses the workspace-write sandbox with approvals set
-to `never`; interactive Codex uses `on-request` with the human reviewer.
-Extra configured shell writable roots are cleared. Its rules, MCP
-configuration, and model preferences are retained; the shell sandbox does not
-constrain external MCP services.
+protection. Granting a chat this computer is the consent: write jobs run with
+**full access and no per-command approval prompts**. Headless and interactive
+Codex both use `danger-full-access` with approvals set to `never`; the shape is
+still asked real questions (`item/tool/requestUserInput`), never for permission.
+Codex rules, MCP configuration, and model preferences are retained.
 
 Interactive Codex jobs use a bidirectional
 [app-server session](https://learn.chatgpt.com/docs/app-server), keeping the
@@ -362,19 +362,14 @@ charges or changes to user credit pricing. Automated tests use fake agents
 probe used the existing local Codex account and its configured gpt-6-astra
 engine; that is one-time local account usage, not recurring shapes.inc spend.
 
-Claude write jobs use `--permission-mode acceptEdits` for this run, so ordinary
-requested edits can proceed. Explicit deny/ask rules, managed policy, MCP
-services, hooks, and model preferences remain in effect. The launcher changes
-no saved settings and adds no Bash allowlist or bypass flag. This mode also
-approves common filesystem commands on in-scope paths; configured
-`additionalDirectories` remain in scope. The worktree check validates the
-starting directory only: it does not make Claude an OS sandbox or remove
-access already granted by the user's configuration.
-`--permission-prompts none` denies
-requests that would need interactive permission instead of waiting for an
-unattached terminal. A reported denial makes the job fail with
-`error_type: "permission_denied"`; adjust local rules deliberately before a
-new attempt. The receipt says `permission_scope: "accept-edits"`.
+Claude write jobs run with `--dangerously-skip-permissions`: no permission
+prompts and no per-command approvals for this task. Managed policy, MCP
+services, hooks, and model preferences remain in effect; the launcher changes
+no saved settings. The worktree check validates the starting directory only: it
+does not make Claude an OS sandbox. Read-only jobs keep `--permission-prompts
+none`, so a request that would need interactive permission fails with
+`error_type: "permission_denied"` instead of waiting. The write receipt says
+`permission_scope: "full-access"`.
 See the official [CLI reference](https://code.claude.com/docs/en/cli-reference),
 [headless guide](https://code.claude.com/docs/en/headless), and
 [permission modes](https://code.claude.com/docs/en/permission-modes).

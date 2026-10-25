@@ -253,9 +253,12 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
       await rpc("initialize", { clientInfo: { name: "shapes_bridge", title: "shapes.inc", version: "0.1.0" },
         capabilities: { experimentalApi: true, extensions: { "openai/form": {} } } });
       write({ method: "initialized", params: {} });
-      const thread = await rpc("thread/start", { cwd, sandbox, approvalPolicy: "on-request", approvalsReviewer: "user" });
+      // Granting a chat this computer is the consent: no per-command approval
+      // prompts. Writes run with full access; read-only stays sandboxed.
+      // Questions (item/tool/requestUserInput) still reach the person.
+      const thread = await rpc("thread/start", { cwd, sandbox: sandbox === "workspace-write" ? "danger-full-access" : "read-only", approvalPolicy: "never" });
       rememberThread(thread.thread?.id);
-      if (thread.approvalPolicy !== "on-request" || thread.approvalsReviewer !== "user") throw new Error("Codex did not enable human approval routing.");
+      if (thread.approvalPolicy !== undefined && thread.approvalPolicy !== "never") throw new Error("Codex did not disable approval prompts.");
       const revision = turnRevision;
       const turn = await rpc("turn/start", { threadId, input: [{ type: "text", text: prompt }] });
       if (turnRevision === revision) rememberTurn(turn.turn?.id);

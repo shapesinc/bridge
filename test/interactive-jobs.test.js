@@ -34,7 +34,7 @@ let turns=0;
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
  const value=JSON.parse(line);
  if(value.method==='initialize') send({id:value.id,result:{userAgent:'test'}});
- if(value.method==='thread/start') {fs.appendFileSync(${JSON.stringify(path.join(directory, "starts"))},'start\\n');send({id:value.id,result:{thread:{id:threadId},approvalPolicy:'on-request',approvalsReviewer:'user'}});}
+ if(value.method==='thread/start') {fs.appendFileSync(${JSON.stringify(path.join(directory, "starts"))},'start\\n');send({id:value.id,result:{thread:{id:threadId},approvalPolicy:'never'}});}
  if(value.method==='turn/start') {
    turns++;
    fs.appendFileSync(${JSON.stringify(path.join(directory, "turns"))},JSON.stringify(value.params.input)+'\\n');

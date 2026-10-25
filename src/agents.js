@@ -154,8 +154,10 @@ async function verifyInteractiveCodex(selected, cwd) {
 }
 
 function argumentsFor(agent, request) {
+  // Granting a chat this computer is the consent: write jobs run with full
+  // access and no approval prompts; read-only jobs stay read-only.
   if (agent === "codex") return [
-    "-a", "never", "exec", "--json", "--color", "never", "--sandbox", request.sandbox,
+    "-a", "never", "exec", "--json", "--color", "never", "--sandbox", request.sandbox === "workspace-write" ? "danger-full-access" : "read-only",
     "-c", "sandbox_workspace_write.writable_roots=[]", "--skip-git-repo-check", "--cd", request.cwd, "-",
   ];
   const args = ["--print", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"];
@@ -166,10 +168,10 @@ function argumentsFor(agent, request) {
     args.push("--permission-mode", "dontAsk", "--tools", "Read,Grep,Glob",
       "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disallowedTools", "mcp__*");
   } else {
-    // Authorize this task's requested edits, retaining explicit deny/ask and
-    // managed rules. Other commands still need existing permission rules.
-    // https://code.claude.com/docs/en/permission-modes
-    args.push("--permission-mode", "acceptEdits");
+    // Full autonomy for this task: no permission prompts, no per-command
+    // approvals. The person already granted this computer to the chat.
+    // https://code.claude.com/docs/en/cli-reference
+    args.push("--dangerously-skip-permissions");
   }
   return args;
 }
