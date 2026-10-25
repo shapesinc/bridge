@@ -83,12 +83,17 @@ Replace `status` with any of these commands. No shell profile changes are made.
   the local service still stops; run `uninstall` again when online to finish
   account revocation.
 
-On macOS, grant access to the installed **shapes.inc Bridge** app when the OS
-requests it. Setup requests permissions from the background service;
+On macOS, `install` ends with one guided permission pass: the installed app asks
+for Accessibility and Screen Recording, triggers the Automation prompts for
+Finder and System Events, and opens the Full Disk Access pane with shapes.inc
+Bridge already listed so it only has to be turned on. The installer shows the
+checklist and waits until everything is allowed (Enter skips; `--no-permissions`
+skips the pass). `permissions` repeats it any time. Grant access to the
+installed **shapes.inc Bridge** app when the OS requests it. Setup requests permissions from the background service;
 granting Terminal access does not establish that the service has access.
 Accessibility and Screen Recording use native preflight checks. Full Disk
-Access and Automation are separate OS decisions; Automation is also per app,
-so their status remains **unknown** rather than claiming blanket permission.
+Access is checked by opening a protected system file; Automation is checked per
+target app (Finder, System Events) without prompting.
 The OS may require restarting the connection after a grant (`pause`, then
 `resume`). Password, secure-input, lock-screen, and system-protected UI remain
 subject to OS restrictions. The bridge does not bypass these protections.
