@@ -17,9 +17,11 @@
 //   POST /agents/start  -> delegate {agent?, prompt, cwd?, workspace_write?}
 //   GET  /agents/status -> wait up to 20 seconds for a job {job_id in query}
 //   POST /agents/cancel -> request cancellation {job_id}
+//   GET  /agents/jobs   -> recent jobs {request_key?, limit? in query}
 //   POST /codex/start   -> start a local Codex task {prompt, cwd?, workspace_write?}
 //   GET  /codex/status  -> wait up to 20 seconds for a job {job_id in query}
 //   POST /codex/cancel  -> request cancellation {job_id}
+//   GET  /codex/jobs    -> recent Codex jobs {request_key?, limit? in query}
 
 const http = require("node:http");
 const os = require("node:os");
@@ -28,7 +30,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { exec, spawn } = require("node:child_process");
 const { URL } = require("node:url");
-const { startJob, getStatus, cancelJob, respondJob } = require("./codex");
+const { startJob, publicStatus, listJobs, cancelJob, respondJob } = require("./codex");
 const { listAgents } = require("./agents");
 
 const MAX_OUTPUT = 20000;
@@ -46,17 +48,18 @@ const CAPABILITIES = {
   codex_start: "start a local Codex task using this computer's sign-in",
   codex_status: "wait for a local Codex task and collect its result",
   codex_cancel: "stop a local Codex task",
+  codex_jobs: "list recent local Codex tasks to find a job_id again",
   agents: "discover installed and signed-in local Codex and Claude Code agents",
   agent_start: "delegate a task to a ready local agent",
   agent_status: "wait for a local agent task and collect its result",
   agent_cancel: "stop a local agent task",
+  agent_jobs: "list recent local agent tasks to find a job_id again",
 };
 
 const CODEX_TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"]);
 
 function codexReceipt(id, expectedAgent) {
-  const { diagnostics_directory, diagnostics_available, ...receipt } = getStatus(id, expectedAgent);
-  return receipt;
+  return publicStatus(id, expectedAgent);
 }
 
 async function waitForCodex(id, req, res, expectedAgent, immediate = false) {
@@ -241,7 +244,7 @@ function startServer({ port, token }) {
       return sendJson(res, 200, { ok: true });
     }
     if (route === "/capabilities" && method === "GET") {
-      return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: { interactive_codex: true } });
+      return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: { interactive_codex: true, idempotent_start: true, job_list: true } });
     }
 
     // Everything below requires the token.
@@ -260,12 +263,13 @@ function startServer({ port, token }) {
           const codexOnly = route === "/codex/start";
           const body = await readBody(req);
           if (!body || typeof body !== "object" || Array.isArray(body)
-              || Object.keys(body).some((key) => !["prompt", "cwd", "workspace_write", "interactive", ...(codexOnly ? [] : ["agent"])].includes(key))
+              || Object.keys(body).some((key) => !["prompt", "cwd", "workspace_write", "interactive", "request_key", ...(codexOnly ? [] : ["agent"])].includes(key))
               || typeof body.prompt !== "string" || !body.prompt.trim()
               || (body.cwd !== undefined && typeof body.cwd !== "string")
               || (!codexOnly && body.agent !== undefined && !["auto", "codex", "claude"].includes(body.agent))
               || (body.workspace_write !== undefined && typeof body.workspace_write !== "boolean")
-              || (body.interactive !== undefined && typeof body.interactive !== "boolean")) {
+              || (body.interactive !== undefined && typeof body.interactive !== "boolean")
+              || (body.request_key !== undefined && typeof body.request_key !== "string")) {
             return sendJson(res, 400, { error: "Supply prompt text, optional absolute cwd, boolean workspace_write, and a supported agent on /agents/start." });
           }
           const cwd = body.cwd ? expand(body.cwd) : process.cwd();
@@ -273,13 +277,30 @@ function startServer({ port, token }) {
           log(`AGENT START (${agent}, cwd=${cwd}, scope=${body.workspace_write ? "workspace-write" : "read-only"})`);
           const result = await startJob({
             prompt: body.prompt, cwd, agent,
-            interactive: body.interactive === true,
+            interactive: body.interactive === true, requestKey: body.request_key,
             sandbox: body.workspace_write ? "workspace-write" : "read-only",
           });
-          return sendJson(res, 202, result);
+          if (result.deduplicated) log(`AGENT START deduplicated: ${result.job_id}`);
+          return sendJson(res, result.deduplicated ? 200 : 202, result);
         } catch (err) {
+          const job = err.jobId ? { job_id: err.jobId } : {};
           if (err.errorType === "agent_unavailable") return sendJson(res, 409,
-            { error: err.message, error_type: err.errorType, started: false, agents: err.agents });
+            { error: err.message, error_type: err.errorType, started: false, agents: err.agents, ...job });
+          return sendJson(res, err.statusCode || 400, { error: err.message, ...(err.jobId ? { started: false, ...job } : {}) });
+        }
+      }
+
+      if (["/codex/jobs", "/agents/jobs"].includes(route) && method === "GET") {
+        try {
+          const unknown = [...url.searchParams.keys()].some((key) => !["request_key", "limit"].includes(key));
+          if (unknown) return sendJson(res, 400, { error: "Supply optional request_key and limit." });
+          log("AGENT JOBS: listing recent jobs");
+          return sendJson(res, 200, listJobs({
+            requestKey: url.searchParams.get("request_key") ?? undefined,
+            limit: url.searchParams.get("limit") ?? 10,
+            agent: route === "/codex/jobs" ? "codex" : undefined,
+          }));
+        } catch (err) {
           return sendJson(res, 400, { error: err.message });
         }
       }
