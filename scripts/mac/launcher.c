@@ -38,6 +38,14 @@ int main(int argc, char **argv) {
   char resolved[PATH_MAX];
   if (!realpath(executable, resolved)) return 70;
   char *dir = dirname(resolved);
+  if (argc > 1 && strcmp(argv[1], "desktop-ui") == 0) {
+    char controls[PATH_MAX];
+    snprintf(controls, sizeof(controls), "%s/shapes.inc Bridge Controls", dir);
+    char *control_args[] = { controls, NULL };
+    execv(controls, control_args);
+    perror("shapes.inc Bridge: could not open computer connection controls");
+    return 72;
+  }
   char node[PATH_MAX], cli[PATH_MAX];
   snprintf(node, sizeof(node), "%s/shapes.inc Bridge Runtime", dir);
   snprintf(cli, sizeof(cli), "%s/../Resources/runtime/bin/cli.js", dir);

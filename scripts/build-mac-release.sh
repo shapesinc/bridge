@@ -37,11 +37,40 @@ done
 lipo -create "$CACHE/arm64/node" "$CACHE/x64/node" -output "$CACHE/node-universal"
 chmod 755 "$CACHE/node-universal"
 
+echo "==> Build native connection controls and launcher"
+for arch in arm64 x86_64; do
+  xcrun clang -arch "$arch" -mmacosx-version-min=11.0 scripts/mac/launcher.c -o "$CACHE/launcher-$arch"
+  xcrun swiftc -target "$arch-apple-macosx11.0" scripts/mac/controls.swift -o "$CACHE/controls-$arch"
+done
+lipo -create "$CACHE/launcher-arm64" "$CACHE/launcher-x86_64" -output "$CACHE/launcher-universal"
+lipo -create "$CACHE/controls-arm64" "$CACHE/controls-x86_64" -output "$CACHE/controls-universal"
+
+# Pin both release and SHA-256. Runtime setup never fetches executable code.
+CLOUDFLARED_VERSION=2026.10.6
+for arch in arm64 amd64; do
+  if [ "$arch" = arm64 ]; then
+    expected=ea1e5105d35bbe16cee5b2f7b4742059ada341fbd35938ed827c24b85efa51c8
+  else
+    expected=6c04a13835ca5ff29a0c6f58d17d1f3956aad1b7df1631f5b5efbc06269deded
+  fi
+  archive="$CACHE/cloudflared-$CLOUDFLARED_VERSION-$arch.tgz"
+  [ -s "$archive" ] || curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/$CLOUDFLARED_VERSION/cloudflared-darwin-$arch.tgz" -o "$archive"
+  actual=$(shasum -a 256 "$archive" | awk '{print $1}')
+  [ "$expected" = "$actual" ] || { echo "cloudflared checksum mismatch for $arch"; exit 1; }
+  mkdir -p "$CACHE/cloudflared-$arch"
+  tar -xzf "$archive" -C "$CACHE/cloudflared-$arch" cloudflared
+done
+lipo -create "$CACHE/cloudflared-arm64/cloudflared" "$CACHE/cloudflared-amd64/cloudflared" -output "$CACHE/cloudflared-universal"
+
 echo "==> Assemble"
-node scripts/assemble-mac-app.js --node "$CACHE/node-universal" --out "$DIST/$APP_NAME.app"
+node scripts/assemble-mac-app.js --node "$CACHE/node-universal" --out "$DIST/$APP_NAME.app" \
+  --launcher "$CACHE/launcher-universal" --controls "$CACHE/controls-universal" --cloudflared "$CACHE/cloudflared-universal"
 codesign --remove-signature "$DIST/$APP_NAME.app/Contents/MacOS/$APP_NAME Runtime" 2>/dev/null || true
 
 echo "==> Sign (hardened runtime)"
+for executable in "$APP_NAME Controls" cloudflared; do
+  codesign --force --timestamp --options runtime --sign "$SIGNING_IDENTITY" "$DIST/$APP_NAME.app/Contents/MacOS/$executable"
+done
 codesign --force --timestamp --options runtime \
   --entitlements scripts/mac/runtime.entitlements \
   --identifier inc.shapes.bridge.runtime \

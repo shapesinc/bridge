@@ -41,3 +41,17 @@ test("redirects cannot forward the saved device token to another host", async ()
   try { await assert.rejects(apiRequest(`http://127.0.0.1:${server.address().port}`, "/devices/heartbeat", {}, "secret")); }
   finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); }
 });
+
+test("closing setup aborts an in-flight pairing request and never returns a saved credential", async () => {
+  const abort = new AbortController();
+  let requested;
+  const reached = new Promise((resolve) => { requested = resolve; });
+  const server = http.createServer((_req, _res) => { requested(); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const pending = pairDevice({ api: `http://127.0.0.1:${server.address().port}`, signal: abort.signal, onCode: () => assert.fail("must not expose a pending code") });
+    await reached;
+    abort.abort(new Error("Window closed"));
+    await assert.rejects(pending, /Window closed/);
+  } finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); }
+});

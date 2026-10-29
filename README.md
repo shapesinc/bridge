@@ -20,6 +20,22 @@ a **shapes.inc Bridge** launcher entry; on Windows it registers a
 
 ## Run it
 
+The shapes.inc Mac app can include Bridge. Choose **Computer connection…**
+from the shapes.inc application menu, then **Connect**. Approve the matching
+code in shapes.inc and choose which chats may use the computer. Node and the
+tunnel helper are included; no terminal command or separate download is needed.
+**Disconnect** stops remote access and keeps the computer disconnected after
+restart. Closing the window cancels unfinished approval; an established
+connection keeps running until disconnected. This requires a Mac app release
+built with Bridge 0.2.5 or later; older app releases do not include these controls.
+
+The native window does not grant chat access or operating-system permissions.
+**Computer permissions…** explicitly requests the existing permission flow.
+Pairing remains separate from the web app's current signed-in session; the
+account approving the displayed code owns the computer connection.
+
+### Standalone installation
+
 You need [Node.js](https://nodejs.org) 18+. No DMG, Python, or administrator
 installation is required.
 
@@ -125,6 +141,26 @@ runtime and app with the Developer ID certificate and hardened runtime, notarize
 and staples, and writes `dist/shapes.inc-Bridge-macos.zip`. Upload that file to a
 GitHub release; the installer always fetches the latest release asset and
 refuses anything not signed by the shapes.inc team or older than itself.
+
+The release now also builds the native **Computer connection** window and
+packages a universal cloudflared 2026.10.6 executable, with both architecture
+archives checked against pinned SHA-256 values. Both executables are signed
+before the app. Host apps embed the complete signed bundle and open it with
+the `desktop-ui` argument. First connection verifies and copies that bundled
+release into the existing per-user install location, preserving account pairing
+and grants. It never downloads a replacement, accepts an unsigned helper, or
+downgrades a newer installed Bridge. The parent app must be re-signed and
+notarized after embedding; an archive assembled locally is not a release.
+
+`src/desktop.js` exposes independent `connect`, `status`, `pause`, `permissions`
+and `dispose` contracts. `bin/desktop.js` exposes the first four as fixed newline
+commands over private stdin, with JSON status snapshots on stdout. No device
+credential or private polling code is returned. Repeated connect during approval
+resumes that operation; pause/EOF cancels unfinished approval. Status requires a
+fresh heartbeat from the matching device and a live PID before claiming a
+connection. The same primitives cover first pairing, resuming a paused device
+and reconnecting a revoked device. They do not introduce AI calls: **+$0/day**
+provider inference spend; existing requested task execution costs are unchanged.
 
 ## Is it safe?
 
