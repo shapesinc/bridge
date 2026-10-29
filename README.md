@@ -170,9 +170,11 @@ These map 1:1 to the `SHAPES_BRIDGE` tool in shapes.inc.
 | `agent_start` | start a task with a ready local agent | `POST /agents/start` |
 | `agent_status` | wait for an agent job and read its result | `GET /agents/status?job_id=…` |
 | `agent_cancel` | request that an agent job stops | `POST /agents/cancel` |
+| `agent_jobs` | list recent agent jobs to find a `job_id` again | `GET /agents/jobs` |
 | `codex_start` | start a task in local Codex                 | `POST /codex/start` |
 | `codex_status` | wait for a job and read its result         | `GET /codex/status?job_id=…` |
 | `codex_cancel` | request that a job stops                  | `POST /codex/cancel` |
+| `codex_jobs` | list recent Codex jobs                     | `GET /codex/jobs` |
 
 ## Troubleshooting
 
@@ -249,9 +251,21 @@ All agent endpoints require the same `X-Token` header as other machine actions:
   `interactive: true` for Codex. It returns HTTP 202 with `job_id`, `agent`,
   `state: "queued"`, `interactive`, `cwd`, and `sandbox`. Claude receipts also
   identify `permission_scope`; Claude continues to use its headless runner.
+  The job is saved as `queued` before the agent checks run, so its ID can be
+  listed even if the start response is lost.
+- Start also accepts an optional `request_key` (16-128 letters, digits, `-`,
+  or `_`). Repeating a start with the same key and task returns HTTP 200 with
+  the existing job's current receipt and `deduplicated: true` instead of
+  running the task again. Only a job that failed before it began running can
+  be started again with the same key. Reusing a key for a different task
+  returns HTTP 409.
+- `GET /agents/jobs` lists up to `limit` (default 10, max 50) recent jobs,
+  newest first, with `job_id`, `state`, `agent`, `cwd`, `created_at`,
+  `error`, and a short `task_preview`. `?request_key=…` returns only the job
+  started with that key. `GET /codex/jobs` lists Codex jobs only.
 - If no requested agent is ready, start returns HTTP 409 with
   `error_type: "agent_unavailable"`, `started: false`, and sanitized `agents`.
-  No job was created. `auto` chooses a ready agent before execution; it never
+  The task did not run; `job_id` identifies its failed record. `auto` chooses a ready agent before execution; it never
   retries another agent after a job starts, because partial work may exist.
 - `GET /agents/status?job_id=…` waits up to 20 seconds for a terminal result
   and returns HTTP 200 with the current state, `agent`, `final`, `error`,

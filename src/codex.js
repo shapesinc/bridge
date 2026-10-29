@@ -26,6 +26,49 @@ function isCodexPermissionDenial(item) {
   ));
 }
 
+const FAILURE_HINTS = [
+  ["auth_required", /not logged in|unauthori[sz]ed|\b401\b|invalid api key|authenticat|log ?in again|sign ?in again|token (?:has )?expired|refresh token/i,
+    (name) => `Sign in to ${name} on this computer again, then retry.`],
+  ["usage_limit", /usage limit|rate limit|\b429\b|quota|too many requests|credit balance|out of credits/i,
+    (name) => `The ${name} account on this computer hit a usage or rate limit. Wait for it to reset or check its plan, then retry.`],
+  ["model_unavailable", /unknown model|invalid model|model\b[^.]{0,80}\b(?:not (?:found|supported|available)|does not exist|unsupported)/i,
+    (name) => `The model configured for ${name} on this computer is unavailable. Choose a supported model in its settings, then retry.`],
+  ["network_error", /stream disconnected|network|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|connection (?:error|refused|reset)|failed to connect|could not resolve/i,
+    (name) => `${name} could not reach its service from this computer. Check the internet connection, then retry.`],
+];
+
+// Agent-reported errors are short, user-facing messages; stdout/stderr logs
+// stay private. Credentials and long opaque values are removed regardless.
+function sanitizeAgentError(text) {
+  if (typeof text !== "string") return "";
+  return text.replace(/\b(?:sk|rk|pk|sess)-[A-Za-z0-9_-]{8,}/g, "[redacted]")
+    .replace(/\b(Bearer|Basic|token|key|password|secret)(\s*[:=]?\s*)\S+/gi, "$1$2[redacted]")
+    .replace(/[A-Za-z0-9+/_=-]{32,}/g, "[redacted]")
+    .replace(/\s+/g, " ").trim().slice(0, 300);
+}
+
+// Claude result text can be model prose, so it is only classified, never quoted.
+function failureReason({ agent, agentError, exitCode, signal, errorType }) {
+  const name = agentName(agent);
+  const reported = sanitizeAgentError(agentError);
+  if (reported) {
+    const hint = FAILURE_HINTS.find(([, pattern]) => pattern.test(reported));
+    const advice = hint ? hint[2](name) : `Open ${name} on this computer to check the problem, then retry.`;
+    return { errorType: errorType || "agent_error",
+      error: agent === "claude" ? `${name} reported an error before finishing. ${advice}` : `${name} reported: "${reported}". ${advice}` };
+  }
+  if (typeof exitCode === "number" && exitCode !== 0) {
+    return { errorType: errorType || "process_error",
+      error: `${name} exited with code ${exitCode} before reporting a result. Open ${name} on this computer to check that it is signed in and up to date, then retry.` };
+  }
+  if (signal) {
+    return { errorType: errorType || "process_error",
+      error: `${name} was stopped by ${signal} before reporting a result. Make sure nothing on this computer is closing it, then retry.` };
+  }
+  return { errorType: errorType || "missing_completion",
+    error: `${name} exited without finishing the task. Update ${name} on this computer, then retry.` };
+}
+
 function privateDir(directory) {
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const stat = fs.lstatSync(directory);
@@ -80,7 +123,73 @@ function validateCwd(value, sandbox) {
   return cwd;
 }
 
-async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex", interactive = false }) {
+const REQUEST_KEY = /^[A-Za-z0-9_-]{16,128}$/;
+
+function agentName(agent) { return agent === "claude" ? "Claude Code" : "Codex"; }
+
+function requestFile(requestKey) {
+  const directory = privateDir(path.join(root(), "requests"));
+  return path.join(directory, `${crypto.createHash("sha256").update(requestKey).digest("hex")}.json`);
+}
+
+function readRequest(requestKey) {
+  try { return JSON.parse(fs.readFileSync(requestFile(requestKey), "utf8")); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+}
+
+function validRequestKey(value) {
+  if (value !== undefined && (typeof value !== "string" || !REQUEST_KEY.test(value))) {
+    throw new Error("request_key must be 16-128 letters, digits, '-' or '_'.");
+  }
+  return value;
+}
+
+// A job that failed before its runner started never executed anything, so the
+// same request may run again; any job that started is returned instead.
+function neverRan(id) {
+  try {
+    const state = loadState(jobDir(id));
+    return !state.startedAt && getStatus(id).state === "failed";
+  } catch { return true; }
+}
+
+function existingRequest(requestKey, fingerprint) {
+  const existing = readRequest(requestKey);
+  if (!existing) return null;
+  if (existing.fingerprint !== fingerprint) {
+    const error = new Error("This request_key already belongs to a different task. Use a new request_key for a new task.");
+    error.statusCode = 409;
+    throw error;
+  }
+  return neverRan(existing.job_id) ? null : existing.job_id;
+}
+
+// Bind a request key to one job atomically. Returns the existing job ID when a
+// concurrent retry of the same request already claimed it.
+function claimRequest(requestKey, id, fingerprint) {
+  const file = requestFile(requestKey);
+  const temporary = `${file}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify({ job_id: id, fingerprint }), { mode: 0o600, flag: "wx" });
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { fs.linkSync(temporary, file); return null; }
+      catch (error) { if (error.code !== "EEXIST") throw error; }
+      const existing = existingRequest(requestKey, fingerprint);
+      if (existing) return existing;
+      fs.rmSync(file, { force: true });
+    }
+    throw new Error("This task is being started by another request. List recent jobs to find it before retrying.");
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
+function publicStatus(id, expectedAgent) {
+  const { diagnostics_directory, diagnostics_available, ...receipt } = getStatus(id, expectedAgent);
+  return receipt;
+}
+
+async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex", interactive = false, requestKey }) {
   if (process.platform === "win32") throw new Error("The local agent launcher currently requires macOS or Linux.");
   if (!["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
   cwd = validateCwd(cwd, sandbox);
@@ -96,23 +205,84 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
   }
   if (typeof prompt !== "string" || Buffer.byteLength(prompt) > MAX_PROMPT) throw new Error("Prompt must be text no larger than 64 KiB.");
   if (!prompt.trim()) throw new Error("Prompt must not be empty.");
+  if (typeof interactive !== "boolean") throw new Error("interactive must be boolean.");
+  validRequestKey(requestKey);
+  const fingerprint = requestKey && crypto.createHash("sha256")
+    .update(JSON.stringify([prompt, cwd, sandbox, timeout, agent, interactive])).digest("hex");
+  if (requestKey && fs.existsSync(root())) {
+    const existing = existingRequest(requestKey, fingerprint);
+    if (existing) return { ...publicStatus(existing), deduplicated: true };
+  }
   const selected = await selectAgent(agent, cwd);
   agent = selected.id;
-  if (typeof interactive !== "boolean") throw new Error("interactive must be boolean.");
   interactive = interactive && agent === "codex";
   if (interactive) await verifyInteractiveCodex(selected, cwd);
   const executable = selected.executable;
   const id = crypto.randomUUID();
   const directory = privateDir(path.join(root(), id));
+  const state = { id, status: "queued", cwd, sandbox, agent, interactive, createdAt: new Date().toISOString(),
+    promptPreview: prompt.trim().replace(/\s+/g, " ").slice(0, 160) };
   writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable, agent, interactive }));
-  saveState(directory, { id, status: "queued", cwd, sandbox, agent, interactive, createdAt: new Date().toISOString() });
-  const child = spawn(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
-    detached: true, stdio: "ignore", env: { ...process.env, SHAPES_CODEX_JOB_DIR: root() },
-  });
-  await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
-  child.unref();
-  return { job_id: id, state: "queued", cwd, sandbox, agent, interactive,
+  saveState(directory, state);
+  if (requestKey) {
+    let existing;
+    try { existing = claimRequest(requestKey, id, fingerprint); }
+    catch (error) { fs.rmSync(directory, { recursive: true, force: true }); throw error; }
+    if (existing) {
+      fs.rmSync(directory, { recursive: true, force: true });
+      return { ...publicStatus(existing), deduplicated: true };
+    }
+  }
+  // The job is durably queued and listable from here on; a launch failure is
+  // recorded on it so a status or list call explains what happened.
+  try {
+    const child = spawn(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
+      detached: true, stdio: "ignore", env: { ...process.env, SHAPES_CODEX_JOB_DIR: root() },
+    });
+    await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
+    child.unref();
+  } catch (error) {
+    const message = `The local job runner could not be launched (${error.code || "spawn failed"}), so the task did not run. Restart shapes.inc Bridge on this computer, then start the task again.`;
+    Object.assign(state, { status: "failed", error: message, errorType: "process_error", finishedAt: new Date().toISOString() });
+    saveState(directory, state);
+    const failure = new Error(message);
+    failure.jobId = id;
+    throw failure;
+  }
+  return { job_id: id, state: "queued", cwd, sandbox, agent, interactive, created_at: state.createdAt,
     ...(agent === "claude" ? { permission_scope: sandbox === "read-only" ? "read-only-tools" : "full-access" } : {}) };
+}
+
+function listJobs({ requestKey, limit = 10, agent } = {}) {
+  const count = Number(limit);
+  if (!Number.isInteger(count) || count < 1 || count > 50) throw new Error("limit must be between 1 and 50.");
+  validRequestKey(requestKey);
+  const base = root();
+  let ids;
+  if (requestKey) {
+    const mapping = readRequest(requestKey);
+    ids = mapping && UUID.test(mapping.job_id || "") ? [mapping.job_id] : [];
+  } else {
+    ids = fs.readdirSync(base).filter((name) => UUID.test(name)).map((name) => {
+      try { return { name, time: fs.statSync(path.join(base, name, "state.json")).mtimeMs }; } catch { return null; }
+    }).filter(Boolean).sort((a, b) => b.time - a.time).slice(0, 200).map((item) => item.name);
+  }
+  const jobs = [];
+  for (const id of ids) {
+    try {
+      const status = getStatus(id);
+      if (agent && status.agent !== agent) continue;
+      const state = loadState(jobDir(id));
+      jobs.push({
+        job_id: id, state: status.state, agent: status.agent, interactive: status.interactive, cwd: status.cwd,
+        sandbox: status.sandbox, created_at: status.created_at, finished_at: status.finished_at,
+        error: status.error, error_type: status.error_type, thread_id: status.thread_id,
+        task_preview: typeof state.promptPreview === "string" ? state.promptPreview : null,
+      });
+    } catch { /* A partially written or removed job is not listable. */ }
+  }
+  jobs.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  return { jobs: jobs.slice(0, count) };
 }
 
 function alive(pid) {
@@ -141,10 +311,18 @@ function getStatus(id, expectedAgent) {
   const agent = state.agent || "codex";
   if (expectedAgent && agent !== expectedAgent) throw new Error("This job belongs to a different local agent.");
   if (!TERMINAL.has(state.status)) {
-    const lost = state.supervisorPid ? !alive(state.supervisorPid) : Date.now() - Date.parse(state.createdAt) > 30000;
+    let lost = false;
+    if (state.supervisorPid) {
+      lost = !alive(state.supervisorPid) && (state.startedAt
+        ? "The local job runner stopped before the agent reported a result, for example because the bridge restarted or the computer shut down. The task may have made partial changes; review them before starting it again."
+        : "The local job runner stopped before the task began, so it did not run. Start it again.");
+    } else if (Date.now() - Date.parse(state.createdAt) > 30000) {
+      lost = "The local job runner never started, so the task did not run. Restart shapes.inc Bridge on this computer, then start the task again.";
+    }
     if (lost) {
       state.status = "failed";
-      state.error = "Local agent supervisor exited before reporting completion.";
+      state.error = lost;
+      state.errorType = "process_error";
       state.finishedAt = new Date().toISOString();
     }
   }
@@ -244,7 +422,10 @@ async function superviseInteractive(directory, state, request) {
           failed = true;
           persist();
         }
-        if (value.type === "turn.failed") failed = true;
+        if (value.type === "turn.failed") {
+          failed = true;
+          if (typeof value.error?.message === "string" && value.error.message.trim()) state.agentError = value.error.message.slice(0, 4000);
+        }
         if (value.type === "item.completed" && value.item?.type === "agent_message") {
           const result = Buffer.from(value.item.text || "");
           state.resultTruncated = result.length > MAX_OUTPUT;
@@ -301,9 +482,10 @@ async function superviseInteractive(directory, state, request) {
     const result = await completion;
     Object.assign(state, { usage: result.usage, exitCode: result.exitCode, signal: result.signal });
     if (result.status !== "completed") failed = true;
-  } catch {
+    if (typeof result.error?.message === "string" && result.error.message.trim()) state.agentError ||= result.error.message.slice(0, 4000);
+  } catch (error) {
     failed = true;
-    state.error ||= "The local agent did not complete successfully. Inspect the private local diagnostics directory.";
+    if (!state.error && error?.message && !state.agentError) state.agentError = error.message.slice(0, 4000);
   } finally {
     clearInterval(poll); clearTimeout(timer);
     process.removeListener("SIGTERM", onSignal); process.removeListener("SIGINT", onSignal);
@@ -313,6 +495,7 @@ async function superviseInteractive(directory, state, request) {
     state.status = stopped || (failed ? "failed" : "completed");
     state.finishedAt = new Date().toISOString();
     if (state.status === "failed" && state.errorType === "permission_denied") state.error = "The local agent was blocked by tool permissions.";
+    else if (state.status === "failed" && !state.error) Object.assign(state, failureReason({ agent: "codex", agentError: state.agentError, exitCode: state.exitCode, signal: state.signal, errorType: state.errorType }));
     saveState(directory, state);
   }
 }
@@ -382,6 +565,8 @@ async function supervise(id) {
         if (!success || denied) {
           turnFailed = true;
           state.errorType = denied ? "permission_denied" : "agent_error";
+          if (!denied && typeof value.result === "string" && value.result.trim()) state.agentError = value.result.slice(0, 4000);
+          else if (!denied && Array.isArray(value.errors) && typeof value.errors[0] === "string") state.agentError = value.errors[0].slice(0, 4000);
           return;
         }
         turnCompleted = true;
@@ -402,7 +587,11 @@ async function supervise(id) {
         saveState(directory, state);
       }
       if (value.type === "turn.completed") { turnCompleted = true; state.usage = value.usage; }
-      if (value.type === "turn.failed" || value.type === "error") turnFailed = true;
+      if (value.type === "turn.failed" || value.type === "error") {
+        turnFailed = true;
+        const message = value.type === "error" ? value.message : value.error?.message;
+        if (typeof message === "string" && message.trim()) state.agentError = message.slice(0, 4000);
+      }
       if (value.type === "item.completed" && value.item?.type === "agent_message") {
         const result = Buffer.from(value.item.text || "");
         state.resultTruncated = result.length > MAX_OUTPUT;
@@ -446,15 +635,20 @@ async function supervise(id) {
     finish(stopped || (success ? "completed" : "failed"), {
       ...exit,
       ...(!stopped && !success ? {
-        error: state.errorType === "permission_denied" ? "The local agent was blocked by tool permissions. This background runner cannot handle interactive approval; review access in the local agent before continuing."
-          : "The local agent did not complete successfully. Inspect the private local diagnostics directory.",
-        errorType: state.errorType || (exit.exitCode === 0 ? "missing_completion" : "process_error"),
+        ...(state.errorType === "permission_denied" ? {
+          error: "The local agent was blocked by tool permissions. This background runner cannot handle interactive approval; review access in the local agent before continuing.",
+          errorType: "permission_denied",
+        } : failureReason({ agent, agentError: state.agentError, exitCode: exit.exitCode, signal: exit.signal,
+          errorType: state.errorType || (exit.exitCode === 0 ? undefined : "process_error") })),
       } : {}),
     });
   } catch (error) {
     if (child) killGroup("SIGKILL");
-    finish("failed", { error: "The local agent process could not finish. Inspect the private local diagnostics directory.", errorType: "process_error" });
+    const name = agentName(agent);
+    finish("failed", { errorType: "process_error", error: error?.code
+      ? `${name} could not be started on this computer (${error.code}). Reinstall or update ${name}, then retry.`
+      : `${name} stopped unexpectedly before reporting a result. Open ${name} on this computer to check that it works, then retry.` });
   }
 }
 
-module.exports = { startJob, getStatus, cancelJob, respondJob, supervise, validateCwd, MAX_OUTPUT };
+module.exports = { startJob, getStatus, publicStatus, listJobs, cancelJob, respondJob, supervise, validateCwd, failureReason, MAX_OUTPUT };
