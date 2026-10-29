@@ -40,7 +40,7 @@ chmod 755 "$CACHE/node-universal"
 echo "==> Build native connection controls and launcher"
 for arch in arm64 x86_64; do
   xcrun clang -arch "$arch" -mmacosx-version-min=11.0 scripts/mac/launcher.c -o "$CACHE/launcher-$arch"
-  xcrun swiftc -target "$arch-apple-macosx11.0" scripts/mac/controls.swift -o "$CACHE/controls-$arch"
+  xcrun swiftc -j 1 -target "$arch-apple-macosx11.0" scripts/mac/controls.swift -o "$CACHE/controls-$arch"
 done
 lipo -create "$CACHE/launcher-arm64" "$CACHE/launcher-x86_64" -output "$CACHE/launcher-universal"
 lipo -create "$CACHE/controls-arm64" "$CACHE/controls-x86_64" -output "$CACHE/controls-universal"
@@ -65,6 +65,11 @@ lipo -create "$CACHE/cloudflared-arm64/cloudflared" "$CACHE/cloudflared-amd64/cl
 echo "==> Assemble"
 node scripts/assemble-mac-app.js --node "$CACHE/node-universal" --out "$DIST/$APP_NAME.app" \
   --launcher "$CACHE/launcher-universal" --controls "$CACHE/controls-universal" --cloudflared "$CACHE/cloudflared-universal"
+# Check the assembled app, not just the compiler inputs: every nested executable
+# must run on either supported Mac architecture before signing and distribution.
+for executable in "$APP_NAME" "$APP_NAME Runtime" "$APP_NAME Controls" cloudflared; do
+  lipo "$DIST/$APP_NAME.app/Contents/MacOS/$executable" -verify_arch arm64 x86_64
+done
 codesign --remove-signature "$DIST/$APP_NAME.app/Contents/MacOS/$APP_NAME Runtime" 2>/dev/null || true
 
 echo "==> Sign (hardened runtime)"
