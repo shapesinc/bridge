@@ -131,6 +131,8 @@ test("cancel and deadline invalidate a live prompt without granting permission",
     assert.equal(result.state, operation === "timeout" ? "timed_out" : "cancelled");
     assert.deepEqual(result.pending_requests, []);
     assert.equal(result.final, "");
+    // Stopping closes the session; that is not a runner failure to explain.
+    assert.notEqual(result.error_type, "process_error");
   });
 });
 

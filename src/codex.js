@@ -33,7 +33,7 @@ const FAILURE_HINTS = [
     (name) => `The ${name} account on this computer hit a usage or rate limit. Wait for it to reset or check its plan, then retry.`],
   ["model_unavailable", /unknown model|invalid model|model\b[^.]{0,80}\b(?:not (?:found|supported|available)|does not exist|unsupported)/i,
     (name) => `The model configured for ${name} on this computer is unavailable. Choose a supported model in its settings, then retry.`],
-  ["network_error", /stream disconnected|network (?:error|is unreachable|unavailable)|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|connection (?:error|refused|reset)|failed to connect|could not resolve/i,
+  ["network_error", /stream disconnected|\bnetwork\b(?!\s+access)|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|connection (?:error|refused|reset)|failed to connect|could not resolve/i,
     (name) => `${name} could not reach its service from this computer. Check the internet connection, then retry.`],
 ];
 
@@ -43,10 +43,11 @@ const FAILURE_HINTS = [
 function sanitizeAgentError(text) {
   if (typeof text !== "string") return "";
   return text.replace(/\b(?:sk|rk|pk|sess)-[A-Za-z0-9_-]{8,}/g, "[redacted]")
-    .replace(/\b(Bearer|Basic)\s+\S+/gi, "$1 [redacted]")
-    .replace(/\b((?:[A-Za-z]+[_-])?(?:token|key|password|secret))(\s*[:=]\s*)\S+/gi, "$1$2[redacted]")
+    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/\bBasic\s+(?=[A-Za-z0-9+/]*\d)[A-Za-z0-9+/]{8,}={0,2}/g, "Basic [redacted]")
+    .replace(/\b([A-Za-z0-9_-]*(?:token|key|password|passwd|secret))(["']?\s*[:=]\s*["']?)[^\s"',}]+/gi, "$1$2[redacted]")
     .replace(/(?:\/(?:Users|home)\/|[A-Za-z]:\\Users\\)[^\s/\\"']+/g, "~")
-    .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, "[email]")
+    .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b/g, "[email]")
     .replace(/[A-Za-z0-9+/_=-]{32,}/g, "[redacted]")
     .replace(/\s+/g, " ").trim().slice(0, 300);
 }
@@ -489,11 +490,14 @@ async function superviseInteractive(directory, state, request) {
     if (result.status !== "completed") failed = true;
     if (typeof result.error?.message === "string" && result.error.message.trim()) state.agentError ||= result.error.message.slice(0, 4000);
   } catch {
-    // A bridge-side exception is not the agent's report: never quote it
-    // (it can carry local paths), and don't blame the agent's install.
+    // Not the agent's own report: never quote it (it can carry local paths).
+    // A cancel or deadline closes the session on purpose, and a permission
+    // denial keeps its own explanation.
     failed = true;
-    if (!state.error && !state.agentError) Object.assign(state, { errorType: "process_error",
-      error: "The local job runner stopped before Codex reported a result. Restart shapes.inc Bridge on this computer, then retry." });
+    if (!stopped && !state.error && !state.agentError && state.errorType !== "permission_denied") {
+      Object.assign(state, { errorType: "process_error",
+        error: "Codex stopped before reporting a result. Check that Codex is installed, signed in and up to date on this computer, then retry; if it keeps happening, restart shapes.inc Bridge." });
+    }
   } finally {
     clearInterval(poll); clearTimeout(timer);
     process.removeListener("SIGTERM", onSignal); process.removeListener("SIGINT", onSignal);
