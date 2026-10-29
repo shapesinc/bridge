@@ -142,4 +142,7 @@ test("failure reasons classify common causes and never quote credentials or Clau
   assert.ok(!claude.error.includes("private prose"));
   assert.equal(failureReason({ agent: "claude", agentError: "private error", errorType: "agent_error" }).errorType, "agent_error");
   assert.match(failureReason({ agent: "codex", signal: "SIGKILL" }).error, /SIGKILL/);
+  // Redaction must neither hide the cause from the hints nor garble ordinary words.
+  assert.match(failureReason({ agent: "codex", agentError: "Your access token has expired" }).error, /Sign in to Codex/);
+  assert.match(failureReason({ agent: "codex", agentError: "Input exceeds 200000 tokens" }).error, /200000 tokens/);
 });

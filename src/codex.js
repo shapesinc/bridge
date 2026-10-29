@@ -42,7 +42,7 @@ const FAILURE_HINTS = [
 function sanitizeAgentError(text) {
   if (typeof text !== "string") return "";
   return text.replace(/\b(?:sk|rk|pk|sess)-[A-Za-z0-9_-]{8,}/g, "[redacted]")
-    .replace(/\b(Bearer|Basic|token|key|password|secret)(\s*[:=]?\s*)\S+/gi, "$1$2[redacted]")
+    .replace(/\b(Bearer|Basic|token|key|password|secret)\b(\s*[:=]?\s*)\S+/gi, "$1$2[redacted]")
     .replace(/[A-Za-z0-9+/_=-]{32,}/g, "[redacted]")
     .replace(/\s+/g, " ").trim().slice(0, 300);
 }
@@ -52,7 +52,8 @@ function failureReason({ agent, agentError, exitCode, signal, errorType }) {
   const name = agentName(agent);
   const reported = sanitizeAgentError(agentError);
   if (reported) {
-    const hint = FAILURE_HINTS.find(([, pattern]) => pattern.test(reported));
+    // Classify the raw text: redaction can remove the words a hint needs.
+    const hint = FAILURE_HINTS.find(([, pattern]) => pattern.test(agentError));
     const advice = hint ? hint[2](name) : `Open ${name} on this computer to check the problem, then retry.`;
     return { errorType: errorType || "agent_error",
       error: agent === "claude" ? `${name} reported an error before finishing. ${advice}` : `${name} reported: "${reported}". ${advice}` };
@@ -483,9 +484,10 @@ async function superviseInteractive(directory, state, request) {
     Object.assign(state, { usage: result.usage, exitCode: result.exitCode, signal: result.signal });
     if (result.status !== "completed") failed = true;
     if (typeof result.error?.message === "string" && result.error.message.trim()) state.agentError ||= result.error.message.slice(0, 4000);
-  } catch (error) {
+  } catch {
+    // A bridge-side exception is not the agent's report: never quote it
+    // (it can carry local paths). failureReason explains it generically.
     failed = true;
-    if (!state.error && error?.message && !state.agentError) state.agentError = error.message.slice(0, 4000);
   } finally {
     clearInterval(poll); clearTimeout(timer);
     process.removeListener("SIGTERM", onSignal); process.removeListener("SIGINT", onSignal);
