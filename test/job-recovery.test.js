@@ -150,10 +150,12 @@ test("failure reasons classify common causes and never quote credentials or Clau
   assert.ok(!/dana|abc123/.test(local), local);
   assert.doesNotMatch(failureReason({ agent: "codex", agentError: "network access is disabled in this sandbox" }).error, /internet connection/);
   assert.match(failureReason({ agent: "codex", agentError: "Network request failed" }).error, /internet connection/);
-  for (const secret of ["OPENAI_API_KEY=abc123 is invalid", "PGPASSWORD=hunter2 rejected", '{"password": "hunter2"}']) {
-    assert.ok(!/abc123|hunter2/.test(failureReason({ agent: "codex", agentError: secret }).error), secret);
+  for (const secret of ["OPENAI_API_KEY=abc123 is invalid", "PGPASSWORD=hunter2 rejected", '{"password": "hunter2"}',
+    "Authorization: Basic aHVudGVyMjpzZWNyZXQ= rejected", "authorization: basic dXNlcjpwYXNz rejected",
+    "connect to postgres://admin:hunter2@10.0.0.5:5432/app failed"]) {
+    assert.ok(!/abc123|hunter2|aHVudGVy|dXNlcjpw/.test(failureReason({ agent: "codex", agentError: secret }).error), secret);
   }
-  for (const prose of ["Install @openai/codex@0.45.0 to continue", "Basic plan does not include this model"]) {
+  for (const prose of ["Install @openai/codex@0.45.0 to continue", "Basic plan does not include this model", "Basic authentication failed"]) {
     assert.ok(failureReason({ agent: "codex", agentError: prose }).error.includes(prose), prose);
   }
 });
