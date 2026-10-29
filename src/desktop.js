@@ -14,10 +14,10 @@ function createDesktopController({ read = readState, write = writeState, remove 
   let operation = null, pairing = null, error = null, startingUntil = 0;
   function status() {
     const config = read("config"), saved = read("status");
-    const recent = saved && saved.device_id === config?.device_id && isRunning(saved.pid) &&
-      now() - Date.parse(saved.updated_at) < 90000;
+    const live = saved && saved.device_id === config?.device_id && isRunning(saved.pid);
+    const recent = live && now() - Date.parse(saved.updated_at) < 90000;
     const connection = operation ? "pairing" : !config ? "disconnected" : config.revoked ? "revoked" :
-      config.paused ? (recent && !["offline", "paused"].includes(saved.connection) ? "disconnect_failed" : "paused") : recent ? saved.connection : now() < startingUntil ? "starting" : "offline";
+      config.paused ? (live && !["offline", "paused"].includes(saved.connection) ? "disconnect_failed" : "paused") : recent ? saved.connection : now() < startingUntil ? "starting" : "offline";
     return { connection, name: config?.name || null, pairing, error: error || (recent ? saved.error : null),
       permissions: recent ? saved.permissions : {}, version: require("../package.json").version };
   }
@@ -47,7 +47,7 @@ function createDesktopController({ read = readState, write = writeState, remove 
       startingUntil = now() + 15000;
       await start();
     } catch (cause) {
-      startingUntil = 0;
+      if (operation === controller) startingUntil = 0;
       if (!controller.signal.aborted) error = cause.message;
     } finally {
       if (operation === controller) { operation = null; pairing = null; }

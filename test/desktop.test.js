@@ -98,6 +98,27 @@ test("connect is idempotent at the primitive boundary for every live connection 
   }
 });
 
+test("a stale heartbeat is not proof that a paused but live daemon stopped", () => {
+  const f = fixture();
+  f.state.config = { ...f.config, paused: true };
+  f.state.status = { pid: 123, device_id: "device", connection: "connected", updated_at: "2000-01-01T00:00:00Z" };
+  assert.equal(f.controller.status().connection, "disconnect_failed");
+});
+
+test("a cancelled old approval cannot clear a newer connection's startup protection", async () => {
+  let complete;
+  const f = fixture({ pair: () => new Promise((resolve) => { complete = resolve; }) });
+  const old = f.controller.connect();
+  await f.controller.pause();
+  f.state.config = f.config;
+  await f.controller.connect();
+  complete(f.config);
+  await old;
+  assert.equal(f.controller.status().connection, "starting");
+  await f.controller.connect();
+  assert.deepEqual(f.calls, ["install", "start"]);
+});
+
 test("actual stdio controller reads private persisted state without leaking credentials or exposing commands", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-desktop-contract-"));
   fs.writeFileSync(path.join(directory, "config.json"), JSON.stringify({ paused: true, device_token: "never-output", name: "Contract Mac" }));
