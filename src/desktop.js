@@ -11,19 +11,20 @@ function createDesktopController({ read = readState, write = writeState, remove 
   install = installBundledMacApp, request = apiRequest, publish = () => {},
   isRunning = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } },
   now = Date.now } = {}) {
-  let operation = null, pairing = null, error = null;
+  let operation = null, pairing = null, error = null, startingUntil = 0;
   function status() {
     const config = read("config"), saved = read("status");
     const recent = saved && saved.device_id === config?.device_id && isRunning(saved.pid) &&
       now() - Date.parse(saved.updated_at) < 90000;
     const connection = operation ? "pairing" : !config ? "disconnected" : config.revoked ? "revoked" :
-      config.paused ? (recent && !["offline", "paused"].includes(saved.connection) ? "disconnect_failed" : "paused") : recent ? saved.connection : "offline";
+      config.paused ? (recent && !["offline", "paused"].includes(saved.connection) ? "disconnect_failed" : "paused") : recent ? saved.connection : now() < startingUntil ? "starting" : "offline";
     return { connection, name: config?.name || null, pairing, error: error || (recent ? saved.error : null),
       permissions: recent ? saved.permissions : {}, version: require("../package.json").version };
   }
   const emit = () => { const value = status(); publish(value); return value; };
   async function connect() {
     if (operation) return status(); // A repeated click resumes the same approval.
+    if (["starting", "connected", "connecting", "reconnecting", "disconnect_failed"].includes(status().connection)) return status();
     const controller = new AbortController();
     operation = controller; error = null;
     emit();
@@ -43,8 +44,10 @@ function createDesktopController({ read = readState, write = writeState, remove 
       controller.signal.throwIfAborted();
       write("config", { ...config, paused: false, revoked: false, keep_awake: config.keep_awake !== false });
       remove("status");
+      startingUntil = now() + 15000;
       await start();
     } catch (cause) {
+      startingUntil = 0;
       if (!controller.signal.aborted) error = cause.message;
     } finally {
       if (operation === controller) { operation = null; pairing = null; }
@@ -54,7 +57,7 @@ function createDesktopController({ read = readState, write = writeState, remove 
   }
   async function pause() {
     operation?.abort(new Error("Computer approval cancelled."));
-    operation = null; pairing = null; error = null;
+    operation = null; pairing = null; error = null; startingUntil = 0;
     const config = read("config");
     if (config) {
       // Persist first so a concurrent restart cannot restore remote access.

@@ -28,7 +28,9 @@ test("first connection composes pairing, bundled installation and start without 
   assert.equal(f.state["permission-request"], undefined);
   assert.equal(JSON.stringify(f.events).includes("secret"), false);
   assert.equal(JSON.stringify(f.events).includes("never-output"), false);
-  assert.equal(f.controller.status().connection, "offline"); // no invented Connected before heartbeat
+  assert.equal(f.controller.status().connection, "starting"); // no invented Connected before heartbeat
+  await f.controller.connect();
+  assert.deepEqual(f.calls, ["install", "start"]); // no restart during initial daemon startup
 });
 
 test("same primitives resume a paused device without pairing or changing identity and pause remains durable", async () => {
@@ -84,6 +86,16 @@ test("permissions require an active connection; status never treats a dead proce
   f.state.status = { pid: 123, device_id: "device", connection: "connected", updated_at: new Date().toISOString() };
   assert.equal(f.controller.status().connection, "offline");
   assert.throws(() => f.controller.permissions());
+});
+
+test("connect is idempotent at the primitive boundary for every live connection state", async () => {
+  for (const connection of ["starting", "connecting", "connected", "reconnecting"]) {
+    const f = fixture();
+    f.state.config = f.config;
+    f.state.status = { pid: 123, device_id: "device", connection, updated_at: new Date().toISOString() };
+    assert.equal((await f.controller.connect()).connection, connection);
+    assert.deepEqual(f.calls, []);
+  }
 });
 
 test("actual stdio controller reads private persisted state without leaking credentials or exposing commands", async () => {
