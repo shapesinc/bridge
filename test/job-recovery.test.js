@@ -145,4 +145,8 @@ test("failure reasons classify common causes and never quote credentials or Clau
   // Redaction must neither hide the cause from the hints nor garble ordinary words.
   assert.match(failureReason({ agent: "codex", agentError: "Your access token has expired" }).error, /Sign in to Codex/);
   assert.match(failureReason({ agent: "codex", agentError: "Input exceeds 200000 tokens" }).error, /200000 tokens/);
+  assert.match(failureReason({ agent: "codex", agentError: "Your refresh token has expired" }).error, /refresh token has expired/);
+  const local = failureReason({ agent: "codex", agentError: "Bad config at /Users/dana/.codex/config.toml for dana@example.com, api_key: abc123" }).error;
+  assert.ok(!/dana|abc123/.test(local), local);
+  assert.doesNotMatch(failureReason({ agent: "codex", agentError: "network access is disabled in this sandbox" }).error, /internet connection/);
 });

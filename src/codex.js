@@ -33,16 +33,20 @@ const FAILURE_HINTS = [
     (name) => `The ${name} account on this computer hit a usage or rate limit. Wait for it to reset or check its plan, then retry.`],
   ["model_unavailable", /unknown model|invalid model|model\b[^.]{0,80}\b(?:not (?:found|supported|available)|does not exist|unsupported)/i,
     (name) => `The model configured for ${name} on this computer is unavailable. Choose a supported model in its settings, then retry.`],
-  ["network_error", /stream disconnected|network|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|connection (?:error|refused|reset)|failed to connect|could not resolve/i,
+  ["network_error", /stream disconnected|network (?:error|is unreachable|unavailable)|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|connection (?:error|refused|reset)|failed to connect|could not resolve/i,
     (name) => `${name} could not reach its service from this computer. Check the internet connection, then retry.`],
 ];
 
 // Agent-reported errors are short, user-facing messages; stdout/stderr logs
-// stay private. Credentials and long opaque values are removed regardless.
+// stay private. Credentials, long opaque values, home paths and email
+// addresses are removed regardless: the quote can reach a group chat.
 function sanitizeAgentError(text) {
   if (typeof text !== "string") return "";
   return text.replace(/\b(?:sk|rk|pk|sess)-[A-Za-z0-9_-]{8,}/g, "[redacted]")
-    .replace(/\b(Bearer|Basic|token|key|password|secret)\b(\s*[:=]?\s*)\S+/gi, "$1$2[redacted]")
+    .replace(/\b(Bearer|Basic)\s+\S+/gi, "$1 [redacted]")
+    .replace(/\b((?:[A-Za-z]+[_-])?(?:token|key|password|secret))(\s*[:=]\s*)\S+/gi, "$1$2[redacted]")
+    .replace(/(?:\/(?:Users|home)\/|[A-Za-z]:\\Users\\)[^\s/\\"']+/g, "~")
+    .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, "[email]")
     .replace(/[A-Za-z0-9+/_=-]{32,}/g, "[redacted]")
     .replace(/\s+/g, " ").trim().slice(0, 300);
 }
@@ -486,8 +490,10 @@ async function superviseInteractive(directory, state, request) {
     if (typeof result.error?.message === "string" && result.error.message.trim()) state.agentError ||= result.error.message.slice(0, 4000);
   } catch {
     // A bridge-side exception is not the agent's report: never quote it
-    // (it can carry local paths). failureReason explains it generically.
+    // (it can carry local paths), and don't blame the agent's install.
     failed = true;
+    if (!state.error && !state.agentError) Object.assign(state, { errorType: "process_error",
+      error: "The local job runner stopped before Codex reported a result. Restart shapes.inc Bridge on this computer, then retry." });
   } finally {
     clearInterval(poll); clearTimeout(timer);
     process.removeListener("SIGTERM", onSignal); process.removeListener("SIGINT", onSignal);
