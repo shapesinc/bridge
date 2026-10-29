@@ -43,10 +43,12 @@ const FAILURE_HINTS = [
 function sanitizeAgentError(text) {
   if (typeof text !== "string") return "";
   return text.replace(/\b(?:sk|rk|pk|sess)-[A-Za-z0-9_-]{8,}/g, "[redacted]")
-    .replace(/\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+@/g, "$1[redacted]@")
+    // A URL's user:password, up to the last @ before its host.
+    .replace(/\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/]*@/g, "$1[redacted]@")
+    // An Authorization value whatever its scheme; elsewhere "Basic" needs a credential-shaped value ("Basic plan" stays).
+    .replace(/\b((?:proxy-)?authorization["']?\s*[:=]\s*["']?)((?:basic|bearer|digest|token)\s+)?[^\s"',}]+/gi, "$1$2[redacted]")
     .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
-    // Credential-shaped: a digit, +, / or padding, or a capital past the first letter ("Basic plan" stays).
-    .replace(/\b(Basic|basic|BASIC)\s+(?=[A-Za-z0-9+/]*[\d+/=]|[A-Za-z0-9+/]+[A-Z])[A-Za-z0-9+/]{8,}={0,2}/g, "$1 [redacted]")
+    .replace(/\b(basic)\s+(?=[A-Za-z0-9+/]*[\d=])[A-Za-z0-9+/]{8,}={0,2}/gi, "$1 [redacted]")
     .replace(/\b([A-Za-z0-9_-]*(?:token|key|password|passwd|secret))(["']?\s*[:=]\s*["']?)[^\s"',}]+/gi, "$1$2[redacted]")
     .replace(/(?:\/(?:Users|home)\/|[A-Za-z]:\\Users\\)[^\s/\\"']+/g, "~")
     .replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b/g, "[email]")

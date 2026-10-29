@@ -152,10 +152,11 @@ test("failure reasons classify common causes and never quote credentials or Clau
   assert.match(failureReason({ agent: "codex", agentError: "Network request failed" }).error, /internet connection/);
   for (const secret of ["OPENAI_API_KEY=abc123 is invalid", "PGPASSWORD=hunter2 rejected", '{"password": "hunter2"}',
     "Authorization: Basic aHVudGVyMjpzZWNyZXQ= rejected", "authorization: basic dXNlcjpwYXNz rejected",
-    "connect to postgres://admin:hunter2@10.0.0.5:5432/app failed"]) {
-    assert.ok(!/abc123|hunter2|aHVudGVy|dXNlcjpw/.test(failureReason({ agent: "codex", agentError: secret }).error), secret);
+    "Authorization: Basic YTpi rejected", "connect to postgres://admin:hunt@er2@10.0.0.5:5432/app failed"]) {
+    assert.ok(!/abc123|hunter2|er2|aHVudGVy|dXNlcjpw|YTpi/.test(failureReason({ agent: "codex", agentError: secret }).error), secret);
   }
-  for (const prose of ["Install @openai/codex@0.45.0 to continue", "Basic plan does not include this model", "Basic authentication failed"]) {
+  for (const prose of ["Install @openai/codex@0.45.0 to continue", "Basic plan does not include this model",
+    "Basic JavaScript support needs basic read/write access", "fetch https://registry.npmjs.org:443/@openai/codex failed"]) {
     assert.ok(failureReason({ agent: "codex", agentError: prose }).error.includes(prose), prose);
   }
 });
