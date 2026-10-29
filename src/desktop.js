@@ -1,14 +1,14 @@
 "use strict";
 
 const { readState, writeState, removeState } = require("./state");
-const { pairDevice, apiRequest } = require("./account");
+const { pairDevice } = require("./account");
 const { startService, stopService, installBundledMacApp } = require("./service");
 
 // The native controller and CLI use these same lifecycle primitives. Nothing
 // here grants a chat access, requests OS permission, or starts an agent job.
 function createDesktopController({ read = readState, write = writeState, remove = removeState,
   pair = pairDevice, start = startService, stop = stopService,
-  install = installBundledMacApp, request = apiRequest, publish = () => {},
+  install = installBundledMacApp, publish = () => {},
   isRunning = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } },
   now = Date.now } = {}) {
   let operation = null, pairing = null, error = null, startingUntil = 0;
@@ -63,8 +63,9 @@ function createDesktopController({ read = readState, write = writeState, remove 
       // Persist first so a concurrent restart cannot restore remote access.
       write("config", { ...config, paused: true });
       try {
+        // The daemon sends its endpoint-scoped offline receipt during shutdown.
+        // A second unscoped request here could erase a resumed daemon's heartbeat.
         stop();
-        await request(config.api, "/devices/offline", {}, config.device_token, "POST", 2500);
       } catch (cause) { error = cause.message; }
     }
     return emit();

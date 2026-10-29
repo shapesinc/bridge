@@ -54,6 +54,29 @@ test("same primitives re-pair a revoked device and ignore stale or another devic
   assert.equal(f.state.status, undefined);
 });
 
+test("pause followed by immediate resume cannot erase the new daemon's endpoint", async () => {
+  let endpoint = "old", finishOffline;
+  const f = fixture({
+    // Simulate a delayed account endpoint write. An unscoped controller request
+    // used to arrive after the resumed daemon's first successful heartbeat.
+    request: async (_api, route, body) => {
+      assert.equal(route, "/devices/offline");
+      await new Promise((resolve) => { finishOffline = resolve; });
+      if (!body.bridge_url || body.bridge_url === endpoint) endpoint = null;
+    },
+    start: () => { endpoint = "resumed"; },
+  });
+  f.state.config = f.config;
+  f.state.status = { pid: 123, device_id: "device", connection: "connected", updated_at: new Date().toISOString() };
+  const stopping = f.controller.pause();
+  await f.controller.connect();
+  finishOffline?.();
+  await stopping;
+  assert.equal(endpoint, "resumed");
+  assert.equal(f.state.config.paused, false);
+  assert.deepEqual(f.calls, ["stop", "install"]);
+});
+
 test("cancelled repeated connect is one approval and cannot install after a delayed result", async () => {
   let complete, count = 0;
   const f = fixture({ pair: () => { count++; return new Promise((resolve) => { complete = resolve; }); } });
