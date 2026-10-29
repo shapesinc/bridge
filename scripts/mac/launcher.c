@@ -1,9 +1,8 @@
 // shapes.inc Bridge app launcher (the bundle's main executable).
 //
 // Finder, Spotlight and launchd all start this tiny signed program. It runs the
-// bundled Node runtime with the bridge CLI: with no arguments (a double-click)
-// that is `open`, which restarts or resumes the connection; with arguments it
-// forwards them (launchd passes `daemon`). The runtime stays a child process, so
+// native controls on an ordinary app launch; explicit CLI arguments are
+// forwarded to Node (launchd passes `daemon`). The runtime stays a child process, so
 // macOS attributes every permission prompt to this app: its name and icon.
 #include <libgen.h>
 #include <limits.h>
@@ -38,13 +37,20 @@ int main(int argc, char **argv) {
   char resolved[PATH_MAX];
   if (!realpath(executable, resolved)) return 70;
   char *dir = dirname(resolved);
-  if (argc > 1 && strcmp(argv[1], "desktop-ui") == 0) {
+  int explicit_controls = argc > 1 && strcmp(argv[1], "desktop-ui") == 0;
+  int app_launch = argc == 1 || (argc == 2 && strncmp(argv[1], "-psn", 4) == 0);
+  if (explicit_controls || app_launch) {
     char controls[PATH_MAX];
     snprintf(controls, sizeof(controls), "%s/shapes.inc Bridge Controls", dir);
-    char *control_args[] = { controls, NULL };
-    execv(controls, control_args);
-    perror("shapes.inc Bridge: could not open computer connection controls");
-    return 72;
+    // Launch Services drops custom arguments from sandboxed Catalyst callers.
+    // A shipped GUI bundle must therefore open its controls without arguments.
+    // Older locally assembled bundles without Controls retain their CLI default.
+    if (explicit_controls || access(controls, X_OK) == 0) {
+      char *control_args[] = { controls, NULL };
+      execv(controls, control_args);
+      perror("shapes.inc Bridge: could not open computer connection controls");
+      return 72;
+    }
   }
   char node[PATH_MAX], cli[PATH_MAX];
   snprintf(node, sizeof(node), "%s/shapes.inc Bridge Runtime", dir);
