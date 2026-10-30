@@ -98,11 +98,16 @@ async function runDaemon({ serve = startServer, tunnelFactory = startTunnel, req
           let tunnelExited = tunnel.child.exitCode !== null && tunnel.child.exitCode !== undefined;
           tunnel.child.once("exit", () => { tunnelExited = true; wake?.(); });
           tunnel.child.once("error", () => { tunnelExited = true; wake?.(); });
+          let heartbeatFailures = 0;
           while (!stopping && !tunnelExited) {
+            let nextHeartbeatMs = heartbeatMs;
             try {
               await refreshPermissions();
+              if (stopping || tunnelExited) break;
               await request(config.api, "/devices/heartbeat", { bridge_url: tunnel.url, token, permissions: permissionState }, config.device_token);
               registeredEndpoint = { bridge_url: tunnel.url, token };
+              if (stopping || tunnelExited) break;
+              heartbeatFailures = 0;
               connection = "connected"; lastHeartbeat = new Date().toISOString(); lastError = null; attempts = 0; status();
             } catch (error) {
               if (error.status === 401) {
@@ -114,10 +119,15 @@ async function runDaemon({ serve = startServer, tunnelFactory = startTunnel, req
                 try { disableStartup(); } catch { /* best effort */ }
                 return;
               }
+              if (stopping) break;
               connection = "reconnecting"; lastError = error.message; status();
               log("Waiting for shapes.inc; retrying automatically.");
+              // The tunnel URL can exist before its public endpoint is ready.
+              // Retry startup and recovery promptly, then back off to the
+              // regular cadence during a sustained outage. Success resets it.
+              nextHeartbeatMs = Math.min(heartbeatMs, retryMs * 2 ** Math.min(heartbeatFailures++, 6));
             }
-            if (!stopping && !tunnelExited) await sleep(heartbeatMs);
+            if (!stopping && !tunnelExited) await sleep(nextHeartbeatMs);
           }
           if (!stopping) throw new Error("The secure tunnel closed; reconnecting automatically.");
         } catch (error) {
