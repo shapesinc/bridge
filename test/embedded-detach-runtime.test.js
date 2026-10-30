@@ -19,18 +19,20 @@ const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { retu
 // Real stdio controller, private state files, owned daemon process, HTTP computer
 // API and heartbeat requests. Only remote pairing/tunnel/OS services are fixtures;
 // this does not install a background service or make provider/permission calls.
-test("durable host detach retains the live daemon and heartbeat until disconnect or account change", { timeout: 15000 }, async () => {
+test("durable detach preserves established access and enabled retry consent across controller reopen", { timeout: 20000 }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-detach-runtime-"));
   const heartbeats = [], offline = [], cancelled = [], pending = new Map(), pids = new Set();
+  let unavailable = false, pairingStarts = 0;
   const backend = http.createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
     let result = {};
-    if (request.url === "/bridge/pairings") result = { pairing_id: "pair-1", device_code: SECRET, user_code: "ABCD-1234", expires_in: 600, verification_uri_complete: "http://127.0.0.1/approve" };
+    if (request.url === "/bridge/pairings") { pairingStarts++; result = { pairing_id: "pair-1", device_code: SECRET, user_code: "ABCD-1234", expires_in: 600, verification_uri_complete: "http://127.0.0.1/approve" }; }
     else if (request.url === "/bridge/pairings/poll") result = { status: "approved", owner_user_id: "owner-a", device_id: DEVICE, device_token: TOKEN };
     else if (request.url === "/bridge/pairings/cancel") { cancelled.push(body); result = { status: "cancelled" }; }
     else if (["/bridge/devices/heartbeat", "/bridge/devices/offline"].includes(request.url)) {
       if (request.headers.authorization !== `Bearer ${TOKEN}`) { response.writeHead(401); response.end("{}"); return; }
+      if (unavailable && request.url.endsWith("heartbeat")) { response.writeHead(503); response.end("{}"); return; }
       (request.url.endsWith("heartbeat") ? heartbeats : offline).push(body);
     } else { response.writeHead(404); response.end("{}"); return; }
     response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(result));
@@ -57,20 +59,24 @@ test("durable host detach retains the live daemon and heartbeat until disconnect
     const {serveEmbeddedProtocol}=require(${JSON.stringify(path.join(source, "embedded-protocol"))});
     const runtime=createEmbeddedProcess({graceMs:500,spawnProcess:(file,args,options)=>spawn(file,['-e',${JSON.stringify(daemonCode)}],options)});
     serveEmbeddedProtocol({input:process.stdin,output:process.stdout,
-      controller:createEmbeddedController({api:${JSON.stringify(api)},runtime,readinessMs:3000}),onClose:code=>process.exit(code)});`;
-  const host = spawn(process.execPath, ["-e", hostCode], { env: { ...process.env, SHAPES_BRIDGE_HOME: directory }, stdio: ["pipe", "pipe", "pipe"] });
-  const exited = once(host, "exit");
-  let buffer = "", stderr = "", sequence = 0;
-  host.stderr.on("data", (chunk) => { stderr += chunk; });
-  host.stdout.on("data", (chunk) => {
-    buffer += chunk;
-    let newline;
-    while ((newline = buffer.indexOf("\n")) !== -1) {
-      const reply = JSON.parse(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1);
-      const callback = pending.get(reply.id); pending.delete(reply.id);
-      if (reply.error) callback?.reject(Object.assign(new Error(reply.error.code), reply.error)); else callback?.resolve(reply.result);
-    }
-  });
+      controller:createEmbeddedController({api:${JSON.stringify(api)},runtime,readinessMs:1000}),onClose:code=>process.exit(code)});`;
+  let host, exited, stderr = "", sequence = 0;
+  function startHost() {
+    host = spawn(process.execPath, ["-e", hostCode], { env: { ...process.env, SHAPES_BRIDGE_HOME: directory }, stdio: ["pipe", "pipe", "pipe"] });
+    exited = once(host, "exit");
+    let buffer = "";
+    host.stderr.on("data", (chunk) => { stderr += chunk; });
+    host.stdout.on("data", (chunk) => {
+      buffer += chunk;
+      let newline;
+      while ((newline = buffer.indexOf("\n")) !== -1) {
+        const reply = JSON.parse(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1);
+        const callback = pending.get(reply.id); pending.delete(reply.id);
+        if (reply.error) callback?.reject(Object.assign(new Error(reply.error.code), reply.error)); else callback?.resolve(reply.result);
+      }
+    });
+  }
+  startHost();
   function request(operation, params = {}) {
     const id = `request-${++sequence}`;
     return new Promise((resolve, reject) => {
@@ -85,6 +91,11 @@ test("durable host detach retains the live daemon and heartbeat until disconnect
     await request("beginConnect", { attemptId, expectedUserId: "owner-a" });
     const connected = await request("completeConnect", { attemptId });
     assert.equal(connected.online, true); pids.add(read("status").pid);
+  }
+  async function waitConnected() {
+    await until(() => fs.existsSync(path.join(directory, "status.json")) && read("status").connection === "connected");
+    pids.add(read("status").pid);
+    return read("status").pid;
   }
   try {
     await account();
@@ -123,6 +134,41 @@ test("durable host detach retains the live daemon and heartbeat until disconnect
     host.stdin.end(); assert.deepEqual(await exited, [0, null]);
     await until(() => !alive(finalPID)); assert.equal(stderr, "");
     assert.equal(offline.length, 3);
+
+    // An enabled saved device is recovering from a simulated backend outage.
+    // Closing its retry UI must stop the unresolved attempt without creating a
+    // new persistent pause. A fresh controller still verifies the owner first.
+    unavailable = true; startHost(); await account();
+    await request("beginConnect", { attemptId: "enabled-retry", expectedUserId: "owner-a" });
+    await assert.rejects(request("completeConnect", { attemptId: "enabled-retry" }), { code: "connection_pending" });
+    const retryPID = read("status").pid; pids.add(retryPID);
+    await request("detach"); await request("detach");
+    await until(() => !alive(retryPID));
+    assert.equal(read("config").paused, false, "UI detach must retain the enabled consent that preceded its retry");
+    host.stdin.end(); assert.deepEqual(await exited, [0, null]);
+    unavailable = false; startHost();
+    assert.equal((await request("status")).deviceId, undefined);
+    const startsBeforeReopen = pairingStarts;
+    await account(); const reopenedPID = await waitConnected();
+    assert.notEqual(reopenedPID, retryPID); assert.equal(read("config").device_token, TOKEN);
+    assert.equal((await request("status")).online, true); assert.equal(pairingStarts, startsBeforeReopen);
+
+    // The same lifecycle must retain an earlier explicit pause when its new
+    // resume attempt has not completed before the UI leaves.
+    await request("disconnect"); await until(() => !alive(reopenedPID));
+    unavailable = true;
+    await request("beginConnect", { attemptId: "paused-resume", expectedUserId: "owner-a" });
+    await assert.rejects(request("completeConnect", { attemptId: "paused-resume" }), { code: "connection_pending" });
+    const resumePID = read("status").pid; pids.add(resumePID);
+    assert.equal((await request("detach")).state, "paused");
+    await until(() => !alive(resumePID)); assert.equal(read("config").paused, true);
+    host.stdin.end(); assert.deepEqual(await exited, [0, null]);
+    unavailable = false; startHost();
+    const priorHeartbeats = heartbeats.length;
+    assert.equal((await account()).state, "paused");
+    assert.equal((await request("status")).online, false);
+    assert.equal(heartbeats.length, priorHeartbeats); assert.equal(pairingStarts, startsBeforeReopen);
+    host.stdin.end(); assert.deepEqual(await exited, [0, null]); assert.equal(stderr, "");
   } finally {
     host.stdin.end();
     if (host.exitCode === null && host.signalCode === null) {
