@@ -139,5 +139,25 @@ test("macOS app bundle build stages, swaps, signs, and the launcher runs the bun
     // An older ~/.shapes-bridge/shapes-bridge script passes the CLI path first; the launcher drops it.
     const legacy = spawnSync(paths.appExecutable, [paths.cli, "--help"], { encoding: "utf8", env: { ...process.env, SHAPES_BRIDGE_HOME: base } });
     assert.match(legacy.stdout, /^shapes\.inc Bridge\n  install/);
+    // Exercise the actual compiled launcher: sandboxed NSWorkspace launches can
+    // drop custom arguments, while launchd and explicit CLI actions must survive.
+    const compiled = spawnSync("xcrun", ["clang", "-mmacosx-version-min=11.0", path.resolve(__dirname, "../scripts/mac/launcher.c"), "-o", paths.appExecutable], { encoding: "utf8" });
+    assert.equal(compiled.status, 0, compiled.stderr);
+    const missing = spawnSync(paths.appExecutable, ["desktop-ui"], { encoding: "utf8" });
+    assert.equal(missing.status, 72);
+    fs.writeFileSync(paths.cli, 'process.stdout.write(JSON.stringify(process.argv.slice(2)));');
+    const plain = spawnSync(paths.appExecutable, [], { encoding: "utf8" });
+    assert.equal(plain.stdout, '["open"]'); // legacy bundle, no GUI included
+    const controls = path.join(paths.app, "Contents/MacOS/shapes.inc Bridge Controls");
+    fs.writeFileSync(controls, '#!/bin/sh\nprintf "native controls"\n', { mode: 0o755 });
+    for (const args of [[], ["-psn_0_123"], ["desktop-ui"]]) {
+      const opened = spawnSync(paths.appExecutable, args, { encoding: "utf8" });
+      assert.equal(opened.status, 0, opened.stderr);
+      assert.equal(opened.stdout, "native controls");
+    }
+    for (const action of ["daemon", "open", "status"]) {
+      const explicit = spawnSync(paths.appExecutable, [action], { encoding: "utf8" });
+      assert.equal(explicit.stdout, JSON.stringify([action]));
+    }
   } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });

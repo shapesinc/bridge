@@ -149,7 +149,7 @@ function copyFiles(source, runtime) {
   }
 }
 
-function assembleMacApp(source, app, { nodeBinary = process.execPath } = {}) {
+function assembleMacApp(source, app, { nodeBinary = process.execPath, launcherBinary, controlsBinary, cloudflaredBinary } = {}) {
   const runtime = path.join(app, "Contents", "Resources", "runtime");
   fs.rmSync(app, { recursive: true, force: true });
   fs.mkdirSync(path.join(app, "Contents", "MacOS"), { recursive: true });
@@ -160,7 +160,7 @@ function assembleMacApp(source, app, { nodeBinary = process.execPath } = {}) {
   fs.writeFileSync(path.join(app, "Contents", "Info.plist"), infoPlist());
   fs.writeFileSync(path.join(app, "Contents", "PkgInfo"), "APPL????");
   const launcher = path.join(app, "Contents", "MacOS", APP_NAME);
-  fs.copyFileSync(path.join(runtime, "assets", "mac-launcher"), launcher);
+  fs.copyFileSync(launcherBinary || path.join(runtime, "assets", "mac-launcher"), launcher);
   fs.chmodSync(launcher, 0o755);
   // Only the signed copy in MacOS/ may remain: notarization rejects a bundle
   // that carries an unsigned Mach-O anywhere, and updates fetch a fresh source.
@@ -168,6 +168,12 @@ function assembleMacApp(source, app, { nodeBinary = process.execPath } = {}) {
   const node = path.join(app, "Contents", "MacOS", RUNTIME_NAME);
   fs.copyFileSync(nodeBinary, node);
   fs.chmodSync(node, 0o755);
+  for (const [source, name] of [[controlsBinary, `${APP_NAME} Controls`], [cloudflaredBinary, "cloudflared"]]) {
+    if (!source) continue;
+    const destination = path.join(app, "Contents", "MacOS", name);
+    fs.copyFileSync(source, destination);
+    fs.chmodSync(destination, 0o755);
+  }
   return { app, launcher, node, runtime };
 }
 
@@ -182,6 +188,37 @@ function swapMacApp(staged, app) {
   if (fs.existsSync(app)) fs.renameSync(app, previous);
   fs.renameSync(staged, app);
   fs.rmSync(previous, { recursive: true, force: true });
+}
+
+// Install exactly the helper embedded in shapes.inc. It is verified before
+// stopping an existing connection, and never falls back to a network download
+// or an unsigned local rebuild. Existing account and per-chat grants survive.
+function installBundledMacApp(bundle = path.resolve(__dirname, "../../..")) {
+  if (process.platform !== "darwin") throw new Error("The built-in computer connection requires macOS.");
+  const app = bundle.endsWith(".app") ? bundle : path.resolve(bundle, "..");
+  const verified = spawnSync("codesign", ["--verify", "--deep", "--strict", app], { encoding: "utf8" });
+  const info = signedAppInfo(app);
+  if (verified.status !== 0 || info.identifier !== LABEL || info.team !== TEAM_ID || !info.authority) {
+    throw new Error("The built-in computer connection could not be verified. Reinstall shapes.inc.");
+  }
+  const paths = runtimePaths(ensureStateDir());
+  const bundledVersion = JSON.parse(fs.readFileSync(path.join(app, "Contents/Resources/runtime/package.json"), "utf8")).version;
+  if (fs.existsSync(paths.cli)) {
+    const installedVersion = JSON.parse(fs.readFileSync(path.join(paths.runtime, "package.json"), "utf8")).version;
+    if (compareVersions(installedVersion, bundledVersion) > 0) {
+      throw new Error("A newer computer connection is installed. Update shapes.inc before reconnecting.");
+    }
+  }
+  stopService();
+  if (fs.realpathSync(app) !== (fs.existsSync(paths.app) ? fs.realpathSync(paths.app) : paths.app)) {
+    const staging = `${paths.app}.staging`;
+    fs.rmSync(staging, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(staging), { recursive: true });
+    command("ditto", [app, staging]);
+    swapMacApp(staging, paths.app);
+  }
+  fs.writeFileSync(paths.launcher, launcherContent(), { mode: 0o700 });
+  return paths;
 }
 
 function buildMacApp(source, paths, { sign = adHocSign, nodeBinary } = {}) {
@@ -348,4 +385,4 @@ function disableStartup() {
   else detachedCommand("systemctl", ["--user", "disable", "--now", `${LABEL}.service`]);
 }
 
-module.exports = { LABEL, APP_NAME, RUNTIME_NAME, TASK_NAME, TEAM_ID, SIGNED_APP_URL, runtimePaths, launcherContent, infoPlist, desktopEntry, serviceDefinition, assertServiceOwner, assembleMacApp, adHocSign, buildMacApp, installSignedMacApp, compareVersions, copyRuntime, startService, stopService, disableStartup };
+module.exports = { LABEL, APP_NAME, RUNTIME_NAME, TASK_NAME, TEAM_ID, SIGNED_APP_URL, runtimePaths, launcherContent, infoPlist, desktopEntry, serviceDefinition, assertServiceOwner, assembleMacApp, adHocSign, buildMacApp, installSignedMacApp, installBundledMacApp, compareVersions, copyRuntime, startService, stopService, disableStartup };

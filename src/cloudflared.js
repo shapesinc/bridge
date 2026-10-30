@@ -62,6 +62,15 @@ function download(url, dest) {
  * caching it on first use. Logs progress via the provided logger.
  */
 async function ensureCloudflared(log = () => {}) {
+  // Signed Mac bundles carry the tunnel helper beside their private Node.
+  // Fail explicitly if packaging omitted it instead of fetching executable
+  // code while a user is trying to connect their built-in app.
+  const macOS = path.resolve(__dirname, "../../../MacOS");
+  const bundled = path.join(macOS, "cloudflared");
+  if (process.platform === "darwin" && fs.existsSync(path.join(macOS, "shapes.inc Bridge Controls"))) {
+    if (!fs.existsSync(bundled)) throw new Error("The built-in tunnel helper is missing. Reinstall shapes.inc Bridge.");
+    return bundled;
+  }
   const { pkg, archive, bin } = assetFor(process.platform, process.arch);
   const binPath = path.join(CACHE_DIR, bin);
   if (fs.existsSync(binPath)) return binPath;
