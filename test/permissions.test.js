@@ -77,6 +77,24 @@ test("setup asks for everything in one pass: both native prompts, detached autom
   assert.equal(calls.filter((call) => call.file === "/usr/bin/open").length, 0);
 });
 
+test("explicit Automation setup opens its settings pane on first request and after denial", async () => {
+  for (const authorization of [-1744, -1743]) {
+    const calls = []; const spawned = [];
+    const status = await requestPermissions({ platform: "darwin", permission: "automation", fullDisk: denied,
+      execute: async (file, args) => {
+        calls.push({ file, args });
+        return { stdout: JSON.stringify({ accessibility: "denied", screen_recording: "denied", automation_targets: [authorization, authorization] }) };
+      },
+      spawnProcess: (file, args) => { spawned.push({ file, args }); return { on() {}, unref() {} }; },
+    });
+    assert.equal(spawned.length, 1);
+    assert.match(spawned[0].args.join(" "), /AEDeterminePermissionToAutomateTarget\(target\.aeDesc, 0x2A2A2A2A, 0x2A2A2A2A, true\)/);
+    assert.deepEqual(calls.filter(call => call.file === "/usr/bin/open").map(call => call.args), [["x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"]]);
+    assert.equal(status.automation, "denied");
+    assert.doesNotMatch(calls.filter(call => call.file === "/usr/bin/osascript").map(call => call.args.join(" ")).join(" "), /RequestScreen|CheckOptionPrompt/);
+  }
+});
+
 test("other platforms never run Mac permission commands or claim granted desktop access", async () => {
   for (const platform of ["win32", "linux"]) {
     const status = await requestPermissions({ platform, execute: async () => { assert.fail("unexpected OS command"); } });

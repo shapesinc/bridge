@@ -135,7 +135,9 @@ async function requestPermissions({ permission, platform = process.platform, exe
   if (all || permission === "full_disk_access") {
     // Touch protected data first so the app is already listed in the pane.
     if (fullDisk() !== "granted") await execute("/usr/bin/open", [`x-apple.systempreferences:com.apple.preference.security?${PANELS.full_disk_access}`], { timeout: 10000, maxBuffer: 16384 });
-  } else if (permission && permission !== "automation") {
+  } else if (permission) {
+    // macOS does not show an Automation prompt again after a denial. The
+    // explicit per-permission action must still open its recovery pane.
     await execute("/usr/bin/open", [`x-apple.systempreferences:com.apple.preference.security?${PANELS[permission]}`], { timeout: 10000, maxBuffer: 16384 });
   }
   return getPermissions({ platform, execute, fullDisk });

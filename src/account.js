@@ -45,19 +45,32 @@ function abortableDelay(ms, signal) {
   });
 }
 
-async function pairDevice({ api = DEFAULT_API, name = os.hostname(), onCode, signal, sleep = abortableDelay }) {
+async function beginPairing({ api = DEFAULT_API, name = os.hostname(), signal } = {}) {
   signal?.throwIfAborted();
   const pairing = await apiRequest(api, "/pairings", { name, platform: process.platform }, undefined, "POST", 20000, signal);
   const verification = new URL(pairing.verification_uri_complete);
   if (verification.protocol !== "https:" && !["localhost", "127.0.0.1"].includes(verification.hostname)) {
     throw new Error("shapes.inc returned an insecure approval URL.");
   }
+  return pairing;
+}
+
+function pollPairing({ api = DEFAULT_API, pairing_id, device_code, signal }) {
+  return apiRequest(api, "/pairings/poll", { pairing_id, device_code }, undefined, "POST", 20000, signal);
+}
+
+function cancelPairing({ api = DEFAULT_API, pairing_id, device_code, signal }) {
+  return apiRequest(api, "/pairings/cancel", { pairing_id, device_code }, undefined, "POST", 5000, signal);
+}
+
+async function pairDevice({ api = DEFAULT_API, name = os.hostname(), onCode, signal, sleep = abortableDelay }) {
+  const pairing = await beginPairing({ api, name, signal });
   await onCode(pairing);
   const deadline = Date.now() + Math.min(pairing.expires_in || 600, 600) * 1000;
   while (Date.now() < deadline) {
     await sleep(Math.max(3, pairing.interval || 3) * 1000, signal);
     signal?.throwIfAborted();
-    const result = await apiRequest(api, "/pairings/poll", { pairing_id: pairing.pairing_id, device_code: pairing.device_code }, undefined, "POST", 20000, signal);
+    const result = await pollPairing({ api, pairing_id: pairing.pairing_id, device_code: pairing.device_code, signal });
     if (result.status === "approved" && result.device_id && result.device_token) {
       return { api: validateApi(api), device_id: result.device_id, device_token: result.device_token, name };
     }
@@ -66,4 +79,4 @@ async function pairDevice({ api = DEFAULT_API, name = os.hostname(), onCode, sig
   throw new Error("Computer approval expired. Run setup again when you are ready.");
 }
 
-module.exports = { DEFAULT_API, validateApi, apiRequest, pairDevice };
+module.exports = { DEFAULT_API, validateApi, apiRequest, beginPairing, pollPairing, cancelPairing, pairDevice };
