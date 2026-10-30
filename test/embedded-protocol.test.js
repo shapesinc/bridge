@@ -12,6 +12,7 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 test("protocol rejects executable/path/API overrides, unknown fields and unbounded input", () => {
   const base = { version: 1, id: "request-1", operation: "status", params: {} };
   assert.deepEqual(parseRequest(JSON.stringify(base)), base);
+  assert.deepEqual(parseRequest(JSON.stringify({ ...base, operation: "detach" })), { ...base, operation: "detach" });
   for (const change of [{ operation: "dispose" }, { params: { api: "https://other.example" } }, { extra: true }, { params: [] }, { id: "\nsecret" }, { version: 2 }]) {
     assert.throws(() => parseRequest(JSON.stringify({ ...base, ...change })), { code: "invalid_request" });
   }
