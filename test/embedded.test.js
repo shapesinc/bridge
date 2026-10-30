@@ -135,6 +135,19 @@ test("cancelled resume stays paused after account refresh even when its first he
   assert.equal(f.state.get("config").device_token, TOKEN); assert.equal(f.calls.includes("cancel"), false);
 });
 
+test("verified same-account device removal aborts an in-flight readiness wait immediately", async () => {
+  const waiting = deferred();
+  const f = fixture({ ready: false, controller: { sleep: (_ms, signal) => new Promise((_resolve, reject) => {
+    waiting.resolve(); signal.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { code: "pairing_cancelled" })), { once: true });
+  }) } });
+  f.state.set("config", saved({ paused: true })); await f.account(); await f.begin();
+  const completing = f.complete(); await waiting.promise;
+  const removed = f.account("owner-a", []);
+  await rejectsCode(completing, "pairing_cancelled"); await removed;
+  assert.equal(f.runtime.running(), false); assert.equal(f.state.get("config").paused, true);
+  await f.account(); assert.equal(f.runtime.running(), false); assert.equal(f.calls.includes("cancel"), false);
+});
+
 test("older completed cancellation cannot affect a newer connection attempt", async () => {
   const f = fixture(); await f.account(); await f.begin(); await f.complete();
   await f.controller.disconnect(); await f.begin("attempt-2"); await f.complete("attempt-2");

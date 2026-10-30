@@ -220,10 +220,16 @@ function createEmbeddedController({ read = readState, write = writeState, remove
     const next = verified && userId ? { userId, deviceIds: new Set(deviceIds) } : null;
     const changed = account?.userId !== next?.userId;
     account = next;
-    if (changed || !account) invalidate();
+    const attemptDevice = attempt?.public?.deviceId || attempt?.deviceId;
+    const removedDuringAttempt = Boolean(account && attemptDevice && !account.deviceIds.has(attemptDevice));
+    if (removedDuringAttempt) {
+      const saved = config();
+      if (saved?.device_id === attemptDevice) write("config", { ...saved, paused: true });
+    }
+    if (changed || !account || removedDuringAttempt) invalidate();
     return serial(async () => {
       if (closed) throw failure("account_unverified");
-      if (changed || !account || !attempt && read("embedded-pairing")) await suspend();
+      if (changed || !account || attempt?.cancelled || !attempt && read("embedded-pairing")) await suspend();
       const saved = config();
       if (!usable(saved)) { await runtime.stop(); return status(); }
       if (!saved.paused && !attempt && !runtime.running()) await startSaved(saved);
