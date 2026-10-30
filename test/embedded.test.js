@@ -408,3 +408,23 @@ test("detach cancellation failure remains retryable and never leaves local acces
   assert.equal(f.state.has("config"), false); assert.equal(f.state.has("embedded-pairing"), false);
   assert.equal(f.controller.status().state, "disconnected");
 });
+
+test("detach of an enabled retry preserves its prior consent but never reverses a newer restriction", async () => {
+  for (const restriction of ["none", "disconnect", "removal", "revocation"]) {
+    const f = fixture({ ready: false }); f.state.set("config", saved());
+    await f.account(); await f.begin(); await rejectsCode(f.complete(), "connection_pending");
+    const detached = f.controller.detach();
+    if (restriction === "disconnect") await f.controller.disconnect();
+    if (restriction === "removal") await f.account("owner-a", []);
+    if (restriction === "revocation") f.state.set("config", { ...f.state.get("config"), revoked: true });
+    await detached; await f.controller.detach();
+    assert.equal(f.runtime.running(), false, restriction);
+    assert.equal(f.state.get("config").paused, ["disconnect", "removal"].includes(restriction), restriction);
+    if (restriction === "revocation") assert.equal(f.state.get("config").revoked, true);
+    await f.controller.dispose();
+    const reopened = fixture({ state: f.state }); await reopened.account();
+    assert.equal(reopened.runtime.running(), restriction === "none", restriction);
+    assert.equal([...f.calls, ...reopened.calls].some(value => ["begin", "poll", "cancel"].includes(value)), false);
+    await reopened.controller.dispose();
+  }
+});

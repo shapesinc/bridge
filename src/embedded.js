@@ -231,7 +231,10 @@ function createEmbeddedController({ read = readState, write = writeState, remove
     // queued begin or an in-flight approval cannot finish after it leaves.
     const pending = attempt;
     const saved = config();
-    if (pending && saved && saved.device_id === (pending.public?.deviceId || pending.deviceId)) {
+    // Match cancellation's consent boundary: abandoning an enabled device's
+    // retry is not a new pause. Never restore paused:false, because a newer
+    // Disconnect or account removal may already have withdrawn that consent.
+    if (pending && !pending.wasEnabled && saved && saved.device_id === (pending.public?.deviceId || pending.deviceId)) {
       write("config", { ...saved, paused: true });
     }
     invalidate();
