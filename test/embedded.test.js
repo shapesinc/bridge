@@ -114,7 +114,12 @@ test("late begin response is retained privately and cancelled even if transport 
 test("connection waits for actual heartbeat; retry uses the same device and keeps cancellation authority", async () => {
   const f = fixture({ ready: false }); await f.account(); await f.begin();
   await rejectsCode(f.complete(), "connection_pending");
+  // The tunnel exists but the backend cannot reach it yet. The actual daemon
+  // reports reconnecting for this retryable first-heartbeat failure.
+  f.state.set("status", { pid: 123, device_id: DEVICE, connection: "reconnecting",
+    updated_at: new Date(f.time.value).toISOString(), last_heartbeat: null });
   assert.equal(f.controller.status().state, "connecting");
+  assert.equal(f.controller.status().error, undefined);
   assert.equal(f.controller.status().online, false); assert.equal(f.state.has("embedded-pairing"), true);
   assert.equal(f.state.get("embedded-pairing").device_code, undefined);
   assert.equal(f.state.get("embedded-pairing").device_token, TOKEN);
@@ -125,6 +130,51 @@ test("connection waits for actual heartbeat; retry uses the same device and keep
   await f.controller.cancelConnect({ attemptId: "attempt-1" });
   assert.equal(f.runtime.running(), false); assert.equal(f.calls.includes("cancel"), true); assert.equal(f.state.has("config"), false);
   assert.equal(f.calls.find((value) => value?.pairing_id).device_code, SECRET);
+});
+
+test("cancelled or failed first-heartbeat setup stops, clears its attempt, and permits a fresh connection", async () => {
+  for (const failRuntime of [false, true]) {
+    let failNextWait = false;
+    const options = { ready: false, controller: { sleep: async (ms) => {
+      f.time.value += ms;
+      if (failNextWait) await f.runtime.stop();
+    } } };
+    const f = fixture(options); await f.account(); await f.begin();
+    await rejectsCode(f.complete(), "connection_pending");
+    f.state.set("status", { pid: 123, device_id: DEVICE, connection: "reconnecting",
+      updated_at: new Date(f.time.value).toISOString(), last_heartbeat: null });
+    assert.equal(f.controller.status().state, "connecting");
+    if (failRuntime) {
+      failNextWait = true;
+      await rejectsCode(f.complete(), "connection_failed");
+      assert.equal(f.controller.status().state, "error");
+      assert.equal(f.controller.status().error, "connection_failed");
+    }
+    // The host cancels on user action or after a non-retryable failure.
+    const cancelled = await f.controller.cancelConnect({ attemptId: "attempt-1" });
+    assert.equal(cancelled.state, "disconnected"); assert.equal(cancelled.error, undefined);
+    assert.equal(f.runtime.running(), false);
+    assert.equal(f.state.has("config"), false); assert.equal(f.state.has("embedded-pairing"), false);
+    await f.account(); assert.equal(f.runtime.running(), false);
+    options.ready = true;
+    assert.deepEqual(await f.begin("attempt-2"), { attemptId: "attempt-2", userCode: "ABCD-1234" });
+    assert.equal((await f.complete("attempt-2")).state, "connected");
+    assert.equal(f.calls.filter((value) => value === "begin").length, 2);
+    await f.controller.dispose();
+  }
+});
+
+test("pending setup preserves revocation and reconnect failures after an acknowledged heartbeat", async () => {
+  const f = fixture({ ready: false }); await f.account(); await f.begin();
+  await rejectsCode(f.complete(), "connection_pending");
+  f.state.set("status", { pid: 123, device_id: DEVICE, connection: "revoked",
+    updated_at: new Date(f.time.value).toISOString(), last_heartbeat: null });
+  assert.equal(f.controller.status().state, "error");
+  assert.equal(f.controller.status().error, "connection_failed");
+  f.heartbeat(); f.state.get("status").connection = "reconnecting";
+  assert.equal(f.controller.status().state, "error");
+  assert.equal(f.controller.status().error, "connection_failed");
+  await f.controller.dispose();
 });
 
 test("cancelled resume stays paused after account refresh even when its first heartbeat never arrived", async () => {

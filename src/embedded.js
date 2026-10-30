@@ -50,8 +50,12 @@ function createEmbeddedController({ read = readState, write = writeState, remove
     const fresh = live && receipt?.pid === runtime.pid() && receipt?.device_id === saved?.device_id &&
       now() - Date.parse(receipt.updated_at) >= 0 && now() - Date.parse(receipt.updated_at) < 90000;
     const online = Boolean(usable(saved) && !saved.paused && fresh && receipt.connection === "connected" && now() - Date.parse(receipt.last_heartbeat) < 90000);
+    // Initial tunnel reachability can take several heartbeats. Keep the owned
+    // setup cancellable and visibly connecting while completeConnect retries;
+    // revocation, explicit failures, and later connection loss remain errors.
+    const waitingForFirstHeartbeat = attempt && !attempt.cancelled && receipt?.last_heartbeat == null;
     const error = lastError || (visible && (!usable(saved) || saved.revoked) ? "device_unavailable" :
-      fresh && ["reconnecting", "revoked"].includes(receipt.connection) ? "connection_failed" : null);
+      fresh && (receipt.connection === "revoked" || receipt.connection === "reconnecting" && !waitingForFirstHeartbeat) ? "connection_failed" : null);
     const state = error ? "error" : attempt && !attempt.cancelled ? "connecting" :
       !visible ? "disconnected" : saved.paused ? (live ? "error" : "paused") : online ? "connected" : live ? "connecting" : "disconnected";
     return { state, online, ...(visible ? { deviceId: saved.device_id, deviceName: saved.name } : {}),

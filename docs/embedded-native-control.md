@@ -18,6 +18,12 @@ Requests are one JSON object per line: `{version:1,id,operation,params}`. Replie
 
 Status is `{state,online,deviceId?,deviceName?,permissions,error?}`. States are `disconnected`, `connecting`, `connected`, `paused`, and `error`. Permission values are `granted`, `denied`, `unknown`, or `unsupported`. Error values are fixed codes; raw diagnostics, paths, device tokens, private pairing codes, and tunnel credentials never cross this boundary. Device metadata is hidden from unverified or different accounts.
 
+While an explicit setup is waiting for its first heartbeat, a transient tunnel
+reachability retry remains `connecting` with `online:false`. Revocation, an
+explicit runtime failure, and connection loss after an acknowledged heartbeat
+remain errors. The host cancels its exact attempt after a terminal failure or
+its overall deadline, allowing a fresh attempt after cleanup.
+
 ## Lifetimes and cancellation
 
 Closing an app window leaves its native process and connection running. Explicit Quit closes stdin and disposes the controller: unfinished approval is cancelled, owned runtime/jobs stop, and established enabled opt-in remains saved. Reopening requires fresh same-account verification before resuming. Explicit Disconnect remains paused across reopen.
@@ -45,3 +51,16 @@ nothing. The target list, OS consent, passive probes, and all-permissions
 standalone setup are unchanged. The 26 focused permission/controller tests pass;
 first-request and denied recovery use simulated OS transport. Actual denial →
 Settings → grant/retry on the final signed app remains required.
+
+First-heartbeat status follow-up (October 30, 2026): the installed combined
+QA85 candidate at native187dc1a/helper2adfda6 recorded a backend HTTP409
+readiness failure before any successful heartbeat and displayed unavailable
+while setup was still pending. The scope of this correction is that transient
+status; the triggering attempt's provenance was not established. Two regression
+cases failed before the fix. The final36 focused embedded controller/protocol,
+standalone controller, and runtime tests pass. Simulated transport/process-state
+cases cover retry→connected, cancellation and runtime failure→disconnected→new
+attempt, and preserved revocation/later-loss errors. Real private stdio and
+local file-read boundary tests also passed. Corrected native button/status,
+live pairing, tunnel readiness, and OS consent still require the rebuilt
+integrated candidate; this is not live connection acceptance.
