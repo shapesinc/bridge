@@ -219,6 +219,24 @@ function createEmbeddedController({ read = readState, write = writeState, remove
     if (saved) write("config", { ...saved, paused: true });
     return serial(async () => { await suspend(); lastError = null; return status(); });
   }
+  function detach() {
+    // A UI may leave its durable host without withdrawing an established
+    // connection. Setup still belongs to that UI: invalidate immediately so a
+    // queued begin or an in-flight approval cannot finish after it leaves.
+    const pending = attempt;
+    const saved = config();
+    if (pending && saved && saved.device_id === (pending.public?.deviceId || pending.deviceId)) {
+      write("config", { ...saved, paused: true });
+    }
+    invalidate();
+    return serial(async () => {
+      if (pending || read("embedded-pairing")) {
+        await suspend();
+        lastError = null;
+      }
+      return status();
+    });
+  }
   function updateAccount({ userId, deviceIds, verified }) {
     if (typeof verified !== "boolean" || !(userId === null || identifier(userId)) || !Array.isArray(deviceIds) || deviceIds.length > 500 || !deviceIds.every(identifier)) return Promise.reject(failure("invalid_request"));
     const next = verified && userId ? { userId, deviceIds: new Set(deviceIds) } : null;
@@ -249,7 +267,7 @@ function createEmbeddedController({ read = readState, write = writeState, remove
     });
   }
   function dispose() { closed = true; account = null; invalidate(); return serial(suspend); }
-  return { status, beginConnect, completeConnect, cancelConnect, disconnect, updateAccount, requestPermission, dispose };
+  return { status, beginConnect, completeConnect, cancelConnect, disconnect, detach, updateAccount, requestPermission, dispose };
 }
 
 module.exports = { createEmbeddedController, failure, MESSAGES };

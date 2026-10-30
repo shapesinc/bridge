@@ -247,3 +247,72 @@ test("pending cancellation file read through actual computer API contains only t
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   } finally { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); fs.rmSync(directory, { recursive: true, force: true }); await f.controller.dispose(); }
 });
+
+test("UI detach preserves an established connection and repeated detach is idempotent", async () => {
+  const f = fixture(); await f.account(); await f.begin(); await f.complete();
+  const before = [...f.calls], config = structuredClone(f.state.get("config"));
+  for (let count = 0; count < 2; count++) {
+    assert.equal((await f.controller.detach()).online, true);
+    assert.equal(f.runtime.pid(), 123);
+    assert.deepEqual(f.calls, before); assert.deepEqual(f.state.get("config"), config);
+  }
+  await f.controller.disconnect(); await f.account();
+  assert.equal(f.runtime.running(), false); assert.equal(f.state.get("config").paused, true);
+  await f.begin("attempt-2"); await f.complete("attempt-2"); await f.controller.detach();
+  await f.account("owner-b", ["device-b"]);
+  assert.equal(f.runtime.running(), false); assert.equal(f.controller.status().deviceId, undefined);
+});
+
+test("detach invalidates queued and in-flight setup but permits a fresh attempt", async () => {
+  for (const phase of ["queued", "begin", "poll"]) {
+    const entered = deferred(), pending = deferred();
+    const f = fixture({ controller: phase === "begin" ? { begin: async () => { entered.resolve(); return pending.promise; } } :
+      phase === "poll" ? { poll: async () => { entered.resolve(); return pending.promise; } } : {} });
+    await f.account();
+    if (phase === "poll") await f.begin();
+    const operation = phase === "poll" ? f.complete() : f.begin();
+    const rejected = rejectsCode(operation, "pairing_cancelled");
+    if (phase !== "queued") await entered.promise;
+    const detached = f.controller.detach();
+    if (phase === "begin") pending.resolve({ pairing_id: "pair-1", device_code: SECRET, user_code: "ABCD-1234", expires_in: 600 });
+    if (phase === "poll") pending.resolve({ status: "approved", owner_user_id: "owner-a", device_id: DEVICE, device_token: TOKEN });
+    await rejected; await detached; await f.controller.detach();
+    assert.equal(f.state.has("config"), false); assert.equal(f.state.has("embedded-pairing"), false);
+    assert.equal(f.runtime.running(), false); assert.equal(f.calls.includes("start"), false);
+    assert.equal(f.calls.includes("cancel"), phase !== "queued");
+    await f.begin("attempt-2");
+    assert.equal((await f.complete("attempt-2")).online, true);
+    await f.controller.dispose(); assert.equal(f.runtime.running(), false);
+  }
+});
+
+test("detach during first-heartbeat wait revokes new pairing and pauses a resumed device", async () => {
+  for (const resume of [false, true]) {
+    const waiting = deferred();
+    const f = fixture({ ready: false, controller: { sleep: (_ms, signal) => new Promise((_resolve, reject) => {
+      waiting.resolve(); signal.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { code: "pairing_cancelled" })), { once: true });
+    }) } });
+    if (resume) f.state.set("config", saved({ paused: true }));
+    await f.account(); await f.begin();
+    const completing = f.complete(), rejected = rejectsCode(completing, "pairing_cancelled");
+    await waiting.promise;
+    await f.controller.detach(); await rejected;
+    assert.equal(f.runtime.running(), false); assert.equal(f.state.has("embedded-pairing"), false);
+    assert.equal(f.calls.includes("cancel"), !resume);
+    if (resume) { assert.equal(f.state.get("config").paused, true); assert.equal(f.state.get("config").device_token, TOKEN); }
+    else assert.equal(f.state.has("config"), false);
+    await f.account(); assert.equal(f.runtime.running(), false);
+  }
+});
+
+test("detach cancellation failure remains retryable and never leaves local access active", async () => {
+  let failed = true;
+  const f = fixture({ ready: false, controller: { cancel: async () => { if (failed) throw new Error("unavailable"); } } });
+  await f.account(); await f.begin(); await rejectsCode(f.complete(), "connection_pending");
+  await rejectsCode(f.controller.detach(), "cancel_failed");
+  assert.equal(f.runtime.running(), false); assert.equal(f.state.get("config").paused, true);
+  assert.equal(f.state.has("embedded-pairing"), true);
+  failed = false; await f.controller.detach();
+  assert.equal(f.state.has("config"), false); assert.equal(f.state.has("embedded-pairing"), false);
+  assert.equal(f.controller.status().state, "disconnected");
+});
