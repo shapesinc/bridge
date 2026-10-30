@@ -113,6 +113,10 @@ function createEmbeddedController({ read = readState, write = writeState, remove
       attempt = value; completed = null; lastError = null;
       const saved = config();
       if (usable(saved)) {
+        // Retrying an already-enabled device does not grant new consent. If
+        // this attempt is cancelled (including app Quit), keep its existing
+        // reopen behavior; only Disconnect should persist a new pause.
+        value.wasEnabled = !saved.paused;
         value.public = { attemptId, deviceId: saved.device_id };
         return value.public;
       }
@@ -188,7 +192,7 @@ function createEmbeddedController({ read = readState, write = writeState, remove
         if (code !== "connection_pending") lastError = code;
         throw failure(code);
       }
-      completed = { id: attemptId, deviceId: saved.device_id, pairing: read("embedded-pairing") };
+      completed = { id: attemptId, deviceId: saved.device_id, pairing: read("embedded-pairing"), wasEnabled: value.wasEnabled === true };
       remove("embedded-pairing"); attempt = null; lastError = null;
       return status();
     });
@@ -203,13 +207,15 @@ function createEmbeddedController({ read = readState, write = writeState, remove
       return serial(async () => {
         const saved = config();
         if (saved?.device_id !== receipt.deviceId) return status();
-        write("config", { ...saved, paused: true });
+        if (!receipt.wasEnabled) write("config", { ...saved, paused: true });
         if (receipt.pairing) write("embedded-pairing", receipt.pairing);
         await suspend(); lastError = null; return status();
       });
     }
     const saved = config();
-    if (saved && saved.device_id === (attempt.public?.deviceId || attempt.deviceId)) write("config", { ...saved, paused: true });
+    // Never write paused:false here: a newer Disconnect, removal or revocation
+    // may already have stopped access while this attempt was in flight.
+    if (!attempt.wasEnabled && saved && saved.device_id === (attempt.public?.deviceId || attempt.deviceId)) write("config", { ...saved, paused: true });
     invalidate();
     return serial(async () => { await suspend(); lastError = null; return status(); });
   }
