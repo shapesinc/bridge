@@ -37,3 +37,11 @@ Focused tests cover those compositions, cancelled/late approval, owner mismatch,
 Local verification on October 29, 2026: the full bounded Node suite passed 167 tests before the final credential-storage and in-flight removal hardening; 41 focused controller/protocol/process/account/standalone-runtime tests passed after that change, including an actual authenticated local `/read` of the synthetic pending receipt. Signed universal packaging is validated separately. No permission or live AI requests were made by these tests.
 
 **NO-GO until integrated acceptance:** the exact signed native candidate must demonstrate current-session pairing, connection/permissions UI, macOS consent attributed to shapes.inc, cancellation and retry, account switch/removal, window close, Quit/reopen, and unchanged standalone behavior against the candidate backend. Passing focused tests or a signed build does not establish those outcomes. Deploy backend cancellation/owner support before enabling the native and web slices.
+
+Permission recovery follow-up: an explicit single App control action now opens
+macOS Automation settings as well as issuing the existing per-target request.
+macOS can suppress a previously denied prompt, so retry no longer appears to do
+nothing. The target list, OS consent, passive probes, and all-permissions
+standalone setup are unchanged. The 26 focused permission/controller tests pass;
+first-request and denied recovery use simulated OS transport. Actual denial →
+Settings → grant/retry on the final signed app remains required.
