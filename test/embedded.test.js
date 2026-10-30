@@ -9,7 +9,7 @@ const DEVICE = "11111111-1111-4111-8111-111111111111", SECRET = "a".repeat(43), 
 
 function deferred() { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; }
 function fixture(options = {}) {
-  const state = new Map(), calls = [], time = { value: Date.now() };
+  const state = options.state || new Map(), calls = [], time = { value: Date.now() };
   let live = false;
   const runtime = { running: () => live, pid: () => live ? 123 : null,
     start: async () => { calls.push("start"); live = true; if (options.ready !== false) heartbeat(); },
@@ -183,6 +183,98 @@ test("cancelled resume stays paused after account refresh even when its first he
   await f.controller.cancelConnect({ attemptId: "attempt-1" }); await f.account();
   assert.equal(f.runtime.running(), false); assert.equal(f.state.get("config").paused, true);
   assert.equal(f.state.get("config").device_token, TOKEN); assert.equal(f.calls.includes("cancel"), false);
+});
+
+test("cancelled enabled retry survives quit and reopens the same device after account verification", async () => {
+  const f = fixture({ ready: false }); f.state.set("config", saved());
+  await f.account(); await f.begin(); await rejectsCode(f.complete(), "connection_pending");
+  await f.controller.cancelConnect({ attemptId: "attempt-1" });
+  await f.controller.cancelConnect({ attemptId: "attempt-1" });
+  assert.equal(f.runtime.running(), false);
+  assert.equal(f.state.get("config").paused, false);
+  await f.controller.dispose();
+
+  const reopened = fixture({ state: f.state });
+  assert.equal(reopened.runtime.running(), false);
+  assert.equal(reopened.controller.status().deviceId, undefined);
+  await reopened.account(null, [], false);
+  await reopened.account("owner-b", [DEVICE]);
+  await reopened.account("owner-a", []);
+  assert.equal(reopened.runtime.running(), false);
+  await reopened.account();
+  assert.equal(reopened.controller.status().state, "connected");
+  assert.equal(reopened.controller.status().deviceId, DEVICE);
+  assert.equal(reopened.state.get("config").device_token, TOKEN);
+  assert.equal(reopened.calls.filter(value => value === "start").length, 1);
+  assert.equal([...f.calls, ...reopened.calls].some(value => ["begin", "poll", "cancel"].includes(value)), false);
+  await reopened.controller.dispose();
+});
+
+test("late completed retry cancellation preserves enabled consent and duplicate cancellation is harmless", async () => {
+  const f = fixture(); f.state.set("config", saved());
+  await f.account(); await f.begin(); await f.complete();
+  // The runtime completed, but the app closed before consuming its success.
+  await f.controller.cancelConnect({ attemptId: "attempt-1" });
+  assert.equal(f.runtime.running(), false);
+  assert.equal(f.state.get("config").paused, false);
+  await f.account();
+  assert.equal(f.controller.status().state, "connected");
+  await f.controller.cancelConnect({ attemptId: "attempt-1" });
+  assert.equal(f.controller.status().state, "connected");
+  assert.equal(f.state.get("config").paused, false);
+  assert.equal(f.calls.includes("cancel"), false);
+  await f.controller.dispose();
+});
+
+test("cancelled explicitly paused resume remains paused across a new controller", async () => {
+  const f = fixture({ ready: false }); f.state.set("config", saved({ paused: true }));
+  await f.account(); await f.begin(); await rejectsCode(f.complete(), "connection_pending");
+  await f.controller.cancelConnect({ attemptId: "attempt-1" }); await f.controller.dispose();
+  const reopened = fixture({ state: f.state }); await reopened.account();
+  assert.equal(reopened.controller.status().state, "paused");
+  assert.equal(reopened.runtime.running(), false);
+  assert.equal(reopened.state.get("config").device_token, TOKEN);
+  await reopened.controller.dispose();
+});
+
+test("late enabled retry cancellation never undoes an explicit disconnect or revocation", async () => {
+  for (const restriction of ["disconnect", "revocation"]) {
+    const f = fixture(); f.state.set("config", saved());
+    await f.account(); await f.begin(); await f.complete();
+    // Queue cancellation before the newer control change to exercise its
+    // serialized cleanup after the newer decision has changed durable state.
+    const cancelling = f.controller.cancelConnect({ attemptId: "attempt-1" });
+    if (restriction === "disconnect") await f.controller.disconnect();
+    else f.state.set("config", { ...f.state.get("config"), revoked: true });
+    await cancelling;
+    await f.account();
+    assert.equal(f.runtime.running(), false, restriction);
+    assert.equal(f.state.get("config")[restriction === "disconnect" ? "paused" : "revoked"], true, restriction);
+    await f.controller.dispose();
+  }
+});
+
+test("enabled retry cancellation preserves device removal and cannot run under another account", async () => {
+  for (const restriction of ["removal", "account-change"]) {
+    const f = fixture({ ready: false }); f.state.set("config", saved());
+    await f.account(); await f.begin(); await rejectsCode(f.complete(), "connection_pending");
+    const cancellation = f.controller.cancelConnect({ attemptId: "attempt-1" });
+    if (restriction === "removal") await f.account("owner-a", []);
+    else await f.account("owner-b", [DEVICE]);
+    await cancellation;
+    assert.equal(f.runtime.running(), false, restriction);
+    if (restriction === "removal") {
+      assert.equal(f.state.get("config").paused, true);
+      await f.account();
+      assert.equal(f.runtime.running(), false);
+    } else {
+      assert.equal(f.controller.status().deviceId, undefined);
+      assert.equal(f.state.get("config").paused, false);
+      await f.account();
+      assert.equal(f.runtime.running(), true);
+    }
+    await f.controller.dispose();
+  }
 });
 
 test("verified same-account device removal aborts an in-flight readiness wait immediately", async () => {
