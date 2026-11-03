@@ -54,6 +54,10 @@ contacted shapes.inc. You can close the terminal. Changing networks or restartin
 the tunnel automatically updates the endpoint without changing your account
 pairing or existing chat grants.
 
+Install options: `--name <name>` names this computer, `--no-open` does not open
+the browser for the approval link, `--no-awake` turns keep-awake off, and
+`--no-permissions` skips the guided permission pass.
+
 The installed code and a private Node runtime live inside the app bundle on
 macOS (`~/Applications/shapes.inc Bridge.app`) and in `~/.shapes-bridge/runtime`
 on Linux and Windows; the service never depends on an `npx` cache or an open
@@ -84,13 +88,18 @@ Replace `status` with any of these commands. No shell profile changes are made.
 - `status`: show connection, version and native permission status.
 - `restart`: restart the background connection. Opening the macOS app or the
   Linux launcher entry does the same.
+- `open`: the same as opening the app: restart the connection, or resume it
+  when paused. Local state only, no network or account calls.
 - `update`: download the latest shapes.inc Bridge and reinstall it without
   pairing again.
 - `pause`: disconnect immediately and remain paused across computer restarts.
 - `resume`: reconnect and restore startup at sign-in.
-- `permissions`: request Accessibility and Screen Recording from the installed
-  background process. Use `permissions full_disk_access` or
-  `permissions automation` to open the corresponding macOS settings panel.
+- `permissions`: repeat the guided pass (Accessibility, Screen Recording,
+  Automation for Finder and System Events, Full Disk Access) from the installed
+  background process. Name one to request only it: `permissions accessibility`,
+  `permissions screen_recording`, `permissions full_disk_access` or
+  `permissions automation`; the last two open the corresponding macOS settings
+  pane.
 - `awake off` / `awake on`: disable or enable prevention of idle system sleep.
 - `logs`: show recent private activity logs.
 - `uninstall`: stop the service, revoke the account's device credential, and
@@ -161,6 +170,14 @@ fresh heartbeat from the matching device and a live PID before claiming a
 connection. The same primitives cover first pairing, resuming a paused device
 and reconnecting a revoked device. They do not introduce AI calls: **+$0/day**
 provider inference spend; existing requested task execution costs are unchanged.
+
+`bin/embedded.js` is the separate app-owned contract: the signed host launches
+it with its own absolute `SHAPES_BRIDGE_HOME` (never the standalone
+`~/.shapes-bridge`) and speaks one JSON object per line over private stdio
+(`status`, `updateAccount`, `beginConnect`, `completeConnect`, `cancelConnect`,
+`disconnect`, `detach`, `requestPermission`). The standalone CLI, controls app,
+LaunchAgent and state are untouched. `docs/embedded-native-control.md` holds
+the full contract and its acceptance status.
 
 ## Is it safe?
 
@@ -240,11 +257,16 @@ Remote API origins require HTTPS and redirects are rejected. Only one
 background shapes.inc Bridge service may be installed per OS user; stop the
 previous test installation before choosing a different state directory.
 
-Run `npm test` for the local CLI fixtures and authenticated HTTP tests; they
-make no inference calls. A 2026-10-02 smoke test also exercised a real temporary
-tunnel, the shapes.inc connection service (with isolated test membership and
-storage), and the installed CLI: token checks and cross-member rejection
-passed, discovery identified signed-in Codex and signed-out Claude Code,
+`npm test` runs Node's built-in test runner (`node --test`) over `test/`; there
+are no dependencies to install. CI (`.github/workflows/ci.yml`) runs `npm test`
+and `npm pack --dry-run` on Node 18 and 22 for every push to `main` and every
+pull request. Design notes for the connection runtime and the app-owned
+contract live in `docs/`. The tests cover the local CLI fixtures and
+authenticated HTTP tests; they make no inference calls. A 2026-10-02 smoke test
+also exercised a real temporary tunnel, the shapes.inc connection service (with
+isolated test membership and storage), and the installed CLI: token checks and
+cross-member rejection passed, discovery identified signed-in Codex and
+signed-out Claude Code,
 Claude was rejected before creating a job, and `auto` completed a Codex
 read-only file task with the expected answer. Claude execution is covered by
 structured fixtures; live Claude inference remains unverified while it is
