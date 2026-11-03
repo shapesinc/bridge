@@ -13,7 +13,7 @@ directory; that integration change belongs to the macOS app repository.
   locations. Commands, agent discovery/probes, Git validation, detached job
   supervisors and Codex RPC share this environment. Other platforms retain their
   existing environment. It does not run shell startup scripts.
-- `expandHome` expands only `~` and `~/...`. Shell working directories and file
+- `expandHome` expands only `~`, `~/...`, and Windows-native `~\...` on Windows. Shell working directories and file
   operations use the same rule. Explicit working directories and the standalone
   CLI's launch directory retain their existing semantics.
 - `/run` remains an authenticated shell-command primitive with bounded stdout and

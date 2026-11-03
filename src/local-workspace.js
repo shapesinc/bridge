@@ -18,9 +18,11 @@ function localEnvironment({ env = process.env, platform = process.platform, home
   return { ...env, PATH: [...new Set([...inherited.split(":"), ...additions])].join(":") };
 }
 
-function expandHome(value, home = os.homedir()) {
+function expandHome(value, home = os.homedir(), platform = process.platform) {
   if (value === "~") return home;
-  return typeof value === "string" && value.startsWith("~/") ? path.join(home, value.slice(2)) : value;
+  const homeRelative = typeof value === "string"
+    && (value.startsWith("~/") || (platform === "win32" && value.startsWith("~\\")));
+  return homeRelative ? (platform === "win32" ? path.win32 : path).join(home, value.slice(2)) : value;
 }
 
 module.exports = { localEnvironment, expandHome };

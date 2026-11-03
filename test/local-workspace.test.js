@@ -69,6 +69,10 @@ test("local environment preserves caller order, variables, and non-macOS behavio
   assert.equal(expandHome("~/notes/file.txt", "/home/person"), "/home/person/notes/file.txt");
   assert.equal(expandHome("~", "/home/person"), "/home/person");
   assert.equal(expandHome("~literal/file.txt", "/home/person"), "~literal/file.txt");
+  assert.equal(expandHome("~\\Desktop\\file.txt", "C:\\Users\\fixture", "win32"), path.win32.join("C:\\Users\\fixture", "Desktop", "file.txt"));
+  assert.equal(expandHome("~/Desktop/file.txt", "C:\\Users\\fixture", "win32"), path.win32.join("C:\\Users\\fixture", "Desktop", "file.txt"));
+  assert.equal(expandHome("~\\Desktop\\file.txt", "/home/person", "darwin"), "~\\Desktop\\file.txt");
+  assert.equal(expandHome("~literal\\file.txt", "C:\\Users\\fixture", "win32"), "~literal\\file.txt");
 });
 
 test("HTTP commands use installed local tools under the macOS app's minimal PATH", { skip: process.platform !== "darwin" }, async (t) => {
