@@ -80,7 +80,7 @@ test("setup asks for everything in one pass: both native prompts, detached autom
 test("explicit Automation setup opens its settings pane on first request and after denial", async () => {
   for (const authorization of [-1744, -1743]) {
     const calls = []; const spawned = [];
-    const status = await requestPermissions({ platform: "darwin", permission: "automation", fullDisk: denied,
+    const status = await requestPermissions({ platform: "darwin", release: "22.0.0", permission: "automation", fullDisk: denied,
       execute: async (file, args) => {
         calls.push({ file, args });
         return { stdout: JSON.stringify({ accessibility: "denied", screen_recording: "denied", automation_targets: [authorization, authorization] }) };
@@ -89,9 +89,28 @@ test("explicit Automation setup opens its settings pane on first request and aft
     });
     assert.equal(spawned.length, 1);
     assert.match(spawned[0].args.join(" "), /AEDeterminePermissionToAutomateTarget\(target\.aeDesc, 0x2A2A2A2A, 0x2A2A2A2A, true\)/);
-    assert.deepEqual(calls.filter(call => call.file === "/usr/bin/open").map(call => call.args), [["x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"]]);
+    assert.deepEqual(calls.filter(call => call.file === "/usr/bin/open").map(call => call.args), [["x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Automation"]]);
     assert.equal(status.automation, "denied");
     assert.doesNotMatch(calls.filter(call => call.file === "/usr/bin/osascript").map(call => call.args.join(" ")).join(" "), /RequestScreen|CheckOptionPrompt/);
+  }
+});
+
+test("recovery selects the OS-specific privacy pane without claiming the requested grant", async () => {
+  for (const [release, settings] of [["21.6.0", "com.apple.preference.security"],
+    ["22.0.0", "com.apple.settings.PrivacySecurity.extension"], ["25.0.0", "com.apple.settings.PrivacySecurity.extension"]]) {
+    for (const [permission, panel] of Object.entries({ accessibility: "Privacy_Accessibility",
+      screen_recording: "Privacy_ScreenCapture", full_disk_access: "Privacy_AllFiles", automation: "Privacy_Automation" })) {
+      const calls = [];
+      const status = await requestPermissions({ permission, platform: "darwin", release, fullDisk: denied,
+        execute: async (file, args) => {
+          calls.push({ file, args });
+          return { stdout: JSON.stringify({ accessibility: "denied", screen_recording: "denied", automation_targets: [-1743, -1743] }) };
+        }, spawnProcess: () => ({ on() {}, unref() {} }),
+      });
+      assert.deepEqual(calls.filter(call => call.file === "/usr/bin/open").map(call => call.args),
+        [[`x-apple.systempreferences:${settings}?${panel}`]]);
+      assert.equal(status[permission], "denied");
+    }
   }
 });
 

@@ -122,11 +122,16 @@ ${JSON.stringify(AUTOMATION_TARGETS)}.forEach(function (bundle) {
   } catch { /* best effort */ }
 }
 
-async function requestPermissions({ permission, platform = process.platform, execute = execFileAsync, spawnProcess = spawn, fullDisk = fullDiskAccessState } = {}) {
+async function requestPermissions({ permission, platform = process.platform, release = os.release(), execute = execFileAsync, spawnProcess = spawn, fullDisk = fullDiskAccessState } = {}) {
   if (permission !== undefined && !Object.hasOwn(PANELS, permission)) {
     throw new Error("Choose accessibility, screen_recording, full_disk_access, or automation.");
   }
   if (platform !== "darwin") return getPermissions({ platform, execute });
+  // Ventura (Darwin 22) replaced the Security preference pane with a Settings
+  // extension. The old URL can leave Settings on its previously selected page.
+  const settings = Number.parseInt(release, 10) >= 22
+    ? "com.apple.settings.PrivacySecurity.extension" : "com.apple.preference.security";
+  const panelURL = (name) => `x-apple.systempreferences:${settings}?${PANELS[name]}`;
   const all = !permission;
   if (all || permission === "accessibility" || permission === "screen_recording") {
     await macPermissions({ request: permission || true, execute });
@@ -134,11 +139,11 @@ async function requestPermissions({ permission, platform = process.platform, exe
   if (all || permission === "automation") requestAutomation({ spawnProcess });
   if (all || permission === "full_disk_access") {
     // Touch protected data first so the app is already listed in the pane.
-    if (fullDisk() !== "granted") await execute("/usr/bin/open", [`x-apple.systempreferences:com.apple.preference.security?${PANELS.full_disk_access}`], { timeout: 10000, maxBuffer: 16384 });
+    if (fullDisk() !== "granted") await execute("/usr/bin/open", [panelURL("full_disk_access")], { timeout: 10000, maxBuffer: 16384 });
   } else if (permission) {
     // macOS does not show an Automation prompt again after a denial. The
     // explicit per-permission action must still open its recovery pane.
-    await execute("/usr/bin/open", [`x-apple.systempreferences:com.apple.preference.security?${PANELS[permission]}`], { timeout: 10000, maxBuffer: 16384 });
+    await execute("/usr/bin/open", [panelURL(permission)], { timeout: 10000, maxBuffer: 16384 });
   }
   return getPermissions({ platform, execute, fullDisk });
 }
