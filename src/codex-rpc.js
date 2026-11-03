@@ -3,6 +3,7 @@
 const { spawn } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
 const { StringDecoder } = require("node:string_decoder");
+const { localEnvironment } = require("./local-workspace");
 
 function deferred() {
   let resolve, reject;
@@ -234,7 +235,7 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("A nonempty prompt is required.");
     started = true;
     child = spawn(executable, ["app-server", "--listen", "stdio://", "-c", "sandbox_workspace_write.writable_roots=[]"],
-      { cwd, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+      { cwd, env: localEnvironment(), detached: true, stdio: ["pipe", "pipe", "pipe"] });
     child.stdin.on("error", fail);
     child.stdout.on("data", (chunk) => { try { consume(chunk); } catch (error) { fail(error); } });
     child.stderr.on("data", (chunk) => callback(onDiagnostic, "stderr", chunk));

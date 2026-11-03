@@ -8,6 +8,7 @@ const { spawn, spawnSync } = require("node:child_process");
 const { StringDecoder } = require("node:string_decoder");
 const { selectAgent, argumentsFor, verifyInteractiveCodex } = require("./agents");
 const { normalizeRequest, nativeResponse } = require("./approvals");
+const { localEnvironment } = require("./local-workspace");
 
 const MAX_OUTPUT = 64 * 1024;
 const MAX_PROMPT = 64 * 1024;
@@ -119,10 +120,10 @@ function validateCwd(value, sandbox) {
   const cwd = fs.realpathSync(value);
   if (!fs.statSync(cwd).isDirectory()) throw new Error("--cwd must be a directory.");
   if (sandbox === "workspace-write") {
-    const git = spawnSync("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8", timeout: 5000, env: { ...process.env, LC_ALL: "C" } });
+    const git = spawnSync("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8", timeout: 5000, env: { ...localEnvironment(), LC_ALL: "C" } });
     if (git.error) throw new Error("Cannot validate Git worktree: git is unavailable or timed out.");
     if (git.status === 0 && git.stdout.trim() === "true") {
-      const dirs = spawnSync("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], { encoding: "utf8", timeout: 5000 });
+      const dirs = spawnSync("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], { encoding: "utf8", timeout: 5000, env: localEnvironment() });
       if (dirs.status !== 0) throw new Error("Cannot validate Git worktree.");
       const [gitDir, commonDir] = dirs.stdout.trim().split("\n").map((p) => fs.realpathSync(p));
       if (gitDir === commonDir) throw new Error("Workspace writes require a dedicated Git worktree. Create one and pass its path as --cwd.");
@@ -247,7 +248,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
   // recorded on it so a status or list call explains what happened.
   try {
     const child = spawn(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
-      detached: true, stdio: "ignore", env: { ...process.env, SHAPES_CODEX_JOB_DIR: root() },
+      detached: true, stdio: "ignore", env: { ...localEnvironment(), SHAPES_CODEX_JOB_DIR: root() },
     });
     await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
     child.unref();
@@ -620,7 +621,7 @@ async function supervise(id) {
     saveState(directory, state);
     if (fs.existsSync(path.join(directory, "cancel"))) { finish("cancelled"); return; }
     child = spawn(request.executable, argumentsFor(agent, request),
-      { cwd: request.cwd, detached: true, stdio: ["pipe", "pipe", "pipe"] });
+      { cwd: request.cwd, env: localEnvironment(), detached: true, stdio: ["pipe", "pipe", "pipe"] });
     child.stdin.on("error", () => {}); // Early CLI exits can close stdin before the prompt is consumed.
     child.stdin.end(request.prompt);
     child.stdout.on("data", (chunk) => {

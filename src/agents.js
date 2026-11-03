@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { localEnvironment } = require("./local-workspace");
 
 const IDS = ["codex", "claude"];
 const PROBE_TIMEOUT = 5000;
@@ -37,7 +38,7 @@ function candidates(agent) {
     "/opt/homebrew/bin/claude", "/usr/local/bin/claude",
     ...desktopClaudeCandidates(home),
   ];
-  return [...new Set([...defaults, ...(process.env.PATH || "").split(path.delimiter)
+  return [...new Set([...defaults, ...(localEnvironment().PATH || "").split(path.delimiter)
     .filter(Boolean).map((dir) => path.join(dir, agent))])];
 }
 
@@ -57,7 +58,7 @@ function probe(executable, args, cwd) {
       finish(null, true);
     }
     try {
-      child = spawn(executable, args, { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawn(executable, args, { cwd, env: localEnvironment(), detached: true, stdio: ["ignore", "pipe", "pipe"] });
       child.stdout.on("data", (part) => { output += part; if (output.length > 65536) stop(); });
       child.stderr.on("data", (part) => { error += part; if (error.length > 65536) stop(); });
       child.once("error", () => finish(null, true));
