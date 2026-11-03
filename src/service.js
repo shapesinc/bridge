@@ -149,12 +149,13 @@ function copyFiles(source, runtime) {
   }
 }
 
-function assembleMacApp(source, app, { nodeBinary = process.execPath, launcherBinary, controlsBinary, cloudflaredBinary } = {}) {
+function assembleMacApp(source, app, { nodeBinary = process.execPath, launcherBinary, controlsBinary, cloudflaredBinary, codexPackages } = {}) {
   const runtime = path.join(app, "Contents", "Resources", "runtime");
   fs.rmSync(app, { recursive: true, force: true });
   fs.mkdirSync(path.join(app, "Contents", "MacOS"), { recursive: true });
   fs.mkdirSync(runtime, { recursive: true });
   copyFiles(source, runtime);
+  if (codexPackages) fs.cpSync(codexPackages, path.join(app, "Contents", "Resources", "codex"), { recursive: true });
   const icon = path.join(runtime, "assets", "shapes-inc-bridge.icns");
   if (fs.existsSync(icon)) fs.copyFileSync(icon, path.join(app, "Contents", "Resources", `${APP_NAME}.icns`));
   fs.writeFileSync(path.join(app, "Contents", "Info.plist"), infoPlist());

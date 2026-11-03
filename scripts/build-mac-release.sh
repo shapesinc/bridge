@@ -63,8 +63,10 @@ done
 lipo -create "$CACHE/cloudflared-arm64/cloudflared" "$CACHE/cloudflared-amd64/cloudflared" -output "$CACHE/cloudflared-universal"
 
 echo "==> Assemble"
+node scripts/prepare-codex.js --out "$CACHE/codex-packages"
 node scripts/assemble-mac-app.js --node "$CACHE/node-universal" --out "$DIST/$APP_NAME.app" \
-  --launcher "$CACHE/launcher-universal" --controls "$CACHE/controls-universal" --cloudflared "$CACHE/cloudflared-universal"
+  --launcher "$CACHE/launcher-universal" --controls "$CACHE/controls-universal" --cloudflared "$CACHE/cloudflared-universal" \
+  --codex-packages "$CACHE/codex-packages"
 # Check the assembled app, not just the compiler inputs: every nested executable
 # must run on either supported Mac architecture before signing and distribution.
 for executable in "$APP_NAME" "$APP_NAME Runtime" "$APP_NAME Controls" cloudflared; do
@@ -73,6 +75,14 @@ done
 codesign --remove-signature "$DIST/$APP_NAME.app/Contents/MacOS/$APP_NAME Runtime" 2>/dev/null || true
 
 echo "==> Sign (hardened runtime)"
+for arch in arm64 x64; do
+  for executable in bin/codex-app-server bin/codex-code-mode-host bin/codex-exec-server codex-path/rg; do
+    native_arch="$arch"; [ "$arch" != x64 ] || native_arch=x86_64
+    lipo "$DIST/$APP_NAME.app/Contents/Resources/codex/$arch/$executable" -verify_arch "$native_arch"
+    codesign --force --timestamp --options runtime --entitlements scripts/mac/runtime.entitlements \
+      --sign "$SIGNING_IDENTITY" "$DIST/$APP_NAME.app/Contents/Resources/codex/$arch/$executable"
+  done
+done
 for executable in "$APP_NAME Controls" cloudflared; do
   codesign --force --timestamp --options runtime --sign "$SIGNING_IDENTITY" "$DIST/$APP_NAME.app/Contents/MacOS/$executable"
 done

@@ -33,6 +33,8 @@ const { URL } = require("node:url");
 const { startJob, publicStatus, listJobs, cancelJob, respondJob } = require("./codex");
 const { listAgents } = require("./agents");
 const { localEnvironment, expandHome } = require("./local-workspace");
+const { bundledRuntime } = require("./bundled-runtime");
+const { createSession, startSessionTurn, readSession, sessionEvents } = require("./sessions");
 
 const MAX_OUTPUT = 20000;
 const MAX_FILE_READ = 100000;
@@ -270,7 +272,8 @@ function startServer({ port, token }) {
       return sendJson(res, 200, { ok: true });
     }
     if (route === "/capabilities" && method === "GET") {
-      return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: { interactive_codex: true, idempotent_start: true, job_list: true } });
+      return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: {
+        interactive_codex: true, idempotent_start: true, job_list: true, bundled_sessions: bundledRuntime().available } });
     }
 
     // Everything below requires the token.
@@ -279,6 +282,17 @@ function startServer({ port, token }) {
     }
 
     try {
+      if (route === "/sessions/create" && method === "POST") {
+        try { return sendJson(res, 200, await createSession(await readBody(req))); }
+        catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message }); }
+      }
+      if (["/sessions/read", "/sessions/events"].includes(route) && method === "GET") {
+        try {
+          const id = url.searchParams.get("session_id"), scope = url.searchParams.get("scope_id");
+          return sendJson(res, 200, route === "/sessions/read" ? readSession(id, scope)
+            : sessionEvents(id, scope, url.searchParams.get("cursor") || "0:0"));
+        } catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message }); }
+      }
       if (route === "/agents" && method === "GET") {
         log("AGENTS: checking local CLI readiness");
         return sendJson(res, 200, await listAgents());
@@ -288,6 +302,10 @@ function startServer({ port, token }) {
         try {
           const codexOnly = route === "/codex/start";
           const body = await readBody(req);
+          if (!codexOnly && body?.session_id !== undefined) {
+            const result = await startSessionTurn(body);
+            return sendJson(res, result.deduplicated ? 200 : 202, result);
+          }
           if (!body || typeof body !== "object" || Array.isArray(body)
               || Object.keys(body).some((key) => !["prompt", "cwd", "workspace_write", "interactive", "request_key", ...(codexOnly ? [] : ["agent"])].includes(key))
               || typeof body.prompt !== "string" || !body.prompt.trim()

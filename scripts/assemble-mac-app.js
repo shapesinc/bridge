@@ -11,5 +11,6 @@ const optional = (name) => argv.includes(name) ? path.resolve(option(name)) : un
 const result = assembleMacApp(path.resolve(__dirname, ".."), path.resolve(option("--out")), {
   nodeBinary: path.resolve(option("--node")), launcherBinary: optional("--launcher"),
   controlsBinary: optional("--controls"), cloudflaredBinary: optional("--cloudflared"),
+  codexPackages: optional("--codex-packages"),
 });
 process.stdout.write(`${result.app}\n`);

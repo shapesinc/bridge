@@ -9,6 +9,7 @@ const { StringDecoder } = require("node:string_decoder");
 const { selectAgent, argumentsFor, verifyInteractiveCodex } = require("./agents");
 const { normalizeRequest, nativeResponse } = require("./approvals");
 const { localEnvironment } = require("./local-workspace");
+const { bundledRuntime, launchConfiguration } = require("./bundled-runtime");
 
 const MAX_OUTPUT = 64 * 1024;
 const MAX_PROMPT = 64 * 1024;
@@ -120,6 +121,15 @@ function validateCwd(value, sandbox) {
   const cwd = fs.realpathSync(value);
   if (!fs.statSync(cwd).isDirectory()) throw new Error("--cwd must be a directory.");
   if (sandbox === "workspace-write") {
+    // Plain file work must work on a fresh Mac without Command Line Tools.
+    // Only ask Git to classify folders that could actually be repositories.
+    let possibleRepository = Boolean(process.env.GIT_DIR || process.env.GIT_WORK_TREE);
+    for (let parent = cwd; !possibleRepository; parent = path.dirname(parent)) {
+      possibleRepository = fs.existsSync(path.join(parent, ".git"))
+        || (fs.existsSync(path.join(parent, "HEAD")) && fs.existsSync(path.join(parent, "objects")) && fs.existsSync(path.join(parent, "refs")));
+      if (parent === path.dirname(parent)) break;
+    }
+    if (!possibleRepository) return cwd;
     const git = spawnSync("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8", timeout: 5000, env: { ...localEnvironment(), LC_ALL: "C" } });
     if (git.error) throw new Error("Cannot validate Git worktree: git is unavailable or timed out.");
     if (git.status === 0 && git.stdout.trim() === "true") {
@@ -200,7 +210,7 @@ function publicStatus(id, expectedAgent) {
   return receipt;
 }
 
-async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex", interactive = false, requestKey }) {
+async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex", interactive = false, requestKey, builtIn, resumeThreadId, usageBaseline }) {
   if (process.platform === "win32") throw new Error("The local agent launcher currently requires macOS or Linux.");
   if (!["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
   cwd = validateCwd(cwd, sandbox);
@@ -219,21 +229,29 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
   if (typeof interactive !== "boolean") throw new Error("interactive must be boolean.");
   validRequestKey(requestKey);
   const fingerprint = requestKey && crypto.createHash("sha256")
-    .update(JSON.stringify([prompt, cwd, sandbox, timeout, agent, interactive])).digest("hex");
+    .update(JSON.stringify([prompt, cwd, sandbox, timeout, agent, interactive,
+      ...(builtIn ? [builtIn.sessionId, builtIn.scopeId, builtIn.gateway.model] : [])])).digest("hex");
   if (requestKey && fs.existsSync(root())) {
     const existing = existingRequest(requestKey, fingerprint);
     if (existing) return { ...publicStatus(existing), deduplicated: true };
   }
-  const selected = await selectAgent(agent, cwd);
+  let selected;
+  if (builtIn) {
+    const runtime = bundledRuntime();
+    if (!runtime.available) throw new Error("The built-in runtime is unavailable. Update shapes.inc on this computer.");
+    selected = { ...runtime, id: "codex" };
+  } else selected = await selectAgent(agent, cwd);
   agent = selected.id;
   interactive = interactive && agent === "codex";
-  if (interactive) await verifyInteractiveCodex(selected, cwd);
+  if (interactive && !builtIn) await verifyInteractiveCodex(selected, cwd);
   const executable = selected.executable;
   const id = crypto.randomUUID();
   const directory = privateDir(path.join(root(), id));
   const state = { id, status: "queued", cwd, sandbox, agent, interactive, createdAt: new Date().toISOString(),
+    ...(builtIn ? { sessionId: builtIn.sessionId, scopeId: builtIn.scopeId, funding: "shapes_credits", runtimeVersion: selected.version } : {}),
     promptPreview: prompt.trim().replace(/\s+/g, " ").slice(0, 160) };
-  writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable, agent, interactive }));
+  writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable, agent, interactive,
+    ...(builtIn ? { gateway: builtIn.gateway, resumeThreadId, usageBaseline } : {}) }));
   saveState(directory, state);
   if (requestKey) {
     let existing;
@@ -248,7 +266,8 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
   // recorded on it so a status or list call explains what happened.
   try {
     const child = spawn(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
-      detached: true, stdio: "ignore", env: { ...localEnvironment(), SHAPES_CODEX_JOB_DIR: root() },
+      detached: true, stdio: "ignore", env: { ...localEnvironment(), SHAPES_CODEX_JOB_DIR: root(),
+        ...(builtIn ? { SHAPES_RUNTIME_TOKEN: builtIn.token } : {}) },
     });
     await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
     child.unref();
@@ -261,6 +280,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
     throw failure;
   }
   return { job_id: id, state: "queued", cwd, sandbox, agent, interactive, created_at: state.createdAt,
+    ...(builtIn ? { session_id: builtIn.sessionId, funding: "shapes_credits", runtime_version: selected.version } : {}),
     ...(agent === "claude" ? { permission_scope: sandbox === "read-only" ? "read-only-tools" : "full-access" } : {}) };
 }
 
@@ -341,6 +361,7 @@ function getStatus(id, expectedAgent) {
   const finalResult = bounded(final, 8000);
   return {
     job_id: id, state: state.status, agent, interactive: state.interactive === true,
+    ...(state.sessionId ? { session_id: state.sessionId, funding: state.funding, runtime_version: state.runtimeVersion, usage: state.usage || null } : {}),
     final: finalResult, error: state.error ? bounded(state.error, 1000) : null,
     cwd: state.cwd, sandbox: state.sandbox, thread_id: typeof state.threadId === "string" ? bounded(state.threadId, 512) : null,
     created_at: state.createdAt, finished_at: state.finishedAt || null,
@@ -425,7 +446,11 @@ async function superviseInteractive(directory, state, request) {
     if (fs.existsSync(path.join(directory, "cancel"))) { stopped = "cancelled"; return; }
     session = createCodexRpcSession({
       executable: request.executable, cwd: request.cwd, sandbox: request.sandbox,
+      ...(request.gateway ? { ...launchConfiguration(request.gateway), resumeThreadId: request.resumeThreadId, usageBaseline: request.usageBaseline } : {}),
       onEvent(value) {
+        if (request.gateway) value = redactRuntimeValue(value);
+        if (state.sessionId) appendJobEvent(directory, value);
+        if (value.type === "usage.updated") { state.usage = value.usage; state.runtimeUsageTotal = value.total_usage; persist(); }
         if (value.type === "thread.started") { state.threadId = value.thread_id; persist(); }
         if (value.type === "item.completed" && isCodexPermissionDenial(value.item)) {
           state.permissionDenials = (state.permissionDenials || 0) + 1;
@@ -445,13 +470,15 @@ async function superviseInteractive(directory, state, request) {
       },
       onDiagnostic(kind, chunk) {
         if (!Object.prototype.hasOwnProperty.call(logs, kind)) return;
+        if (request.gateway && process.env.SHAPES_RUNTIME_TOKEN) chunk = Buffer.from(String(chunk).split(process.env.SHAPES_RUNTIME_TOKEN).join("[redacted]"));
         const combined = Buffer.concat([logs[kind], Buffer.from(chunk)]);
         if (combined.length > MAX_OUTPUT) state[`${kind}Truncated`] = true;
         logs[kind] = combined.subarray(Math.max(0, combined.length - MAX_OUTPUT));
-        writePrivate(path.join(directory, `${kind}.log`), logs[kind]);
+        writePrivate(path.join(directory, `${kind}.log`), request.gateway ? redactRuntimeValue(logs[kind].toString()) : logs[kind]);
       },
       onServerRequest(native) {
         try {
+          if (request.gateway) native = redactRuntimeValue(native);
           if (stopped || pending.size >= 16 || Buffer.byteLength(JSON.stringify(native)) > 128 * 1024) throw new Error("Unsupported approval request.");
           const display = normalizeRequest(native);
           pending.set(display.id, { native, display });
@@ -491,9 +518,9 @@ async function superviseInteractive(directory, state, request) {
     state.agentPid = session.child?.pid;
     persist();
     const result = await completion;
-    Object.assign(state, { usage: result.usage, exitCode: result.exitCode, signal: result.signal });
+    Object.assign(state, { usage: result.usage, runtimeUsageTotal: result.totalUsage, exitCode: result.exitCode, signal: result.signal });
     if (result.status !== "completed") failed = true;
-    if (typeof result.error?.message === "string" && result.error.message.trim()) state.agentError ||= result.error.message.slice(0, 4000);
+    if (typeof result.error?.message === "string" && result.error.message.trim()) state.agentError ||= redactRuntimeValue(result.error.message).slice(0, 4000);
   } catch {
     // Not the agent's own report: never quote it (it can carry local paths).
     // A cancel or deadline closes the session on purpose, and a permission
@@ -501,7 +528,8 @@ async function superviseInteractive(directory, state, request) {
     failed = true;
     if (!stopped && !state.error && !state.agentError && state.errorType !== "permission_denied") {
       Object.assign(state, { errorType: "process_error",
-        error: "Codex stopped before reporting a result. Check that Codex is installed, signed in and up to date on this computer, then retry; if it keeps happening, restart shapes.inc Bridge." });
+        error: request.gateway ? "The built-in runtime stopped before reporting a result. Retry the task or restart shapes.inc on this computer."
+          : "Codex stopped before reporting a result. Check that Codex is installed, signed in and up to date on this computer, then retry; if it keeps happening, restart shapes.inc Bridge." });
     }
   } finally {
     clearInterval(poll); clearTimeout(timer);
@@ -514,7 +542,42 @@ async function superviseInteractive(directory, state, request) {
     if (state.status === "failed" && state.errorType === "permission_denied") state.error = "The local agent was blocked by tool permissions.";
     else if (state.status === "failed" && !state.error) Object.assign(state, failureReason({ agent: "codex", agentError: state.agentError, exitCode: state.exitCode, signal: state.signal, errorType: state.errorType }));
     saveState(directory, state);
+    if (state.sessionId) appendJobEvent(directory, { type: "job.finished", state: state.status });
   }
+}
+
+function redactRuntimeValue(value) {
+  const token = process.env.SHAPES_RUNTIME_TOKEN;
+  if (!token) return value;
+  if (typeof value === "string") return value.split(token).join("[redacted]");
+  return JSON.parse(JSON.stringify(value).split(token).join("[redacted]"));
+}
+
+function appendJobEvent(directory, value) {
+  const file = path.join(directory, "events.jsonl");
+  if (fs.existsSync(file) && fs.statSync(file).size >= 8 * 1024 * 1024) return;
+  let encoded = JSON.stringify(value);
+  const token = process.env.SHAPES_RUNTIME_TOKEN;
+  if (token) encoded = encoded.split(token).join("[redacted]");
+  if (Buffer.byteLength(encoded) > 32768) encoded = JSON.stringify({ type: value.type, truncated: true,
+    item: value.item ? { id: value.item.id, type: value.item.type, status: value.item.status,
+      text: String(value.item.text || "").slice(0, 4000) } : undefined });
+  if (token) encoded = encoded.split(token).join("[redacted]");
+  fs.appendFileSync(file, encoded + "\n", { mode: 0o600 });
+}
+
+function jobEvents(id, cursor = 0, limit = 100) {
+  if (!Number.isSafeInteger(cursor) || cursor < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid event cursor or limit.");
+  const file = path.join(jobDir(id), "events.jsonl");
+  const lines = fs.existsSync(file) ? fs.readFileSync(file, "utf8").split("\n").slice(0, -1) : [];
+  if (cursor > lines.length) throw new Error("Event cursor exceeds available history.");
+  const events = lines.slice(cursor, cursor + limit).map((line) => JSON.parse(line));
+  return { events, cursor: cursor + events.length, has_more: cursor + events.length < lines.length };
+}
+
+function resumeContext(id) {
+  const state = loadState(jobDir(id));
+  return { resumeThreadId: state.threadId, usageBaseline: state.runtimeUsageTotal };
 }
 
 async function supervise(id) {
@@ -668,4 +731,4 @@ async function supervise(id) {
   }
 }
 
-module.exports = { startJob, getStatus, publicStatus, listJobs, cancelJob, respondJob, supervise, validateCwd, failureReason, MAX_OUTPUT };
+module.exports = { startJob, getStatus, publicStatus, listJobs, cancelJob, respondJob, supervise, validateCwd, failureReason, jobEvents, resumeContext, MAX_OUTPUT };

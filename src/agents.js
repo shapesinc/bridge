@@ -100,7 +100,9 @@ async function inspectCandidate(id, executable, cwd) {
     ...base, authenticated, available: authenticated, status: authenticated ? "ready" : "auth_required",
     reason: authenticated ? "Installed and signed in. Provider availability is verified when a task runs."
       : `Sign in to ${id === "claude" ? "Claude Code" : "Codex"} locally, then retry.`,
-    ...(authenticated ? { executable } : {}),
+    // Kept private by publicAgent; the native host also needs a compatible,
+    // signed-out executable to open the vendor's own login flow.
+    executable,
   };
 }
 
@@ -177,4 +179,4 @@ function argumentsFor(agent, request) {
   return args;
 }
 
-module.exports = { listAgents, selectAgent, inspectAgent, argumentsFor, desktopClaudeCandidates, verifyInteractiveCodex };
+module.exports = { listAgents, selectAgent, inspectAgent, publicAgent, argumentsFor, desktopClaudeCandidates, verifyInteractiveCodex };

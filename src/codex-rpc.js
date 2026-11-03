@@ -22,13 +22,14 @@ function normalizedItem(item) {
 // The caller owns user authentication, presentation and response validation.
 // This transport never converts model text into approvals or answers a request.
 function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent = () => {},
+  resumeThreadId, launchArgs, environment, model, modelProvider, usageBaseline,
   onServerRequest, onRequestResolved = () => {}, onDiagnostic = () => {},
   startupTimeoutMs = 30000, requestTimeoutMs = 30000, shutdownTimeoutMs = 1500,
   maxLineBytes = 1024 * 1024 } = {}) {
   if (typeof executable !== "string" || !executable || typeof cwd !== "string" || !cwd) throw new Error("Codex executable and cwd are required.");
   if (!["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported Codex sandbox.");
   let child, started = false, closing, exited = false, terminal = false, fatalError;
-  let threadId, turnId, usage, nextId = 0, lineBuffer = "", startupTimer, turnRevision = 0;
+  let threadId, turnId, usage, totalUsage, nextId = 0, lineBuffer = "", startupTimer, turnRevision = 0;
   let waitingTurn, continuing = false;
   const decoder = new StringDecoder("utf8");
   const completion = deferred(), exit = deferred();
@@ -121,7 +122,7 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
     clearPending("turn_completed");
     emit({ type: turn.status === "completed" ? "turn.completed" : turn.status === "interrupted" ? "turn.interrupted" : "turn.failed",
       ...(usage ? { usage } : {}), ...(turn.error ? { error: turn.error } : {}) });
-    completion.resolve({ status: turn.status, threadId, turnId, usage, error: turn.error || null });
+    completion.resolve({ status: turn.status, threadId, turnId, usage, totalUsage, error: turn.error || null });
   }
   function continueOrFinish() {
     if (!waitingTurn || pending.size || continuing || terminal || fatalError || closing) return;
@@ -149,12 +150,17 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
     if (params.threadId !== threadId) return;
     if (method === "turn/started") { rememberTurn(params.turn?.id); waitingTurn = undefined; return; }
     if (method === "thread/tokenUsage/updated") {
-      // Every job starts a fresh thread, so its cumulative usage includes all
-      // model calls and human-answer continuations without double counting.
+      // A resumed thread includes previous turns. Preserve its cumulative
+      // counter privately, and report only this job's increment to callers.
       const tokens = params.tokenUsage?.total || params.tokenUsage?.last;
-      if (tokens) usage = { input_tokens: tokens.inputTokens, cached_input_tokens: tokens.cachedInputTokens,
+      if (tokens) {
+        totalUsage = { input_tokens: tokens.inputTokens, cached_input_tokens: tokens.cachedInputTokens,
         output_tokens: tokens.outputTokens, reasoning_output_tokens: tokens.reasoningOutputTokens,
-        total_tokens: tokens.totalTokens };
+          total_tokens: tokens.totalTokens };
+        usage = Object.fromEntries(Object.entries(totalUsage).map(([key, value]) => [key, typeof value === "number"
+          ? Math.max(0, value - (params.tokenUsage?.total ? usageBaseline?.[key] || 0 : 0)) : value]));
+        emit({ type: "usage.updated", usage, total_usage: totalUsage });
+      }
       return;
     }
     if (method === "item/started" || method === "item/completed") {
@@ -234,8 +240,8 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
     if (closing) throw new Error("A closed Codex RPC session cannot start a task.");
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("A nonempty prompt is required.");
     started = true;
-    child = spawn(executable, ["app-server", "--listen", "stdio://", "-c", "sandbox_workspace_write.writable_roots=[]"],
-      { cwd, env: localEnvironment(), detached: true, stdio: ["pipe", "pipe", "pipe"] });
+    child = spawn(executable, launchArgs || ["app-server", "--listen", "stdio://", "-c", "sandbox_workspace_write.writable_roots=[]"],
+      { cwd, env: environment || localEnvironment(), detached: true, stdio: ["pipe", "pipe", "pipe"] });
     child.stdin.on("error", fail);
     child.stdout.on("data", (chunk) => { try { consume(chunk); } catch (error) { fail(error); } });
     child.stderr.on("data", (chunk) => callback(onDiagnostic, "stderr", chunk));
@@ -257,7 +263,11 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
       // Granting a chat this computer is the consent: no per-command approval
       // prompts. Writes run with full access; read-only stays sandboxed.
       // Questions (item/tool/requestUserInput) still reach the person.
-      const thread = await rpc("thread/start", { cwd, sandbox: sandbox === "workspace-write" ? "danger-full-access" : "read-only", approvalPolicy: "never" });
+      const thread = await rpc(resumeThreadId ? "thread/resume" : "thread/start", {
+        ...(resumeThreadId ? { threadId: resumeThreadId } : {}),
+        cwd, sandbox: sandbox === "workspace-write" ? "danger-full-access" : "read-only", approvalPolicy: "never",
+        ...(model ? { model } : {}), ...(modelProvider ? { modelProvider } : {}),
+      });
       rememberThread(thread.thread?.id);
       if (thread.approvalPolicy !== undefined && thread.approvalPolicy !== "never") throw new Error("Codex did not disable approval prompts.");
       const revision = turnRevision;
