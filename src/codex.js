@@ -248,7 +248,8 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
   const id = crypto.randomUUID();
   const directory = privateDir(path.join(root(), id));
   const state = { id, status: "queued", cwd, sandbox, agent, interactive, createdAt: new Date().toISOString(),
-    ...(builtIn ? { sessionId: builtIn.sessionId, scopeId: builtIn.scopeId, funding: "shapes_credits", runtimeVersion: selected.version } : {}),
+    ...(builtIn ? { sessionId: builtIn.sessionId, scopeId: builtIn.scopeId, funding: "shapes_credits", runtimeVersion: selected.version,
+      ...(usageBaseline ? { runtimeUsageTotal: usageBaseline } : {}) } : {}),
     promptPreview: prompt.trim().replace(/\s+/g, " ").slice(0, 160) };
   writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable, agent, interactive,
     ...(builtIn ? { gateway: builtIn.gateway, resumeThreadId, usageBaseline } : {}) }));
@@ -518,7 +519,7 @@ async function superviseInteractive(directory, state, request) {
     state.agentPid = session.child?.pid;
     persist();
     const result = await completion;
-    Object.assign(state, { usage: result.usage, runtimeUsageTotal: result.totalUsage, exitCode: result.exitCode, signal: result.signal });
+    Object.assign(state, { usage: result.usage, ...(result.totalUsage ? { runtimeUsageTotal: result.totalUsage } : {}), exitCode: result.exitCode, signal: result.signal });
     if (result.status !== "completed") failed = true;
     if (typeof result.error?.message === "string" && result.error.message.trim()) state.agentError ||= redactRuntimeValue(result.error.message).slice(0, 4000);
   } catch {

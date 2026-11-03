@@ -36,26 +36,27 @@ if(process.env.CODEX_HOME===${JSON.stringify(environment.CODEX_HOME)})process.ex
 const send=value=>process.stdout.write(JSON.stringify(value)+'\\n');
 const reply=(m,result)=>send({id:m.id,result});
 const stored=path.join(process.env.CODEX_HOME,'fixture-thread.json');
-let threadId,turns=0;
+let threadId,turns=0,billed=0;
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(m)+'\\n');
  if(m.method==='initialize')reply(m,{});
  if(m.method==='thread/start'||m.method==='thread/resume'){
-  if(m.method==='thread/resume'){const prior=JSON.parse(fs.readFileSync(stored));threadId=prior.threadId;turns=prior.turns;if(threadId!==m.params.threadId)process.exit(13);}
+  if(m.method==='thread/resume'){const prior=JSON.parse(fs.readFileSync(stored));threadId=prior.threadId;turns=prior.turns;billed=prior.billed||0;if(threadId!==m.params.threadId)process.exit(13);}
   else threadId='fixture-'+require('node:crypto').randomUUID();
   reply(m,{thread:{id:threadId},approvalPolicy:'never'});
  }
  if(m.method==='turn/start'){
-  turns++;fs.writeFileSync(stored,JSON.stringify({threadId,turns}));
+  turns++;fs.writeFileSync(stored,JSON.stringify({threadId,turns,billed}));
   const turnId='turn-'+turns,prompt=m.params.input[0].text;
   reply(m,{turn:{id:turnId,status:'inProgress'}});
   if(prompt==='wait'){
    send({id:'question',method:'item/tool/requestUserInput',params:{threadId,turnId,itemId:'question',questions:[{id:'answer',header:'Answer',question:'Continue?',options:[{label:'Yes',description:'Proceed'}]}]}});return;
   }
   if(prompt==='exit')process.exit(2);
+  billed++;fs.writeFileSync(stored,JSON.stringify({threadId,turns,billed}));
   const token=process.env.SHAPES_RUNTIME_TOKEN;
   const item={id:'answer',type:'agentMessage',text:prompt==='leak'?'Result '+token:'Completed '+prompt};
-  send({method:'thread/tokenUsage/updated',params:{threadId,turnId,tokenUsage:{last:{inputTokens:100,outputTokens:20,totalTokens:120},total:{inputTokens:100*turns,outputTokens:20*turns,totalTokens:120*turns}}}});
+  send({method:'thread/tokenUsage/updated',params:{threadId,turnId,tokenUsage:{last:{inputTokens:100,outputTokens:20,totalTokens:120},total:{inputTokens:100*billed,outputTokens:20*billed,totalTokens:120*billed}}}});
   send({method:'item/completed',params:{threadId,turnId,item}});
   send({method:'turn/completed',params:{threadId,turn:{id:turnId,status:prompt==='fail'?'failed':'completed',items:[item],error:prompt==='fail'?{message:'Simulated provider unavailable'}:null}}});
  }
@@ -190,11 +191,12 @@ test("cancellation closes a pending request without permission and allows the ne
 test("provider and runtime failures settle, and the grant never enters durable receipts or logs", async (t) => {
   const f = await fixture(t);
   await f.request("/sessions/create", f.create);
-  for (const prompt of ["leak", "fail", "exit"]) {
+  for (const prompt of ["leak", "fail", "exit", "recovered"]) {
     const body = f.turn(prompt, `request_key_for_${prompt}`), start = await f.request("/agents/start", body);
     assert.equal(start.status, 202);
     const status = await until(start.body.job_id);
-    assert.equal(status.state, prompt === "leak" ? "completed" : "failed");
+    assert.equal(status.state, ["leak", "recovered"].includes(prompt) ? "completed" : "failed");
+    if (prompt === "recovered") assert.equal(status.usage.input_tokens, 100, "a failed resume without usage must preserve the previous baseline");
     if (prompt === "leak") assert.equal(status.final, "Result [redacted]");
     assert.equal(JSON.stringify(status).includes(body.gateway.token), false);
   }
