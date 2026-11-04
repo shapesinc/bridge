@@ -13,6 +13,7 @@
 //   GET  /read?path=    -> read a file back
 //   GET  /ls?path=      -> list a directory
 //   POST /open          -> open a file/app/url with the OS default {target}
+//   POST /computer      -> one observed desktop input or screenshot {scope, control}
 //   GET  /agents        -> check local Codex and Claude Code readiness
 //   POST /agents/start  -> delegate {agent?, prompt, cwd?, workspace_write?}
 //   GET  /agents/status -> wait up to 20 seconds for a job {job_id in query}
@@ -34,6 +35,7 @@ const { startJob, publicStatus, listJobs, cancelJob, respondJob } = require("./c
 const { listAgents } = require("./agents");
 const { localEnvironment, expandHome } = require("./local-workspace");
 const { bundledRuntime } = require("./bundled-runtime");
+const { createComputerControl } = require("./computer");
 const { createSession, startSessionTurn, readSession, sessionEvents } = require("./sessions");
 
 const MAX_OUTPUT = 20000;
@@ -42,6 +44,7 @@ const MAX_COMMAND_BUFFER = 4 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES = 2000;
 
 const CAPABILITIES = {
+  computer: "observe the Mac screen or send one keyboard/mouse action (requires computer_control capability)",
   run: "run a shell command",
   write: "create or replace a file",
   read: "read a file",
@@ -93,14 +96,14 @@ function sendJson(res, status, body) {
   res.end(payload);
 }
 
-function readBody(req) {
+function readBody(req, limit = 50 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     req.on("data", (chunk) => {
       size += chunk.length;
       // Guard against a runaway body (50 MB is plenty for file writes).
-      if (size > 50 * 1024 * 1024) {
+      if (size > limit) {
         reject(new Error("request body too large"));
         req.destroy();
         return;
@@ -248,7 +251,7 @@ function sysinfo() {
  * @param {{port:number, token:string}} opts
  * @returns {Promise<import('node:http').Server>}
  */
-function startServer({ port, token }) {
+function startServer({ port, token, computerControl = createComputerControl() }) {
   const authed = (req) => {
     const provided = req.headers["x-token"];
     if (!token || typeof provided !== "string") return false;
@@ -273,7 +276,7 @@ function startServer({ port, token }) {
     }
     if (route === "/capabilities" && method === "GET") {
       return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: {
-        interactive_codex: true, idempotent_start: true, job_list: true, bundled_sessions: bundledRuntime().available } });
+        interactive_codex: true, idempotent_start: true, job_list: true, bundled_sessions: bundledRuntime().available, computer_control: computerControl.available() } });
     }
 
     // Everything below requires the token.
@@ -282,6 +285,10 @@ function startServer({ port, token }) {
     }
 
     try {
+      if (route === "/computer" && method === "POST") {
+        const result = await computerControl.execute(await readBody(req, 32768));
+        return sendJson(res, result.success ? 200 : 409, result);
+      }
       if (route === "/sessions/create" && method === "POST") {
         try { return sendJson(res, 200, await createSession(await readBody(req))); }
         catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message }); }
