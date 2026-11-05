@@ -10,7 +10,7 @@ const option = (name) => { const index = argv.indexOf(name); if (index === -1 ||
 const optional = (name) => argv.includes(name) ? path.resolve(option(name)) : undefined;
 const result = assembleMacApp(path.resolve(__dirname, ".."), path.resolve(option("--out")), {
   nodeBinary: path.resolve(option("--node")), launcherBinary: optional("--launcher"),
-  controlsBinary: optional("--controls"), cloudflaredBinary: optional("--cloudflared"),
+  controlsBinary: optional("--controls"), computerBinary: optional("--computer"), cloudflaredBinary: optional("--cloudflared"),
   codexPackages: optional("--codex-packages"),
 });
 process.stdout.write(`${result.app}\n`);

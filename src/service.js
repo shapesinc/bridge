@@ -149,7 +149,7 @@ function copyFiles(source, runtime) {
   }
 }
 
-function assembleMacApp(source, app, { nodeBinary = process.execPath, launcherBinary, controlsBinary, cloudflaredBinary, codexPackages } = {}) {
+function assembleMacApp(source, app, { nodeBinary = process.execPath, launcherBinary, controlsBinary, computerBinary, cloudflaredBinary, codexPackages } = {}) {
   const runtime = path.join(app, "Contents", "Resources", "runtime");
   fs.rmSync(app, { recursive: true, force: true });
   fs.mkdirSync(path.join(app, "Contents", "MacOS"), { recursive: true });
@@ -169,7 +169,7 @@ function assembleMacApp(source, app, { nodeBinary = process.execPath, launcherBi
   const node = path.join(app, "Contents", "MacOS", RUNTIME_NAME);
   fs.copyFileSync(nodeBinary, node);
   fs.chmodSync(node, 0o755);
-  for (const [source, name] of [[controlsBinary, `${APP_NAME} Controls`], [cloudflaredBinary, "cloudflared"]]) {
+  for (const [source, name] of [[controlsBinary, `${APP_NAME} Controls`], [computerBinary, `${APP_NAME} Computer`], [cloudflaredBinary, "cloudflared"]]) {
     if (!source) continue;
     const destination = path.join(app, "Contents", "MacOS", name);
     fs.copyFileSync(source, destination);
