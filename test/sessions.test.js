@@ -10,8 +10,8 @@ const { startServer } = require("../src/server");
 const { getStatus, cancelJob } = require("../src/codex");
 const terminal = new Set(["completed", "failed", "cancelled", "timed_out"]);
 
-async function until(id, condition = (value) => terminal.has(value.state)) {
-  for (let index = 0; index < 150; index++) {
+async function until(id, condition = (value) => terminal.has(value.state), attempts = 150) {
+  for (let index = 0; index < attempts; index++) {
     const value = getStatus(id);
     if (condition(value)) return value;
     await new Promise((resolve) => setTimeout(resolve, 40));
@@ -19,7 +19,7 @@ async function until(id, condition = (value) => terminal.has(value.state)) {
   throw new Error(`Job did not settle: ${JSON.stringify(getStatus(id))}`);
 }
 
-async function fixture(t) {
+async function fixture(t, { stallFirstInitialize = false } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-sessions-test-"));
   const state = path.join(directory, "state"), jobs = path.join(directory, "jobs");
   const executable = path.join(directory, "app-server"), calls = path.join(directory, "calls.jsonl");
@@ -39,7 +39,11 @@ const stored=path.join(process.env.CODEX_HOME,'fixture-thread.json');
 let threadId,turns=0,billed=0;
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
  const m=JSON.parse(line);fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(m)+'\\n');
- if(m.method==='initialize')reply(m,{});
+ if(m.method==='initialize'){
+  const marker=${JSON.stringify(path.join(directory, "initialized-once"))};
+  if(${stallFirstInitialize}&&!fs.existsSync(marker)){fs.writeFileSync(marker,'stalled');return;}
+  reply(m,{});
+ }
  if(m.method==='thread/start'||m.method==='thread/resume'){
   if(m.method==='thread/resume'){const prior=JSON.parse(fs.readFileSync(stored));threadId=prior.threadId;turns=prior.turns;billed=prior.billed||0;if(threadId!==m.params.threadId)process.exit(13);}
   else threadId='fixture-'+require('node:crypto').randomUUID();
@@ -112,6 +116,28 @@ test("session discovery and immutable creation need no personal login or inferen
   fs.unlinkSync(f.executable);
   assert.equal((await f.request("/capabilities")).body.features.bundled_sessions, false);
   assert.equal((await f.request("/agents/start", f.turn())).status, 409);
+});
+
+test("bundled job recovers a cold initialization timeout with one turn and durable phase diagnostics", async (t) => {
+  const f = await fixture(t, { stallFirstInitialize: true });
+  await f.request("/sessions/create", f.create);
+  const result = await f.request("/agents/start", f.turn("recovered"));
+  assert.equal(result.status, 202);
+  const status = await until(result.body.job_id, (value) => terminal.has(value.state), 1100);
+  assert.equal(status.state, "completed");
+  assert.equal(status.final, "Completed recovered");
+  const calls = fs.readFileSync(f.calls, "utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(calls.filter((m) => m.method === "initialize").length, 2);
+  assert.equal(calls.filter((m) => m.method === "turn/start").length, 1);
+  const directory = path.join(f.jobs, result.body.job_id);
+  const state = JSON.parse(fs.readFileSync(path.join(directory, "state.json"), "utf8"));
+  assert.equal(state.runtimeStartup.attempt, 2);
+  assert.equal(state.runtimeStartup.phase, "running");
+  const events = fs.readFileSync(path.join(directory, "events.jsonl"), "utf8");
+  assert.ok(events.includes('"failure":"timeout"'));
+  assert.ok(events.includes('"phase":"initialize"'));
+  assert.equal(events.includes(f.turn().gateway.token), false);
+  assert.throws(() => process.kill(state.agentPid, 0), { code: "ESRCH" });
 });
 
 test("turn retry, events, restart, and followup reuse durable jobs and one native thread", async (t) => {
