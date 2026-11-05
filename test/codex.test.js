@@ -219,6 +219,33 @@ test("write mode rejects a primary checkout including subdirectories and symlink
   assert.equal(validateCwd(dir, "workspace-write"), fs.realpathSync(dir));
 });
 
+test("plain writable folders do not need Git, while explicit Git contexts still validate", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "shapes-codex-no-git-"));
+  const previous = { PATH: process.env.PATH, GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE };
+  t.after(() => {
+    for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  // A first PATH entry emulates the macOS command-line-tools shim without
+  // invoking a system installer. Any accidental Git invocation fails loudly.
+  const bin = path.join(directory, "bin"), calls = path.join(directory, "git-called");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "git"), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(calls)},'called');process.exit(127);`, { mode: 0o700 });
+  process.env.PATH = bin;
+  delete process.env.GIT_DIR; delete process.env.GIT_WORK_TREE;
+  assert.equal(validateCwd(directory, "workspace-write"), fs.realpathSync(directory));
+  assert.equal(fs.existsSync(calls), false);
+  process.env.GIT_DIR = path.join(directory, "explicit-git-dir");
+  assert.throws(() => validateCwd(directory, "workspace-write"), /Cannot validate Git worktree/);
+  assert.equal(fs.existsSync(calls), true);
+  delete process.env.GIT_DIR;
+  fs.unlinkSync(calls);
+  fs.mkdirSync(path.join(directory, "objects")); fs.mkdirSync(path.join(directory, "refs"));
+  fs.writeFileSync(path.join(directory, "HEAD"), "ref: refs/heads/main\n");
+  assert.throws(() => validateCwd(directory, "workspace-write"), /Cannot validate Git worktree/);
+  assert.equal(fs.existsSync(calls), true);
+});
+
 test("invalid job IDs and unsafe inputs fail without starting Codex", (t) => {
   const f = fixture(t, "throw new Error('should not run')");
   for (const args of [["status", "../../auth"], ["start", "--cwd", ".", "--prompt-file", f.prompt], ["start", "--cwd", f.dir, "--prompt-file", f.prompt, "--timeout-seconds", "0"]]) {

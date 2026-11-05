@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/openai/codex",
+  "version": "0.166.0",
+  "tag": "rust-v0.166.0",
+  "license": "Apache-2.0",
+  "packages": {
+    "arm64": {
+      "asset": "codex-app-server-package-aarch64-apple-darwin.tar.gz",
+      "sha256": "ee0010686a1a36dd26d1614e070955fb1cb42b11d7f98e955ad13715d66cd0de"
+    },
+    "x64": {
+      "asset": "codex-app-server-package-x86_64-apple-darwin.tar.gz",
+      "sha256": "c474377b4ea73451b06367911157ff84d07917be7268658e23636933b3129ab7"
+    }
+  }
+}

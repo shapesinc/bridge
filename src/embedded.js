@@ -5,6 +5,8 @@ const { readState, writeState, removeState } = require("./state");
 const { DEFAULT_API, beginPairing, pollPairing, cancelPairing } = require("./account");
 const { createEmbeddedProcess } = require("./embedded-process");
 const { PERMISSIONS } = require("./permissions");
+const { listAgents, inspectAgent } = require("./agents");
+const { openPersonalLogin } = require("./personal-login");
 
 const MESSAGES = Object.freeze({
   invalid_request: "This computer request is not supported.",
@@ -20,6 +22,8 @@ const MESSAGES = Object.freeze({
   connection_failed: "Could not connect this computer. Try again.",
   cancel_failed: "Could not cancel computer approval. Try again.",
   not_connected: "Connect this computer before requesting permission.",
+  agent_login_unavailable: "Install or update this provider's coding app, then try signing in again.",
+  agent_login_failed: "Could not open sign-in in Terminal. Open the provider's coding app to sign in.",
 });
 function failure(code) { return Object.assign(new Error(MESSAGES[code]), { code }); }
 const identifier = (value) => typeof value === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(value);
@@ -31,6 +35,7 @@ const deviceCredential = /^sbd_[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[
 function createEmbeddedController({ read = readState, write = writeState, remove = removeState,
   begin = beginPairing, poll = pollPairing, cancel = cancelPairing,
   runtime = createEmbeddedProcess(), api = DEFAULT_API, name = os.hostname(), now = Date.now,
+  discoverPersonalAgents = listAgents, inspectPersonalAgent = inspectAgent, launchPersonalLogin = openPersonalLogin,
   readinessMs = 20000, sleep = (ms, signal) => new Promise((resolve, reject) => {
     const abort = () => { clearTimeout(timer); reject(failure("pairing_cancelled")); };
     const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, ms);
@@ -276,7 +281,26 @@ function createEmbeddedController({ read = readState, write = writeState, remove
     });
   }
   function dispose() { closed = true; account = null; invalidate(); return serial(suspend); }
-  return { status, beginConnect, completeConnect, cancelConnect, disconnect, detach, updateAccount, requestPermission, dispose };
+  async function listPersonalAgents({ expectedUserId }) {
+    if (!identifier(expectedUserId)) throw failure("invalid_request");
+    authorized(expectedUserId);
+    const result = await discoverPersonalAgents(os.homedir());
+    authorized(expectedUserId);
+    return result;
+  }
+  async function openAgentLogin({ expectedUserId, agent }) {
+    if (!identifier(expectedUserId) || !["codex", "claude"].includes(agent)) throw failure("invalid_request");
+    authorized(expectedUserId);
+    const selected = await inspectPersonalAgent(agent, os.homedir());
+    authorized(expectedUserId);
+    if (!["ready", "auth_required"].includes(selected.status) || !selected.executable) throw failure("agent_login_unavailable");
+    try { await launchPersonalLogin(selected); }
+    catch { throw failure("agent_login_failed"); }
+    authorized(expectedUserId);
+    return { opened: true };
+  }
+  return { status, beginConnect, completeConnect, cancelConnect, disconnect, detach, updateAccount, requestPermission,
+    listPersonalAgents, openAgentLogin, dispose };
 }
 
 module.exports = { createEmbeddedController, failure, MESSAGES };
