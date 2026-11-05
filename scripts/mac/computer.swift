@@ -153,7 +153,11 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
             throw fail("invalid_arguments", "Scroll deltas must be between -2000 and 2000 pixels.")
         }
         mouse(.mouseMoved, p)
-        CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)!.post(tap: .cghidEventTap)
+        let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)!
+        // The preceding move is asynchronous; creation can inherit the old
+        // cursor location. Route the wheel event to the requested image point.
+        event.location = p
+        event.post(tap: .cghidEventTap)
     case "type":
         guard let text = request["text"] as? String, !text.isEmpty, text.utf16.count <= 4096 else { throw fail("invalid_arguments", "Supply at most 4096 UTF-16 units of text.") }
         // Unicode events do not overwrite the person's clipboard. Split on
