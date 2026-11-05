@@ -65,6 +65,9 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
    const message=prompt==='provider401'?'Provider rejected the sandbox request (HTTP 401).':'Provider rate limit (HTTP 429).';
    send({method:'turn/completed',params:{threadId,turn:{id:turnId,status:'failed',items:[],error:{message}}}});return;
   }
+  if(prompt==='gatewayStopped'){
+   send({method:'turn/completed',params:{threadId,turn:{id:turnId,status:'failed',items:[],error:{message:'unexpected status 403 Forbidden: Computer inference access was revoked or cancelled.',codexErrorInfo:{httpConnectionFailed:{httpStatusCode:403}}}}}});return;
+  }
   billed++;fs.writeFileSync(stored,JSON.stringify({threadId,turns,billed}));
   const token=process.env.SHAPES_RUNTIME_TOKEN;
   const item={id:'answer',type:'agentMessage',text:prompt==='leak'?'Result '+token:'Completed '+prompt};
@@ -146,6 +149,45 @@ test("HTTP session cancellation reaches a durable terminal receipt despite escap
   const restored = await f.request(`/sessions/read?${new URLSearchParams(f.identity)}`);
   assert.equal(restored.body.latest_job.state, "cancelled");
   assert.equal(restored.body.state, "idle");
+});
+
+test("late HTTP cancel preserves a settled gateway failure or completion and permits the next turn", async (t) => {
+  const f = await fixture(t);
+  await f.request("/sessions/create", f.create);
+  let threadId;
+  // Simulates the app-server failure after the gateway's Stop fence wins the
+  // race. A later authenticated cancel must not rewrite that audit outcome,
+  // and the same no-op contract must preserve work that already completed.
+  for (const [prompt, expected] of [["gatewayStopped", "failed"], ["completed", "completed"]]) {
+    const started = await f.request("/agents/start", f.turn(prompt, `late_cancel_${prompt}`));
+    assert.equal(started.status, 202);
+    const id = started.body.job_id, settled = await until(id);
+    assert.equal(settled.state, expected);
+    if (threadId) assert.equal(settled.thread_id, threadId);
+    threadId = settled.thread_id;
+    if (expected === "failed") {
+      assert.equal(settled.error_type, "agent_error");
+      assert.match(settled.error, /403 Forbidden/);
+    }
+    const receipt = path.join(f.jobs, id, "state.json");
+    const before = fs.readFileSync(receipt, "utf8");
+    assert.equal((await f.request("/agents/cancel", { job_id: id }, "wrong")).status, 401);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const cancelled = await f.request("/agents/cancel", { job_id: id });
+      assert.equal(cancelled.status, 200);
+      assert.deepEqual(cancelled.body, { job_id: id, state: expected, agent: "codex", cancel_requested: false });
+    }
+    assert.equal(fs.readFileSync(receipt, "utf8"), before);
+    assert.equal(fs.existsSync(path.join(f.jobs, id, "cancel")), false);
+    await f.restart();
+    const restored = await f.request(`/sessions/read?${new URLSearchParams(f.identity)}`);
+    assert.equal(restored.body.latest_job.state, expected);
+    assert.equal(restored.body.state, "idle");
+  }
+  const followup = await f.request("/agents/start", f.turn("continue", "late_cancel_followup"));
+  const completed = await until(followup.body.job_id);
+  assert.equal(completed.state, "completed");
+  assert.equal(completed.thread_id, threadId);
 });
 
 test("bundled job recovers a cold initialization timeout with one turn and durable phase diagnostics", async (t) => {

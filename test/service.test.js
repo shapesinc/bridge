@@ -112,7 +112,7 @@ test("Linux launcher entry and renamed runners carry the shapes.inc name", () =>
   assert.match(serviceDefinition({ platform: "win32", home: "C:/Users/x", dir: "C:/Users/x/.shapes-bridge" }).content, /<Description>shapes\.inc Bridge<\/Description>/);
 });
 
-test("macOS helper assembly includes the shared process shutdown module and its callers", () => {
+test("macOS helper assembly includes process shutdown and scoped command modules with their callers", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-app-sources-"));
   try {
     // Source packaging needs no compiler or executable runtime for this check.
@@ -120,7 +120,7 @@ test("macOS helper assembly includes the shared process shutdown module and its 
     fs.writeFileSync(binary, "fixture");
     const source = path.resolve(__dirname, "..");
     const { runtime } = assembleMacApp(source, path.join(base, "Bridge.app"), { nodeBinary: binary, launcherBinary: binary });
-    for (const name of ["process-close.js", "codex-rpc.js", "codex.js"]) {
+    for (const name of ["process-close.js", "codex-rpc.js", "codex.js", "commands.js", "command-process.js", "server.js"]) {
       const packaged = path.join(runtime, "src", name);
       assert.deepEqual(fs.readFileSync(packaged), fs.readFileSync(path.join(source, "src", name)));
       assert.doesNotThrow(() => require(packaged));

@@ -33,14 +33,15 @@ const { spawn } = require("node:child_process");
 const { URL } = require("node:url");
 const { startJob, publicStatus, listJobs, cancelJob, respondJob } = require("./codex");
 const { listAgents } = require("./agents");
-const { localEnvironment, expandHome } = require("./local-workspace");
+const { expandHome } = require("./local-workspace");
 const { bundledRuntime } = require("./bundled-runtime");
 const { createComputerControl } = require("./computer");
 const { createSession, startSessionTurn, readSession, sessionEvents } = require("./sessions");
+const { runCommand } = require("./command-process");
+const { startCommand, commandStatus, cancelCommand } = require("./commands");
 
 const MAX_OUTPUT = 20000;
 const MAX_FILE_READ = 100000;
-const MAX_COMMAND_BUFFER = 4 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES = 2000;
 
 const CAPABILITIES = {
@@ -123,88 +124,6 @@ function readBody(req, limit = 50 * 1024 * 1024) {
   });
 }
 
-function runCommand({ cmd, cwd, timeout }) {
-  const seconds = Math.max(1, Math.min(Number(timeout) || 60, 600));
-  // Expand a leading ~ so home-relative working dirs work, and fail loudly with
-  // a clear message when the dir is missing — otherwise a bad cwd makes exec
-  // fail at spawn time and return a bare, confusing exit_code -1 with no output.
-  const workdir = cwd ? expandHome(cwd) : undefined;
-  if (workdir !== undefined) {
-    let ok = false;
-    try {
-      ok = fs.statSync(workdir).isDirectory();
-    } catch {
-      ok = false;
-    }
-    if (!ok) {
-      return Promise.resolve({
-        exit_code: -1,
-        stdout: "",
-        stderr: `cwd does not exist or is not a directory: ${workdir}`,
-      });
-    }
-  }
-  return new Promise((resolve) => {
-    const buffers = { stdout: [], stderr: [] }, sizes = { stdout: 0, stderr: 0 };
-    let child, timer, escalation, stopped, finished = false, forceStopped = false;
-    const kill = (signal) => {
-      if (!child?.pid) return;
-      if (signal === "SIGKILL") {
-        if (forceStopped) return;
-        forceStopped = true;
-      }
-      try {
-        if (process.platform === "win32") child.kill(signal);
-        else process.kill(-child.pid, signal);
-      } catch (error) { if (error.code !== "ESRCH") throw error; }
-    };
-    const stop = (reason) => {
-      if (stopped || finished) return;
-      stopped = reason;
-      // Terminate the command's process group, not only /bin/sh. Descendants
-      // that deliberately create another group are outside this boundary.
-      kill("SIGTERM");
-      escalation = setTimeout(() => {
-        kill("SIGKILL");
-        // A detached descendant can inherit the pipes after leaving the group.
-        // It must not keep an HTTP request open beyond the termination grace.
-        child?.stdout?.destroy();
-        child?.stderr?.destroy();
-        finish(null);
-      }, 1000);
-    };
-    const finish = (code, error) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      clearTimeout(escalation);
-      // Children may have redirected their pipes before the shell exited.
-      if (stopped) kill("SIGKILL");
-      const stdout = Buffer.concat(buffers.stdout).toString("utf8");
-      let stderr = Buffer.concat(buffers.stderr).toString("utf8");
-      const reason = stopped || error?.message;
-      if (reason) stderr += (stderr ? "\n" : "") + reason;
-      resolve({ exit_code: stopped || error || code === null ? -1 : code,
-        stdout: tail(stdout), stderr: tail(stderr) });
-    };
-    const capture = (name, chunk) => {
-      if (finished) return;
-      const remaining = MAX_COMMAND_BUFFER - sizes[name];
-      if (remaining > 0) buffers[name].push(chunk.subarray(0, remaining));
-      sizes[name] += chunk.length;
-      if (sizes[name] > MAX_COMMAND_BUFFER) stop(`${name} exceeded the command output limit`);
-    };
-    try {
-      child = spawn(cmd, { cwd: workdir, env: localEnvironment(), shell: true,
-        detached: process.platform !== "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-      child.stdout.on("data", (chunk) => capture("stdout", chunk));
-      child.stderr.on("data", (chunk) => capture("stderr", chunk));
-      child.once("error", (error) => finish(null, error));
-      child.once("close", (code) => finish(code));
-      timer = setTimeout(() => stop(`timed out after ${seconds}s`), seconds * 1000);
-    } catch (error) { finish(null, error); }
-  });
-}
 
 function openTarget(target) {
   const t = expandHome(target);
@@ -276,7 +195,7 @@ function startServer({ port, token, computerControl = createComputerControl() })
     }
     if (route === "/capabilities" && method === "GET") {
       return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: {
-        interactive_codex: true, idempotent_start: true, job_list: true, bundled_sessions: bundledRuntime().available, computer_control: computerControl.available() } });
+        interactive_codex: true, idempotent_start: true, job_list: true, command_jobs: true, bundled_sessions: bundledRuntime().available, computer_control: computerControl.available() } });
     }
 
     // Everything below requires the token.
@@ -403,6 +322,25 @@ function startServer({ port, token, computerControl = createComputerControl() })
         return sendJson(res, 200, sysinfo());
       }
 
+      if (route === "/commands/start" && method === "POST") {
+        try {
+          const result = startCommand(await readBody(req, 128 * 1024));
+          return sendJson(res, result.deduplicated ? 200 : 202, result);
+        } catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message }); }
+      }
+      if (route === "/commands/status" && method === "GET") {
+        try {
+          if ([...url.searchParams.keys()].some((key) => !["command_id", "scope_id"].includes(key))) {
+            return sendJson(res, 400, { error: "Supply command_id and scope_id." });
+          }
+          return sendJson(res, 200, commandStatus(Object.fromEntries(url.searchParams)));
+        } catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message }); }
+      }
+      if (route === "/commands/cancel" && method === "POST") {
+        try { return sendJson(res, 200, cancelCommand(await readBody(req, 4096))); }
+        catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message }); }
+      }
+
       if (route === "/run" && method === "POST") {
         const body = await readBody(req);
         if (!body || typeof body.cmd !== "string" || !body.cmd.trim()
@@ -410,8 +348,8 @@ function startServer({ port, token, computerControl = createComputerControl() })
           return sendJson(res, 400, { error: "Supply cmd text and optional cwd text." });
         }
         log(`RUN: ${body.cmd}   (cwd=${body.cwd || process.cwd()})`);
-        const result = await runCommand(body);
-        return sendJson(res, 200, result);
+        const { exit_code, stdout, stderr } = await runCommand(body).result;
+        return sendJson(res, 200, { exit_code, stdout, stderr });
       }
 
       if (route === "/write" && method === "POST") {
