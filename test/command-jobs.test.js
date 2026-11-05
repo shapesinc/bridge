@@ -39,6 +39,15 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
     const busy = await request("/commands/start", { cmd, timeout: 10, scope: "c".repeat(64), request_key: key });
     assert.equal(busy.body.error_type, "computer_busy");
     assert.equal(busy.body.job_id, undefined);
+    for (const [route, body] of [
+      ["/run", { cmd }], ["/write", { path: path.join(dir, "conflicting.txt"), content: "wrong run" }],
+      ["/open", { target: path.join(dir, "conflicting.txt") }],
+    ]) {
+      const rejected = await request(route, body);
+      assert.equal(rejected.status, 409);
+      assert.equal(rejected.body.error_type, "computer_busy");
+    }
+    assert.equal(fs.existsSync(path.join(dir, "conflicting.txt")), false);
     // Closing/reopening the HTTP server models a lost tunnel/daemon. The
     // independent supervisor finishes once and its receipt remains readable.
     await close();

@@ -11,6 +11,7 @@ const { stateDir, ensureStateDir } = require("./state");
 const HEX = /^[a-f0-9]{64}$/;
 const TERMINAL = new Set(["completed", "failed", "timed_out", "cancelled", "interrupted"]);
 const RETENTION_MS = 24 * 60 * 60 * 1000;
+let ephemeralMutation = false;
 const digest = (value) => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const error = (message, statusCode = 400, errorType = "invalid_command") => Object.assign(new Error(message), { statusCode, errorType });
 const root = () => path.join(stateDir(), "command-jobs");
@@ -59,6 +60,7 @@ function release(id) {
 }
 
 function claim(id, scope) {
+  if (ephemeralMutation) throw error("Another computer mutation is running. Wait for its receipt.", 409, "computer_busy");
   ensureStateDir();
   fs.mkdirSync(root(), { recursive: true, mode: 0o700 });
   try { fs.writeFileSync(lockFile(), JSON.stringify({ id, scope }), { flag: "wx", mode: 0o600 }); }
@@ -128,9 +130,11 @@ function cancel(id, scope) {
 }
 
 async function mutation(run) {
-  const id = crypto.randomUUID();
-  claim(id, null);
-  try { return await run(); } finally { release(id); }
+  // Legacy HTTP actions live in this server process. Do not create a durable
+  // lock that could outlive them; command workers use the disk lock instead.
+  if (ephemeralMutation || fs.existsSync(lockFile())) throw error("Another computer mutation is running or needs reconciliation. Wait for its receipt.", 409, "computer_busy");
+  ephemeralMutation = true;
+  try { return await run(); } finally { ephemeralMutation = false; }
 }
 
 module.exports = { start, status, cancel, mutation, root, load, save, release, TERMINAL };

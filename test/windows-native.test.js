@@ -37,7 +37,9 @@ test("native Windows command and scheduled-task integration", { skip: process.pl
       assert.match(result.stdout, /héllo "quoted"/);
       const lines = result.stdout.trim().split(/\r?\n/);
       assert.equal(lines[1], dir);
-      assert.equal(fs.realpathSync(lines[2]).toLowerCase(), fs.realpathSync(dir).toLowerCase());
+      // Windows can spell the same directory with its 8.3 or long name.
+      assert.equal(fs.statSync(lines[2]).ino, fs.statSync(dir).ino);
+      assert.equal(fs.statSync(lines[2]).dev, fs.statSync(dir).dev);
       assert.equal(result.shell, "powershell");
       assert.equal(fs.readdirSync(dir).some((name) => name.startsWith("command-")), false);
     });

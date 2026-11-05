@@ -452,7 +452,7 @@ function startServer({ port, token, computerControl = createComputerControl() })
           return sendJson(res, 400, { error: "Supply cmd text and optional cwd text." });
         }
         log(`RUN: ${body.cmd}   (cwd=${body.cwd || process.cwd()})`);
-        const result = await runCommand(body);
+        const result = await commandJobs.mutation(() => runCommand(body));
         return sendJson(res, 200, result);
       }
 
@@ -463,9 +463,12 @@ function startServer({ port, token, computerControl = createComputerControl() })
         }
         const p = expandHome(body.path);
         log(`WRITE: ${p} (${Buffer.byteLength(body.content)} bytes)`);
-        fs.mkdirSync(path.dirname(path.resolve(p)), { recursive: true });
-        fs.writeFileSync(p, body.content, "utf8");
-        return sendJson(res, 200, { wrote: p, bytes: Buffer.byteLength(body.content) });
+        const result = await commandJobs.mutation(() => {
+          fs.mkdirSync(path.dirname(path.resolve(p)), { recursive: true });
+          fs.writeFileSync(p, body.content, "utf8");
+          return { wrote: p, bytes: Buffer.byteLength(body.content), finished_at: Date.now() };
+        });
+        return sendJson(res, 200, result);
       }
 
       if (route === "/read" && method === "GET") {
@@ -486,6 +489,8 @@ function startServer({ port, token, computerControl = createComputerControl() })
           path: p,
           content: buffer.toString("utf8"),
           truncated: stat.size > MAX_FILE_READ,
+          modified_at: stat.mtimeMs,
+          observed_at: Date.now(),
         });
       }
 
@@ -517,12 +522,12 @@ function startServer({ port, token, computerControl = createComputerControl() })
         const body = await readBody(req);
         if (!body.target) return sendJson(res, 400, { error: "'target' is required" });
         log(`OPEN: ${body.target}`);
-        return sendJson(res, 200, openTarget(body.target));
+        return sendJson(res, 200, await commandJobs.mutation(() => openTarget(body.target)));
       }
 
       return sendJson(res, 404, { error: `no route ${method} ${route}` });
     } catch (err) {
-      return sendJson(res, 500, { error: String(err && err.message ? err.message : err) });
+      return sendJson(res, err.statusCode || 500, { error: String(err && err.message ? err.message : err), ...(err.errorType ? { error_type: err.errorType } : {}) });
     }
   });
 
