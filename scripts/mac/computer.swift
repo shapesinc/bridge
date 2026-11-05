@@ -119,6 +119,8 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
     func postKey(_ code: CGKeyCode, _ down: Bool, _ flags: CGEventFlags = []) {
         let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down)!
         event.flags = flags; event.post(tap: .cghidEventTap)
+        // Give WindowServer a distinct key transition before releasing it.
+        Thread.sleep(forTimeInterval: 0.02)
     }
     func mouse(_ type: CGEventType, _ point: CGPoint, _ button: CGMouseButton = .left, count: Int64 = 1) {
         let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button)!
@@ -182,6 +184,11 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
         for name in chord.dropLast().reversed() { let (key, flag) = modifiers[name]!; flags.remove(flag); postKey(key, false, flags) }
     default: throw fail("invalid_arguments", "Unsupported computer operation.")
     }
+    // CGEvent posting is asynchronous. A short-lived helper must not exit while
+    // WindowServer is still accepting its final events (short key actions were
+    // lost in signed acceptance). This grace period is not delivery verification;
+    // callers must still observe the intended effect and must never replay input.
+    Thread.sleep(forTimeInterval: 0.1)
     return ["dispatched": true, "delivery_verified": false, "source_pid": getpid(),
             "message": "Events were posted. Observe again to verify the result; this receipt alone does not prove the intended effect."]
 }
