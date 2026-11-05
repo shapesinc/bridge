@@ -60,26 +60,33 @@ function sanitizeAgentError(text) {
 }
 
 // Claude result text can be model prose, so it is only classified, never quoted.
-function failureReason({ agent, agentError, exitCode, signal, errorType }) {
+function failureReason({ agent, agentError, exitCode, signal, errorType, funding }) {
   const name = agentName(agent);
+  const funded = funding === "shapes_credits";
   const reported = sanitizeAgentError(agentError);
   if (reported) {
     // Classify the raw text: redaction can remove the words a hint needs.
     const hint = FAILURE_HINTS.find(([, pattern]) => pattern.test(agentError));
-    const advice = hint ? hint[2](name) : `Open ${name} on this computer to check the problem, then retry.`;
+    const advice = funded ? ({
+      auth_required: "Retry the task or contact shapes.inc support.",
+      usage_limit: "Check shapes.inc credits or retry later.",
+      model_unavailable: "Retry later or contact shapes.inc support.",
+      network_error: "Check your internet connection, then retry.",
+    }[hint?.[0]] || "Retry the task or restart shapes.inc.")
+      : hint ? hint[2](name) : `Open ${name} on this computer to check the problem, then retry.`;
     return { errorType: errorType || "agent_error",
       error: agent === "claude" ? `${name} reported an error before finishing. ${advice}` : `${name} reported: "${reported}". ${advice}` };
   }
   if (typeof exitCode === "number" && exitCode !== 0) {
     return { errorType: errorType || "process_error",
-      error: `${name} exited with code ${exitCode} before reporting a result. Open ${name} on this computer to check that it is signed in and up to date, then retry.` };
+      error: `${name} exited with code ${exitCode} before reporting a result. ${funded ? "Retry the task or restart shapes.inc." : `Open ${name} on this computer to check that it is signed in and up to date, then retry.`}` };
   }
   if (signal) {
     return { errorType: errorType || "process_error",
       error: `${name} was stopped by ${signal} before reporting a result. Make sure nothing on this computer is closing it, then retry.` };
   }
   return { errorType: errorType || "missing_completion",
-    error: `${name} exited without finishing the task. Update ${name} on this computer, then retry.` };
+    error: `${name} exited without finishing the task. ${funded ? "Update shapes.inc, then retry." : `Update ${name} on this computer, then retry.`}` };
 }
 
 function privateDir(directory) {
@@ -547,7 +554,7 @@ async function superviseInteractive(directory, state, request) {
     state.status = stopped || (failed ? "failed" : "completed");
     state.finishedAt = new Date().toISOString();
     if (state.status === "failed" && state.errorType === "permission_denied") state.error = "The local agent was blocked by tool permissions.";
-    else if (state.status === "failed" && !state.error) Object.assign(state, failureReason({ agent: "codex", agentError: state.agentError, exitCode: state.exitCode, signal: state.signal, errorType: state.errorType }));
+    else if (state.status === "failed" && !state.error) Object.assign(state, failureReason({ agent: "codex", funding: state.funding, agentError: state.agentError, exitCode: state.exitCode, signal: state.signal, errorType: state.errorType }));
     saveState(directory, state);
     if (state.sessionId) appendJobEvent(directory, { type: "job.finished", state: state.status });
   }

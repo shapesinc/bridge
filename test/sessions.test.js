@@ -57,6 +57,10 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
    send({id:'question',method:'item/tool/requestUserInput',params:{threadId,turnId,itemId:'question',questions:[{id:'answer',header:'Answer',question:'Continue?',options:[{label:'Yes',description:'Proceed'}]}]}});return;
   }
   if(prompt==='exit')process.exit(2);
+  if(prompt==='provider401'||prompt==='provider429'){
+   const message=prompt==='provider401'?'Provider rejected the sandbox request (HTTP 401).':'Provider rate limit (HTTP 429).';
+   send({method:'turn/completed',params:{threadId,turn:{id:turnId,status:'failed',items:[],error:{message}}}});return;
+  }
   billed++;fs.writeFileSync(stored,JSON.stringify({threadId,turns,billed}));
   const token=process.env.SHAPES_RUNTIME_TOKEN;
   const item={id:'answer',type:'agentMessage',text:prompt==='leak'?'Result '+token:'Completed '+prompt};
@@ -234,4 +238,27 @@ test("provider and runtime failures settle, and the grant never enters durable r
     }
   };
   visit(f.state); visit(f.jobs);
+});
+
+test("funded provider failures preserve the cause without personal account advice", async (t) => {
+  const f = await fixture(t);
+  await f.request("/sessions/create", f.create);
+  for (const code of [401, 429]) {
+    const body = f.turn(`provider${code}`, `provider_failure_key_${code}`);
+    const started = await f.request("/agents/start", body);
+    assert.equal(started.status, 202);
+    const status = await until(started.body.job_id);
+    assert.equal(status.state, "failed");
+    assert.equal(status.funding, "shapes_credits");
+    assert.match(status.error, new RegExp(`HTTP ${code}`));
+    assert.match(status.error, /shapes\.inc/);
+    assert.doesNotMatch(status.error, /Sign in|account on this computer|check its plan|Open Codex|Codex.*settings/);
+    assert.equal(status.final, "");
+    assert.equal(status.usage, null);
+    const stored = JSON.parse(fs.readFileSync(path.join(f.jobs, started.body.job_id, "state.json")));
+    assert.equal(stored.status, "failed");
+    assert.equal(stored.error, status.error);
+    const repeated = await f.request("/agents/start", body);
+    assert.equal(repeated.body.job_id, started.body.job_id);
+  }
 });

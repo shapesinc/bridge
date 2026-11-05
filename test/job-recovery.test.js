@@ -114,15 +114,23 @@ test("recent jobs are listed newest first without private diagnostics", async (t
 });
 
 test("the first failure explains the agent's reported reason with an action", async (t) => {
-  const f = await fixture(t, `if(prompt==='limit') { console.log(JSON.stringify({type:'error',message:"You've hit your usage limit. Try again later."}));
-    console.log(JSON.stringify({type:'turn.failed',error:{message:"You've hit your usage limit. Try again later."}})); process.exit(1); }
+  const f = await fixture(t, `if(prompt==='auth') { console.log(JSON.stringify({type:'turn.failed',error:{message:"401 Unauthorized: Sign in again"}})); process.exit(1); }
+  if(prompt==='limit') { console.log(JSON.stringify({type:'error',message:"You've hit your usage limit (HTTP 429). Try again later."}));
+    console.log(JSON.stringify({type:'turn.failed',error:{message:"You've hit your usage limit (HTTP 429). Try again later."}})); process.exit(1); }
   if(prompt==='crash') { process.stderr.write('private stack trace'); process.exit(3); }`);
   const limited = await f.request("/codex/start", { prompt: "limit", cwd: f.dir });
   const limit = (await f.request(`/codex/status?job_id=${limited.body.job_id}`)).body;
   assert.equal(limit.state, "failed");
   assert.match(limit.error, /usage limit/);
+  assert.match(limit.error, /HTTP 429/);
   assert.match(limit.error, /Wait for it to reset/);
   assert.doesNotMatch(limit.error, /diagnostics/);
+  const unauthorized = await f.request("/codex/start", { prompt: "auth", cwd: f.dir });
+  const auth = (await f.request(`/codex/status?job_id=${unauthorized.body.job_id}`)).body;
+  assert.equal(auth.state, "failed");
+  assert.match(auth.error, /401/);
+  assert.match(auth.error, /Sign in to Codex/);
+  assert.match(limit.error, /account on this computer/);
   const crashed = await f.request("/codex/start", { prompt: "crash", cwd: f.dir });
   const crash = (await f.request(`/codex/status?job_id=${crashed.body.job_id}`)).body;
   assert.equal(crash.state, "failed");
