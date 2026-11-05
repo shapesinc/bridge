@@ -35,7 +35,9 @@ test("native Windows command and scheduled-task integration", { skip: process.pl
       const result = await runCommand({ cmd: "$word = 'héllo \"quoted\"'\r\nWrite-Output $word\r\nWrite-Output $env:SHAPES_BRIDGE_HOME\r\n(Get-Location).Path", cwd: dir });
       assert.equal(result.exit_code, 0, result.stderr);
       assert.match(result.stdout, /héllo "quoted"/);
-      assert.equal(result.stdout.split(dir).length, 3);
+      const lines = result.stdout.trim().split(/\r?\n/);
+      assert.equal(lines[1], dir);
+      assert.equal(fs.realpathSync(lines[2]).toLowerCase(), fs.realpathSync(dir).toLowerCase());
       assert.equal(result.shell, "powershell");
       assert.equal(fs.readdirSync(dir).some((name) => name.startsWith("command-")), false);
     });
@@ -53,8 +55,10 @@ test("native Windows command and scheduled-task integration", { skip: process.pl
     await t.test("timeout kills descendants, not only the PowerShell wrapper", async () => {
       const marker = path.join(dir, "escaped.txt");
       const js = `setTimeout(()=>require('fs').writeFileSync(${JSON.stringify(marker)},'escaped'),2500);setInterval(()=>{},1000)`;
-      const result = await runCommand({ cmd: `& ${quote(process.execPath)} -e ${quote(js)}`, timeout: 1 });
-      assert.equal(result.exit_code, -1);
+      const script = path.join(dir, "child.js");
+      fs.writeFileSync(script, js);
+      const result = await runCommand({ cmd: `& ${quote(process.execPath)} ${quote(script)}`, timeout: 1 });
+      assert.equal(result.exit_code, -1, JSON.stringify(result));
       await new Promise((resolve) => setTimeout(resolve, 3000));
       assert.equal(fs.existsSync(marker), false);
     });
@@ -69,7 +73,11 @@ test("native Windows command and scheduled-task integration", { skip: process.pl
         }
         const result = spawnSync("schtasks.exe", ["/Query", "/TN", name, "/XML"], { encoding: "utf8" });
         assert.equal(result.status, 0, result.stderr);
-        assert.match(result.stdout, /LeastPrivilege/);
+        // Task Scheduler omits default-valued fields in exported XML. Read
+        // the registered principal rather than assuming the XML round-trips.
+        const level = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `(Get-ScheduledTask -TaskName '${name}').Principal.RunLevel`], { encoding: "utf8" });
+        assert.equal(level.status, 0, level.stderr);
+        assert.equal(level.stdout.trim(), "Limited");
       } finally { spawnSync("schtasks.exe", ["/Delete", "/TN", name, "/F"]); }
     });
   } finally {

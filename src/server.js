@@ -31,6 +31,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn, spawnSync } = require("node:child_process");
 const { commandShell, elevationStatus } = require("./command-shell");
+const commandJobs = require("./command-jobs");
 const { URL } = require("node:url");
 const { startJob, publicStatus, listJobs, cancelJob, respondJob } = require("./codex");
 const { listAgents } = require("./agents");
@@ -292,7 +293,7 @@ function startServer({ port, token, computerControl = createComputerControl() })
     }
     if (route === "/capabilities" && method === "GET") {
       return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: {
-        interactive_codex: true, idempotent_start: true, job_list: true, bundled_sessions: bundledRuntime().available, computer_control: computerControl.available() } });
+        command_jobs: true, interactive_codex: true, idempotent_start: true, job_list: true, bundled_sessions: bundledRuntime().available, computer_control: computerControl.available() } });
     }
 
     // Everything below requires the token.
@@ -301,6 +302,31 @@ function startServer({ port, token, computerControl = createComputerControl() })
     }
 
     try {
+      if (route === "/commands/start" && method === "POST") {
+        try { return sendJson(res, 202, await commandJobs.start(await readBody(req, 500000))); }
+        catch (error) { return sendJson(res, error.statusCode || 500, { error: error.message, error_type: error.errorType || "command_start_failed", ...(error.jobId ? { job_id: error.jobId } : {}) }); }
+      }
+      if (route === "/commands/status" && method === "GET") {
+        try {
+          if ([...url.searchParams.keys()].some((key) => !["job_id", "scope", "wait"].includes(key))) throw new Error("Unexpected command status argument.");
+          const id = url.searchParams.get("job_id"), scope = url.searchParams.get("scope");
+          const deadline = Date.now() + (url.searchParams.get("wait") === "0" ? 0 : 15000);
+          let result = commandJobs.status(id, scope);
+          while (!commandJobs.TERMINAL.has(result.state) && Date.now() < deadline && !req.aborted && !res.destroyed) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            result = commandJobs.status(id, scope);
+          }
+          if (!res.destroyed) return sendJson(res, 200, result);
+          return;
+        } catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message, error_type: error.errorType }); }
+      }
+      if (route === "/commands/cancel" && method === "POST") {
+        try {
+          const body = await readBody(req, 4096);
+          if (!body || Object.keys(body).some((key) => !["job_id", "scope"].includes(key))) throw new Error("Supply only job_id and scope.");
+          return sendJson(res, 200, commandJobs.cancel(body.job_id, body.scope));
+        } catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message, error_type: error.errorType }); }
+      }
       if (route === "/computer" && method === "POST") {
         const result = await computerControl.execute(await readBody(req, 32768));
         return sendJson(res, result.success ? 200 : 409, result);
