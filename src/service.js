@@ -347,6 +347,13 @@ function stopService({ remove = false } = {}) {
   if (remove || process.platform === "darwin") fs.rmSync(definition.file, { force: true });
 }
 
+function writeServiceDefinition(definition, platform = process.platform) {
+  const bytes = platform === "win32"
+    ? Buffer.from("\ufeff" + definition.content, "utf16le")
+    : Buffer.from(definition.content, "utf8");
+  fs.writeFileSync(definition.file, bytes, { mode: 0o600 });
+}
+
 async function startService({ install = false, source, log } = {}) {
   ensureStateDir();
   stopService();
@@ -356,7 +363,7 @@ async function startService({ install = false, source, log } = {}) {
   const logFile = path.join(stateDir(), "service.log");
   fs.closeSync(fs.openSync(logFile, "a", 0o600));
   if (process.platform !== "win32") fs.chmodSync(logFile, 0o600);
-  fs.writeFileSync(definition.file, definition.content, { mode: 0o600, encoding: process.platform === "win32" ? "utf16le" : "utf8" });
+  writeServiceDefinition(definition);
   if (process.platform === "darwin") {
     command("launchctl", ["bootstrap", `gui/${process.getuid()}`, definition.file]);
   } else if (process.platform === "linux") {
@@ -386,4 +393,4 @@ function disableStartup() {
   else detachedCommand("systemctl", ["--user", "disable", "--now", `${LABEL}.service`]);
 }
 
-module.exports = { LABEL, APP_NAME, RUNTIME_NAME, TASK_NAME, TEAM_ID, SIGNED_APP_URL, runtimePaths, launcherContent, infoPlist, desktopEntry, serviceDefinition, assertServiceOwner, assembleMacApp, adHocSign, buildMacApp, installSignedMacApp, installBundledMacApp, compareVersions, copyRuntime, startService, stopService, disableStartup };
+module.exports = { LABEL, APP_NAME, RUNTIME_NAME, TASK_NAME, TEAM_ID, SIGNED_APP_URL, runtimePaths, launcherContent, infoPlist, desktopEntry, serviceDefinition, writeServiceDefinition, assertServiceOwner, assembleMacApp, adHocSign, buildMacApp, installSignedMacApp, installBundledMacApp, compareVersions, copyRuntime, startService, stopService, disableStartup };

@@ -29,7 +29,8 @@ const os = require("node:os");
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
+const { commandShell, elevationStatus } = require("./command-shell");
 const { URL } = require("node:url");
 const { startJob, publicStatus, listJobs, cancelJob, respondJob } = require("./codex");
 const { listAgents } = require("./agents");
@@ -123,7 +124,7 @@ function readBody(req, limit = 50 * 1024 * 1024) {
   });
 }
 
-function runCommand({ cmd, cwd, timeout }) {
+function runCommand({ cmd, cwd, timeout, shell, signal }) {
   const seconds = Math.max(1, Math.min(Number(timeout) || 60, 600));
   // Expand a leading ~ so home-relative working dirs work, and fail loudly with
   // a clear message when the dir is missing — otherwise a bad cwd makes exec
@@ -146,7 +147,8 @@ function runCommand({ cmd, cwd, timeout }) {
   }
   return new Promise((resolve) => {
     const buffers = { stdout: [], stderr: [] }, sizes = { stdout: 0, stderr: 0 };
-    let child, timer, escalation, stopped, finished = false, forceStopped = false;
+    let child, timer, escalation, transport, stopped, finished = false, forceStopped = false;
+    const abort = () => stop("command cancelled");
     const kill = (signal) => {
       if (!child?.pid) return;
       if (signal === "SIGKILL") {
@@ -154,7 +156,10 @@ function runCommand({ cmd, cwd, timeout }) {
         forceStopped = true;
       }
       try {
-        if (process.platform === "win32") child.kill(signal);
+        if (process.platform === "win32") {
+          // Killing only cmd/PowerShell leaves its native descendants running.
+          spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { timeout: 3000, windowsHide: true });
+        }
         else process.kill(-child.pid, signal);
       } catch (error) { if (error.code !== "ESRCH") throw error; }
     };
@@ -178,14 +183,18 @@ function runCommand({ cmd, cwd, timeout }) {
       finished = true;
       clearTimeout(timer);
       clearTimeout(escalation);
+      signal?.removeEventListener("abort", abort);
       // Children may have redirected their pipes before the shell exited.
       if (stopped) kill("SIGKILL");
       const stdout = Buffer.concat(buffers.stdout).toString("utf8");
       let stderr = Buffer.concat(buffers.stderr).toString("utf8");
       const reason = stopped || error?.message;
       if (reason) stderr += (stderr ? "\n" : "") + reason;
+      try { transport?.cleanup(); } catch { /* Windows can briefly retain a script handle. */ }
       resolve({ exit_code: stopped || error || code === null ? -1 : code,
-        stdout: tail(stdout), stderr: tail(stderr) });
+        stdout: tail(stdout), stderr: tail(stderr), shell: transport?.shell || shell,
+        output_truncated: stdout.length > MAX_OUTPUT || stderr.length > MAX_OUTPUT,
+        ...(stopped ? { termination_reason: stopped } : {}) });
     };
     const capture = (name, chunk) => {
       if (finished) return;
@@ -195,13 +204,16 @@ function runCommand({ cmd, cwd, timeout }) {
       if (sizes[name] > MAX_COMMAND_BUFFER) stop(`${name} exceeded the command output limit`);
     };
     try {
-      child = spawn(cmd, { cwd: workdir, env: localEnvironment(), shell: true,
+      if (signal?.aborted) { stopped = "command cancelled"; finish(null); return; }
+      transport = commandShell(cmd, shell);
+      child = spawn(transport.executable, transport.args, { cwd: workdir, env: localEnvironment(), shell: transport.spawnShell || false,
         detached: process.platform !== "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
       child.stdout.on("data", (chunk) => capture("stdout", chunk));
       child.stderr.on("data", (chunk) => capture("stderr", chunk));
       child.once("error", (error) => finish(null, error));
       child.once("close", (code) => finish(code));
       timer = setTimeout(() => stop(`timed out after ${seconds}s`), seconds * 1000);
+      signal?.addEventListener("abort", abort, { once: true });
     } catch (error) { finish(null, error); }
   });
 }
@@ -238,6 +250,10 @@ function sysinfo() {
     platform: process.platform,
     arch: process.arch,
     node: process.version,
+    bridge_version: require("../package.json").version,
+    command_protocol: 1,
+    default_shell: process.platform === "win32" ? "powershell" : "sh",
+    ...elevationStatus(),
     cpu_count: os.cpus().length,
     mem_gb: Math.round((os.totalmem() / 1e9) * 10) / 10,
     home,
@@ -490,4 +506,4 @@ function startServer({ port, token, computerControl = createComputerControl() })
   });
 }
 
-module.exports = { startServer };
+module.exports = { startServer, runCommand };
