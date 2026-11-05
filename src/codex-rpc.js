@@ -4,6 +4,7 @@ const { spawn } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
 const { StringDecoder } = require("node:string_decoder");
 const { localEnvironment } = require("./local-workspace");
+const { closeProcessGroup } = require("./process-close");
 
 function deferred() {
   let resolve, reject;
@@ -32,7 +33,7 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
   let threadId, turnId, usage, totalUsage, nextId = 0, lineBuffer = "", startupTimer, turnRevision = 0;
   let waitingTurn, continuing = false;
   const decoder = new StringDecoder("utf8");
-  const completion = deferred(), exit = deferred();
+  const completion = deferred();
   const calls = new Map(), pending = new Map(), completedItems = new Set();
   const asyncQuestions = new Map(), answeredQuestions = [];
   let exitInfo = { exitCode: null, signal: null };
@@ -50,10 +51,6 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
   function rejectCalls(error) {
     for (const call of calls.values()) { clearTimeout(call.timer); call.reject(error); }
     calls.clear();
-  }
-  function killGroup(signal) {
-    if (!child?.pid) return;
-    try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== "ESRCH") throw error; }
   }
   function fail(error) {
     if (fatalError || terminal) return;
@@ -220,18 +217,15 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
       clearTimeout(startupTimer);
       rejectCalls(new Error("Codex app-server session closed."));
       clearPending("closed");
-      if (!child) return;
+      if (!child) return { ...exitInfo, processExited: true };
       if (!terminal && !fatalError) {
         fatalError = new Error("Codex app-server session closed before turn completion.");
         completion.reject(fatalError);
       }
       child.stdin.end();
-      // A dedicated process group includes MCP processes started by this session.
-      killGroup("SIGTERM");
-      const escalation = setTimeout(() => killGroup("SIGKILL"), shutdownTimeoutMs);
-      await exit.promise;
-      clearTimeout(escalation);
-      killGroup("SIGKILL");
+      const result = await closeProcessGroup(child, { graceMs: shutdownTimeoutMs });
+      exitInfo = { exitCode: result.exitCode, signal: result.signal };
+      return result;
     });
     return closing;
   }
@@ -245,14 +239,13 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
     child.stdin.on("error", fail);
     child.stdout.on("data", (chunk) => { try { consume(chunk); } catch (error) { fail(error); } });
     child.stderr.on("data", (chunk) => callback(onDiagnostic, "stderr", chunk));
-    child.once("error", (error) => { exited = true; exit.resolve(exitInfo); fail(error); });
+    child.once("error", (error) => { exited = true; fail(error); });
     child.once("close", (code, signal) => {
       exited = true; exitInfo = { exitCode: code, signal };
       try {
         lineBuffer += decoder.end();
         if (lineBuffer.trim()) message(JSON.parse(lineBuffer));
       } catch (error) { fail(error); }
-      exit.resolve(exitInfo);
       if (!terminal && !fatalError) fail(new Error("Codex app-server exited before turn completion."));
     });
     startupTimer = setTimeout(() => fail(new Error("Codex app-server startup timed out.")), startupTimeoutMs);
@@ -276,7 +269,8 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
       if (!turnId) throw new Error("Codex app-server did not return a turn ID.");
       clearTimeout(startupTimer);
       const result = await completion.promise;
-      await close();
+      const cleanup = await close();
+      if (!cleanup.processExited) throw new Error("The local agent's exit could not be confirmed.");
       return { ...result, ...exitInfo };
     } catch (error) {
       fail(error);

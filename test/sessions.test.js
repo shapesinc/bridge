@@ -49,6 +49,10 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
   turns++;fs.writeFileSync(stored,JSON.stringify({threadId,turns,billed}));
   const turnId='turn-'+turns,prompt=m.params.input[0].text;
   reply(m,{turn:{id:turnId,status:'inProgress'}});
+  if(prompt==='detached-pipe'){
+   const child=require('node:child_process').spawn(process.execPath,['-e','setTimeout(()=>{},12000)'],{detached:true,stdio:['ignore',1,2]});
+   child.unref();fs.writeFileSync('escaped.pid',String(child.pid));return;
+  }
   if(prompt==='wait'){
    send({id:'question',method:'item/tool/requestUserInput',params:{threadId,turnId,itemId:'question',questions:[{id:'answer',header:'Answer',question:'Continue?',options:[{label:'Yes',description:'Proceed'}]}]}});return;
   }
@@ -112,6 +116,28 @@ test("session discovery and immutable creation need no personal login or inferen
   fs.unlinkSync(f.executable);
   assert.equal((await f.request("/capabilities")).body.features.bundled_sessions, false);
   assert.equal((await f.request("/agents/start", f.turn())).status, 409);
+});
+
+test("HTTP session cancellation reaches a durable terminal receipt despite escaped pipes", async (t) => {
+  const f = await fixture(t);
+  let escaped;
+  t.after(() => { if (escaped) try { process.kill(-escaped, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; } });
+  await f.request("/sessions/create", f.create);
+  const started = await f.request("/agents/start", f.turn("detached-pipe"));
+  const id = started.body.job_id;
+  for (let i = 0; i < 100 && !fs.existsSync(path.join(f.directory, "escaped.pid")); i++) await new Promise((r) => setTimeout(r, 10));
+  escaped = Number(fs.readFileSync(path.join(f.directory, "escaped.pid"), "utf8"));
+  const since = Date.now();
+  assert.equal((await f.request("/agents/cancel", { job_id: id })).body.cancel_requested, true);
+  const result = await until(id);
+  assert.equal(result.state, "cancelled");
+  assert.ok(Date.now() - since < 2500);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.jobs, id, "state.json"))).status, "cancelled");
+  assert.doesNotThrow(() => process.kill(escaped, 0));
+  await f.restart();
+  const restored = await f.request(`/sessions/read?${new URLSearchParams(f.identity)}`);
+  assert.equal(restored.body.latest_job.state, "cancelled");
+  assert.equal(restored.body.state, "idle");
 });
 
 test("turn retry, events, restart, and followup reuse durable jobs and one native thread", async (t) => {

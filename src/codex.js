@@ -10,6 +10,7 @@ const { selectAgent, argumentsFor, verifyInteractiveCodex } = require("./agents"
 const { normalizeRequest, nativeResponse } = require("./approvals");
 const { localEnvironment } = require("./local-workspace");
 const { bundledRuntime, launchConfiguration } = require("./bundled-runtime");
+const { closeProcessGroup } = require("./process-close");
 
 const MAX_OUTPUT = 64 * 1024;
 const MAX_PROMPT = 64 * 1024;
@@ -535,7 +536,12 @@ async function superviseInteractive(directory, state, request) {
   } finally {
     clearInterval(poll); clearTimeout(timer);
     process.removeListener("SIGTERM", onSignal); process.removeListener("SIGINT", onSignal);
-    await session?.close();
+    const cleanup = await session?.close();
+    if (cleanup?.processExited === false) {
+      stopped = "failed";
+      state.errorType = "process_exit_unconfirmed";
+      state.error = "The local agent was asked to stop, but its exit could not be confirmed. Check this computer before starting another task.";
+    }
     for (const value of [...pending.values()]) clearRequest(value.native.id);
     state.pendingRequests = [];
     state.status = stopped || (failed ? "failed" : "completed");
@@ -599,7 +605,7 @@ async function supervise(id) {
   let child;
   let poll;
   let deadline;
-  let escalation;
+  let shutdown, finishExit;
   let stopped;
   let turnCompleted = false;
   let turnFailed = false;
@@ -614,11 +620,10 @@ async function supervise(id) {
   const stop = (status) => {
     if (stopped) return;
     stopped = status;
-    killGroup("SIGTERM");
-    escalation = setTimeout(() => killGroup("SIGKILL"), 1500);
+    shutdown = closeProcessGroup(child).then((result) => { finishExit?.(result); return result; });
   };
   const finish = (status, detail = {}) => {
-    clearInterval(poll); clearTimeout(deadline); clearTimeout(escalation);
+    clearInterval(poll); clearTimeout(deadline);
     Object.assign(state, detail, { status, finishedAt: new Date().toISOString() });
     saveState(directory, state);
   };
@@ -705,13 +710,18 @@ async function supervise(id) {
     }, 250);
     deadline = setTimeout(() => stop("timed_out"), request.timeout * 1000);
     const exit = await new Promise((resolve, reject) => {
+      finishExit = resolve;
       child.once("error", reject);
       child.once("close", (code, signal) => resolve({ exitCode: code, signal }));
     });
+    const cleanup = shutdown ? await shutdown : null;
     lineBuffer += decoder.end();
     if (lineBuffer) event(lineBuffer);
-    // A child may leave subprocesses behind after closing its pipes.
-    if (stopped) killGroup("SIGKILL");
+    if (cleanup?.processExited === false) {
+      finish("failed", { errorType: "process_exit_unconfirmed",
+        error: "The local agent was asked to stop, but its exit could not be confirmed. Check this computer before starting another task." });
+      return;
+    }
     const success = exit.exitCode === 0 && turnCompleted && !turnFailed;
     finish(stopped || (success ? "completed" : "failed"), {
       ...exit,

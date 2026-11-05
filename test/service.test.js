@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { serviceDefinition, launcherContent, runtimePaths, infoPlist, desktopEntry, buildMacApp, compareVersions, APP_NAME, RUNTIME_NAME } = require("../src/service");
+const { serviceDefinition, launcherContent, runtimePaths, infoPlist, desktopEntry, assembleMacApp, buildMacApp, compareVersions, APP_NAME, RUNTIME_NAME } = require("../src/service");
 const { writeState, readState } = require("../src/state");
 
 test("macOS startup uses stable installed files, survives exit, and escapes home paths", () => {
@@ -110,6 +110,22 @@ test("Linux launcher entry and renamed runners carry the shapes.inc name", () =>
   assert.equal(path.basename(runtimePaths("C:/Users/x/.shapes-bridge", "win32", "C:/Users/x").node), "shapes.inc Bridge.exe");
   assert.match(serviceDefinition({ platform: "linux", home: "/home/x", dir: "/home/x/.shapes-bridge" }).content, /Description=shapes\.inc Bridge/);
   assert.match(serviceDefinition({ platform: "win32", home: "C:/Users/x", dir: "C:/Users/x/.shapes-bridge" }).content, /<Description>shapes\.inc Bridge<\/Description>/);
+});
+
+test("macOS helper assembly includes the shared process shutdown module and its callers", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-app-sources-"));
+  try {
+    // Source packaging needs no compiler or executable runtime for this check.
+    const binary = path.join(base, "fixture-binary");
+    fs.writeFileSync(binary, "fixture");
+    const source = path.resolve(__dirname, "..");
+    const { runtime } = assembleMacApp(source, path.join(base, "Bridge.app"), { nodeBinary: binary, launcherBinary: binary });
+    for (const name of ["process-close.js", "codex-rpc.js", "codex.js"]) {
+      const packaged = path.join(runtime, "src", name);
+      assert.deepEqual(fs.readFileSync(packaged), fs.readFileSync(path.join(source, "src", name)));
+      assert.doesNotThrow(() => require(packaged));
+    }
+  } finally { fs.rmSync(base, { recursive: true, force: true }); }
 });
 
 test("macOS app bundle build stages, swaps, signs, and the launcher runs the bundled runtime", { skip: process.platform !== "darwin" }, () => {
