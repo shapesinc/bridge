@@ -114,11 +114,21 @@ Finder and System Events, and opens the Full Disk Access pane with shapes.inc
 Bridge already listed so it only has to be turned on. The installer shows the
 checklist and waits until everything is allowed (Enter skips; `--no-permissions`
 skips the pass). `permissions` repeats it any time. Grant access to the
-installed **shapes.inc Bridge** app when the OS requests it. Setup requests permissions from the background service;
+installed **shapes.inc Bridge** app for the standalone installation. The native
+shapes.inc app instead runs its embedded Bridge under **ComputerConnectionHost**:
+enable that item under Privacy & Security → Accessibility. The native setup's
+**Show app in Finder** action reveals the exact bundled app if it must be added
+to the list. Approving the standalone Bridge does not approve the embedded host.
+Setup requests permissions from the background service;
 granting Terminal access does not establish that the service has access.
 Accessibility and Screen Recording use native preflight checks. Full Disk
 Access is checked by opening a protected system file; Automation is checked per
 target app (Finder, System Events) without prompting.
+Recovery links select the Privacy & Security extension on macOS 13 and newer,
+and retain the Security preference pane on older macOS. Opening a pane or
+requesting access never changes the reported permission until the native probe
+confirms it. The standalone guided setup, explicit per-permission requests and
+embedded native requests share this recovery implementation.
 The OS may require restarting the connection after a grant (`pause`, then
 `resume`). Password, secure-input, lock-screen, and system-protected UI remain
 subject to OS restrictions. The bridge does not bypass these protections.
