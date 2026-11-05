@@ -456,6 +456,14 @@ async function superviseInteractive(directory, state, request) {
     session = createCodexRpcSession({
       executable: request.executable, cwd: request.cwd, sandbox: request.sandbox,
       ...(request.gateway ? { ...launchConfiguration(request.gateway), resumeThreadId: request.resumeThreadId, usageBaseline: request.usageBaseline } : {}),
+      startupRetries: request.gateway ? 1 : 0,
+      onLifecycle(value) {
+        state.runtimeStartup = { ...value, at: new Date().toISOString() };
+        // The retry owns a new process; retain the actual PID for diagnostics.
+        state.agentPid = session?.child?.pid;
+        persist();
+        if (state.sessionId) appendJobEvent(directory, { type: "runtime.startup", ...state.runtimeStartup });
+      },
       onEvent(value) {
         if (request.gateway) value = redactRuntimeValue(value);
         if (state.sessionId) appendJobEvent(directory, value);
@@ -530,14 +538,18 @@ async function superviseInteractive(directory, state, request) {
     Object.assign(state, { usage: result.usage, ...(result.totalUsage ? { runtimeUsageTotal: result.totalUsage } : {}), exitCode: result.exitCode, signal: result.signal });
     if (result.status !== "completed") failed = true;
     if (typeof result.error?.message === "string" && result.error.message.trim()) state.agentError ||= redactRuntimeValue(result.error.message).slice(0, 4000);
-  } catch {
+  } catch (error) {
     // Not the agent's own report: never quote it (it can carry local paths).
     // A cancel or deadline closes the session on purpose, and a permission
     // denial keeps its own explanation.
     failed = true;
     if (!stopped && !state.error && !state.agentError && state.errorType !== "permission_denied") {
-      Object.assign(state, { errorType: "process_error",
-        error: request.gateway ? "The built-in runtime stopped before reporting a result. Retry the task or restart shapes.inc on this computer."
+      const startupTimeout = error.code === "CODEX_RPC_TIMEOUT" && ["initialize", "thread_start", "turn_start"].includes(error.phase);
+      Object.assign(state, { errorType: startupTimeout ? "startup_timeout" : "process_error",
+        error: startupTimeout ? (error.phase === "initialize"
+          ? "The runtime could not initialize in time. No task was sent to the model. Restart shapes.inc on this computer and try again."
+          : "The runtime timed out while starting the task. It was not automatically retried. Check the task status before trying again.")
+          : request.gateway ? "The built-in runtime stopped before reporting a result. Retry the task or restart shapes.inc on this computer."
           : "Codex stopped before reporting a result. Check that Codex is installed, signed in and up to date on this computer, then retry; if it keeps happening, restart shapes.inc Bridge." });
     }
   } finally {
