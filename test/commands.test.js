@@ -15,11 +15,11 @@ const quote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
 const idFor = (key) => crypto.createHash("sha256").update(`${scope}\0${key}`).digest("hex");
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function fixture(t) {
+async function fixture(t, serverOptions = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-commands-"));
   const old = process.env.SHAPES_BRIDGE_HOME;
   process.env.SHAPES_BRIDGE_HOME = path.join(dir, "state");
-  const server = await startServer({ port: 0, token: TOKEN });
+  const server = await startServer({ port: 0, token: TOKEN, ...serverOptions });
   const base = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => {
     server.closeAllConnections();
@@ -175,6 +175,31 @@ test("denied termination signals settle bounded uncertainty without crashing or 
         try { process.kill(child, 0); } catch { break; }
         await sleep(20);
       }
+      assert.throws(() => process.kill(child, 0), { code: "ESRCH" });
+    }
+  }
+});
+
+test("Windows capability fallback and parent-only termination never claim descendant cleanup", async (t) => {
+  const f = await fixture(t, { platform: "win32" });
+  assert.equal((await f.request("/capabilities")).body.features.command_jobs, false);
+  const execution = runCommand({ cmd: `${quote(process.execPath)} -e 'require("node:fs").writeFileSync("pid",String(process.pid));console.log("ready");setInterval(()=>{},1000)'`, cwd: f.dir }, { platform: "win32" });
+  let child;
+  try {
+    const deadline = Date.now() + 3000;
+    while (!execution.snapshot().stdout.includes("ready") && Date.now() < deadline) await sleep(10);
+    child = Number(fs.readFileSync(path.join(f.dir, "pid"), "utf8"));
+    execution.cancel();
+    const result = await execution.result;
+    assert.equal(result.cleanup_confirmed, false);
+    assert.match(result.stderr, /exit could not be confirmed/);
+  } finally {
+    // This is a parent-only signal simulation on the host OS, not execution on
+    // Windows. The fixture's independently recorded descendant is cleaned up.
+    if (child) {
+      try { process.kill(child, "SIGKILL"); } catch {}
+      const deadline = Date.now() + 1000;
+      while (Date.now() < deadline) { try { process.kill(child, 0); } catch { break; } await sleep(20); }
       assert.throws(() => process.kill(child, 0), { code: "ESRCH" });
     }
   }

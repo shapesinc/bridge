@@ -7,7 +7,7 @@ const MAX_COMMAND_BUFFER = 4 * 1024 * 1024;
 const tail = (value) => value.length > 20000 ? value.slice(-20000) : value;
 
 function runCommand({ cmd, cwd, timeout }, { signal = (pid, name) => process.kill(pid, name),
-  descendantGroups = collectDescendantGroups } = {}) {
+  descendantGroups = collectDescendantGroups, platform = process.platform } = {}) {
   const seconds = Math.max(1, Math.min(Number(timeout) || 60, 600));
   // Expand a leading ~ so home-relative working dirs work, and fail loudly with
   // a clear message when the dir is missing — otherwise a bad cwd makes exec
@@ -42,7 +42,7 @@ function runCommand({ cmd, cwd, timeout }, { signal = (pid, name) => process.kil
       }
       // A denied signal is not an exit, but it must never crash the daemon or
       // prevent escalation/the bounded exit check from running.
-      if (process.platform === "win32") { try { child.kill(name); } catch { /* Exit check below. */ } }
+      if (platform === "win32") { try { child.kill(name); } catch { /* Exit check below. */ } }
       else for (const group of [child.pid, ...groups]) {
         try { signal(-group, name); } catch { /* Exit check below. */ }
       }
@@ -52,7 +52,7 @@ function runCommand({ cmd, cwd, timeout }, { signal = (pid, name) => process.kil
       stopped = reason;
       // Prove descendants while the shell is alive, before it can exit and
       // orphan a detached child. Never scan or signal another command's tree.
-      if (child?.pid && process.platform !== "win32") {
+      if (child?.pid && platform !== "win32") {
         try { for (const group of descendantGroups(child.pid)) groups.add(group); } catch { treeUnconfirmed = true; }
       }
       kill("SIGTERM");
@@ -74,7 +74,7 @@ function runCommand({ cmd, cwd, timeout }, { signal = (pid, name) => process.kil
       if (stopped) kill("SIGKILL");
       const exited = () => {
         if (!child?.pid) return true;
-        if (process.platform === "win32") return child.exitCode != null || child.signalCode != null;
+        if (platform === "win32") return child.exitCode != null || child.signalCode != null;
         return [child.pid, ...groups].every((group) => {
           try { signal(-group, 0); return false; } catch (error) { return error.code === "ESRCH"; }
         });
@@ -87,7 +87,9 @@ function runCommand({ cmd, cwd, timeout }, { signal = (pid, name) => process.kil
       let stderr = Buffer.concat(buffers.stderr).toString("utf8");
       const reason = stopped || error?.message;
       if (reason) stderr += (stderr ? "\n" : "") + reason;
-      const confirmed = !treeUnconfirmed && exited();
+      // Windows child.kill observes only the parent; it cannot establish that
+      // descendants ended. Never turn that limited receipt into a Stop promise.
+      const confirmed = platform !== "win32" && !treeUnconfirmed && exited();
       if (stopped && !confirmed) stderr += "\nCommand process exit could not be confirmed.";
       resolve({ exit_code: stopped || error || code === null ? -1 : code,
         stdout: tail(stdout), stderr: tail(stderr), stopped: stopped || null, cleanup_confirmed: confirmed });
@@ -104,7 +106,7 @@ function runCommand({ cmd, cwd, timeout }, { signal = (pid, name) => process.kil
     };
     try {
       child = spawn(cmd, { cwd: workdir, env: localEnvironment(), shell: true,
-        detached: process.platform !== "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+        detached: platform !== "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
       child.stdout.on("data", (chunk) => capture("stdout", chunk));
       child.stderr.on("data", (chunk) => capture("stderr", chunk));
       child.once("error", (error) => finish(null, error));

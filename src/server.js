@@ -170,7 +170,7 @@ function sysinfo() {
  * @param {{port:number, token:string}} opts
  * @returns {Promise<import('node:http').Server>}
  */
-function startServer({ port, token, computerControl = createComputerControl() }) {
+function startServer({ port, token, computerControl = createComputerControl(), platform = process.platform }) {
   const authed = (req) => {
     const provided = req.headers["x-token"];
     if (!token || typeof provided !== "string") return false;
@@ -195,7 +195,7 @@ function startServer({ port, token, computerControl = createComputerControl() })
     }
     if (route === "/capabilities" && method === "GET") {
       return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: {
-        interactive_codex: true, idempotent_start: true, job_list: true, command_jobs: true, bundled_sessions: bundledRuntime().available, computer_control: computerControl.available() } });
+        interactive_codex: true, idempotent_start: true, job_list: true, command_jobs: platform !== "win32", bundled_sessions: bundledRuntime().available, computer_control: computerControl.available() } });
     }
 
     // Everything below requires the token.

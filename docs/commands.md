@@ -39,6 +39,11 @@ command, allowing polling to resume on the same helper.
 The legacy `/run` response is unchanged. Older helpers do not advertise
 `command_jobs`; the backend must identify their unconfirmed cancellation instead
 of claiming that closing an HTTP request stopped the shell.
+Windows explicitly advertises `command_jobs=false` until process-tree termination
+is supported. A direct new-command request there also leaves
+`cleanup_confirmed=false`: observing the parent's exit does not prove descendant
+cleanup. The regression simulates parent-only signalling on the host OS; it is
+not a Windows execution test.
 
 Actual native 106 acceptance found the original bug: a plain request started a
 120-second Node script, the human clicked Stop, and the script still wrote its
