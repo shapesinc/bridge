@@ -21,9 +21,9 @@ function normalizedItem(item) {
 
 // The caller owns user authentication, presentation and response validation.
 // This transport never converts model text into approvals or answers a request.
-function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent = () => {},
+function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent = () => {},
   resumeThreadId, launchArgs, environment, model, modelProvider, usageBaseline,
-  onServerRequest, onRequestResolved = () => {}, onDiagnostic = () => {},
+  onServerRequest, onRequestResolved = () => {}, onDiagnostic = () => {}, onLifecycle = () => {},
   startupTimeoutMs = 30000, requestTimeoutMs = 30000, shutdownTimeoutMs = 1500,
   maxLineBytes = 1024 * 1024 } = {}) {
   if (typeof executable !== "string" || !executable || typeof cwd !== "string" || !cwd) throw new Error("Codex executable and cwd are required.");
@@ -31,6 +31,7 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
   let child, started = false, closing, exited = false, terminal = false, fatalError;
   let threadId, turnId, usage, totalUsage, nextId = 0, lineBuffer = "", startupTimer, turnRevision = 0;
   let waitingTurn, continuing = false;
+  let phase = "not_started";
   const decoder = new StringDecoder("utf8");
   const completion = deferred(), exit = deferred();
   const calls = new Map(), pending = new Map(), completedItems = new Set();
@@ -41,6 +42,14 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
     try { Promise.resolve(fn(value, second)).catch(fail); } catch (error) { fail(error); }
   }
   function emit(value) { callback(onEvent, value); }
+  function enterPhase(value) {
+    phase = value;
+    callback(onLifecycle, { phase });
+  }
+  function timeoutError() {
+    return Object.assign(new Error(`Codex app-server timed out during ${phase}.`),
+      { code: "CODEX_RPC_TIMEOUT", phase });
+  }
   function resolved(id, reason) {
     if (!pending.delete(id)) return;
     asyncQuestions.delete(id);
@@ -58,6 +67,9 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
   function fail(error) {
     if (fatalError || terminal) return;
     fatalError = error instanceof Error ? error : new Error(String(error));
+    // Only fixed enum values leave the transport; exception messages can carry
+    // private filesystem paths or provider/server text.
+    callback(onLifecycle, { phase, failure: fatalError.code === "CODEX_RPC_TIMEOUT" ? "timeout" : "transport_error" });
     clearTimeout(startupTimer);
     rejectCalls(fatalError);
     clearPending("failed");
@@ -73,7 +85,7 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
       const id = `bridge-${++nextId}`;
       const timer = setTimeout(() => {
         calls.delete(id);
-        reject(new Error(`Codex app-server ${method} timed out.`));
+        reject(timeoutError());
       }, requestTimeoutMs);
       calls.set(id, { resolve, reject, timer });
       try { write({ id, method, params }); }
@@ -240,6 +252,7 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
     if (closing) throw new Error("A closed Codex RPC session cannot start a task.");
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("A nonempty prompt is required.");
     started = true;
+    enterPhase("initialize");
     child = spawn(executable, launchArgs || ["app-server", "--listen", "stdio://", "-c", "sandbox_workspace_write.writable_roots=[]"],
       { cwd, env: environment || localEnvironment(), detached: true, stdio: ["pipe", "pipe", "pipe"] });
     child.stdin.on("error", fail);
@@ -255,11 +268,12 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
       exit.resolve(exitInfo);
       if (!terminal && !fatalError) fail(new Error("Codex app-server exited before turn completion."));
     });
-    startupTimer = setTimeout(() => fail(new Error("Codex app-server startup timed out.")), startupTimeoutMs);
+    startupTimer = setTimeout(() => fail(timeoutError()), startupTimeoutMs);
     try {
       await rpc("initialize", { clientInfo: { name: "shapes_bridge", title: "shapes.inc", version: "0.1.0" },
         capabilities: { experimentalApi: true, extensions: { "openai/form": {} } } });
       write({ method: "initialized", params: {} });
+      enterPhase("thread_start");
       // Granting a chat this computer is the consent: no per-command approval
       // prompts. Writes run with full access; read-only stays sandboxed.
       // Questions (item/tool/requestUserInput) still reach the person.
@@ -271,10 +285,12 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
       rememberThread(thread.thread?.id);
       if (thread.approvalPolicy !== undefined && thread.approvalPolicy !== "never") throw new Error("Codex did not disable approval prompts.");
       const revision = turnRevision;
+      enterPhase("turn_start");
       const turn = await rpc("turn/start", { threadId, input: [{ type: "text", text: prompt }] });
       if (turnRevision === revision) rememberTurn(turn.turn?.id);
       if (!turnId) throw new Error("Codex app-server did not return a turn ID.");
       clearTimeout(startupTimer);
+      enterPhase("running");
       const result = await completion.promise;
       await close();
       return { ...result, ...exitInfo };
@@ -304,6 +320,38 @@ function createCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent
   return { start, respond, interrupt, close,
     get child() { return child; }, get threadId() { return threadId; }, get turnId() { return turnId; },
     get pendingRequests() { return [...pending.values()]; } };
+}
+
+function createCodexRpcSession({ startupRetries = 0, onLifecycle = () => {}, ...options } = {}) {
+  if (![0, 1].includes(startupRetries)) throw new Error("At most one startup retry is allowed.");
+  let attempt = 1, started = false, closed = false;
+  const create = () => createSingleCodexRpcSession({ ...options,
+    onLifecycle: (value) => onLifecycle({ ...value, attempt }) });
+  let session = create();
+  return {
+    async start(prompt) {
+      if (started) throw new Error("A Codex RPC session can start only one task.");
+      if (closed) throw new Error("A closed Codex RPC session cannot start a task.");
+      started = true;
+      for (;;) {
+        try { return await session.start(prompt); }
+        catch (error) {
+          // initialize cannot dispatch a task. All later failures are ambiguous
+          // and MUST NOT replay a prompt, tool action, or paid model request.
+          if (closed || attempt > startupRetries || error.code !== "CODEX_RPC_TIMEOUT" || error.phase !== "initialize") throw error;
+          await session.close();
+          if (closed) throw error;
+          attempt++;
+          session = create();
+        }
+      }
+    },
+    respond: (...args) => session.respond(...args),
+    interrupt: () => { closed = true; return session.interrupt(); },
+    close: () => { closed = true; return session.close(); },
+    get child() { return session.child; }, get threadId() { return session.threadId; }, get turnId() { return session.turnId; },
+    get pendingRequests() { return session.pendingRequests; },
+  };
 }
 
 module.exports = { createCodexRpcSession };
