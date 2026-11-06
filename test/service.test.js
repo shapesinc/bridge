@@ -24,6 +24,8 @@ test("macOS startup uses stable installed files, survives exit, and escapes home
 test("Linux user service restarts and quotes whitespace, quotes, and percent specifiers", () => {
   const result = serviceDefinition({ platform: "linux", home: '/home/a "quote"%name', dir: '/home/a "quote"%name/bridge' });
   assert.match(result.content, /Restart=always/);
+  // WorkingDirectory is a raw path/specifier, not a quoted ExecStart argument.
+  assert.match(result.content, /WorkingDirectory=%h\n/);
   assert.match(result.content, /WantedBy=default.target/);
   assert.match(result.content, /UMask=0077/);
   assert.match(result.content, /\\"quote\\"%%name/);

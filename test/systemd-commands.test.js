@@ -19,7 +19,8 @@ test("a real Linux service restart preserves its independently supervised comman
   let commandId;
   const ctl = (...args) => {
     const result = spawnSync("systemctl", ["--user", ...args], { encoding: "utf8", timeout: 10000 });
-    assert.equal(result.status, 0, result.stderr || result.error?.message);
+    assert.equal(result.status, 0, (result.stderr || result.error?.message || "") +
+      (result.status !== 0 ? spawnSync("journalctl", ["--user", "-u", unit, "-n", "30", "--no-pager"], { encoding: "utf8" }).stdout : ""));
     return result.stdout.trim();
   };
   const waitFor = async (check) => {

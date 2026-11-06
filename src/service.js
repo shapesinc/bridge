@@ -112,7 +112,7 @@ function serviceDefinition({ platform = process.platform, home = os.homedir(), d
   };
   if (platform === "linux") return {
     file: path.join(home, ".config", "systemd", "user", `${LABEL}.service`),
-    content: `[Unit]\nDescription=shapes.inc Bridge\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${unitCommandQuote(node)} ${unitCommandQuote(cli)} daemon\nWorkingDirectory=${unitQuote(home)}\nEnvironment=${unitQuote(`PATH=${envPath}`)}\nEnvironment=${unitQuote(`SHAPES_BRIDGE_HOME=${dir}`)}\nEnvironment=SHAPES_BRIDGE_SYSTEMD_SERVICE=1\nRestart=always\nRestartSec=10\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`,
+    content: `[Unit]\nDescription=shapes.inc Bridge\nAfter=network-online.target\n\n[Service]\nType=simple\nExecStart=${unitCommandQuote(node)} ${unitCommandQuote(cli)} daemon\nWorkingDirectory=%h\nEnvironment=${unitQuote(`PATH=${envPath}`)}\nEnvironment=${unitQuote(`SHAPES_BRIDGE_HOME=${dir}`)}\nEnvironment=SHAPES_BRIDGE_SYSTEMD_SERVICE=1\nRestart=always\nRestartSec=10\nUMask=0077\n\n[Install]\nWantedBy=default.target\n`,
   };
   if (platform === "win32") return {
     file: path.join(dir, "service-task.xml"),
