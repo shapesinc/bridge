@@ -40,7 +40,8 @@ jobs:
         run: |
           $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
           $output = Join-Path $env:RUNNER_TEMP 'shapes.inc Bridge Job.exe'
-          & $compiler /nologo /target:exe /platform:x64 "/out:$output" scripts/windows/JobHost.cs
+          $source = Join-Path $PWD 'scripts\windows\JobHost.cs'
+          & $compiler /nologo /target:exe /platform:x64 "/out:$output" $source
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "SHAPES_TEST_JOB_HOST=$output" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Verify native process ownership and durable connection transport
@@ -52,7 +53,8 @@ jobs:
           ./scripts/windows/build-computer.ps1 -OutputPath $helper
           $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
           $fixture = Join-Path $env:RUNNER_TEMP 'ComputerFixture.exe'
-          & $compiler /nologo /target:exe /platform:x64 /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll "/out:$fixture" scripts/windows/ComputerFixture.cs
+          $source = Join-Path $PWD 'scripts\windows\ComputerFixture.cs'
+          & $compiler /nologo /target:exe /platform:x64 /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll "/out:$fixture" $source
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "SHAPES_TEST_COMPUTER_HELPER=$helper" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "SHAPES_TEST_COMPUTER_FIXTURE=$fixture" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
