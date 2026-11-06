@@ -153,6 +153,24 @@ test("cancel and timeout stop jobs even when Codex ignores SIGTERM", async (t) =
   }
 });
 
+test("personal CLI cancellation settles with inherited detached pipes", async (t) => {
+  let escaped;
+  const f = fixture(t, `
+    const child=require('node:child_process').spawn(process.execPath,['-e','setTimeout(()=>{},12000)'],{detached:true,stdio:['ignore',1,2]});
+    child.unref();require('node:fs').writeFileSync('escaped.pid',String(child.pid));setInterval(()=>{},1000);
+  `);
+  t.after(() => { if (escaped) try { process.kill(-escaped, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; } });
+  const id = f.start().job_id;
+  for (let i = 0; i < 100 && !fs.existsSync(path.join(f.dir, "escaped.pid")); i++) await new Promise((r) => setTimeout(r, 10));
+  escaped = Number(fs.readFileSync(path.join(f.dir, "escaped.pid"), "utf8"));
+  const started = Date.now();
+  assert.equal(f.command("cancel", id).cancel_requested, true);
+  const result = await untilDone(f, id);
+  assert.equal(result.state, "cancelled");
+  assert.ok(Date.now() - started < 2500);
+  assert.doesNotThrow(() => process.kill(escaped, 0), "Receipt does not claim deliberately escaped descendants stopped");
+});
+
 test("output and local log files are bounded", async (t) => {
   const f = fixture(t, `process.stdout.write('x'.repeat(200000)+'\\n');process.stderr.write('y'.repeat(200000));${COMPLETE}`);
   const id = f.start().job_id;

@@ -10,6 +10,7 @@ const { selectAgent, argumentsFor, verifyInteractiveCodex } = require("./agents"
 const { normalizeRequest, nativeResponse } = require("./approvals");
 const { localEnvironment } = require("./local-workspace");
 const { bundledRuntime, launchConfiguration } = require("./bundled-runtime");
+const { closeProcessGroup } = require("./process-close");
 
 const MAX_OUTPUT = 64 * 1024;
 const MAX_PROMPT = 64 * 1024;
@@ -59,26 +60,33 @@ function sanitizeAgentError(text) {
 }
 
 // Claude result text can be model prose, so it is only classified, never quoted.
-function failureReason({ agent, agentError, exitCode, signal, errorType }) {
+function failureReason({ agent, agentError, exitCode, signal, errorType, funding }) {
   const name = agentName(agent);
+  const funded = funding === "shapes_credits";
   const reported = sanitizeAgentError(agentError);
   if (reported) {
     // Classify the raw text: redaction can remove the words a hint needs.
     const hint = FAILURE_HINTS.find(([, pattern]) => pattern.test(agentError));
-    const advice = hint ? hint[2](name) : `Open ${name} on this computer to check the problem, then retry.`;
+    const advice = funded ? ({
+      auth_required: "Retry the task or contact shapes.inc support.",
+      usage_limit: "Check shapes.inc credits or retry later.",
+      model_unavailable: "Retry later or contact shapes.inc support.",
+      network_error: "Check your internet connection, then retry.",
+    }[hint?.[0]] || "Retry the task or restart shapes.inc.")
+      : hint ? hint[2](name) : `Open ${name} on this computer to check the problem, then retry.`;
     return { errorType: errorType || "agent_error",
       error: agent === "claude" ? `${name} reported an error before finishing. ${advice}` : `${name} reported: "${reported}". ${advice}` };
   }
   if (typeof exitCode === "number" && exitCode !== 0) {
     return { errorType: errorType || "process_error",
-      error: `${name} exited with code ${exitCode} before reporting a result. Open ${name} on this computer to check that it is signed in and up to date, then retry.` };
+      error: `${name} exited with code ${exitCode} before reporting a result. ${funded ? "Retry the task or restart shapes.inc." : `Open ${name} on this computer to check that it is signed in and up to date, then retry.`}` };
   }
   if (signal) {
     return { errorType: errorType || "process_error",
       error: `${name} was stopped by ${signal} before reporting a result. Make sure nothing on this computer is closing it, then retry.` };
   }
   return { errorType: errorType || "missing_completion",
-    error: `${name} exited without finishing the task. Update ${name} on this computer, then retry.` };
+    error: `${name} exited without finishing the task. ${funded ? "Update shapes.inc, then retry." : `Update ${name} on this computer, then retry.`}` };
 }
 
 function privateDir(directory) {
@@ -242,16 +250,18 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
     selected = { ...runtime, id: "codex" };
   } else selected = await selectAgent(agent, cwd);
   agent = selected.id;
-  interactive = interactive && agent === "codex";
+  interactive = (interactive || selected.transport === "bundled_personal") && agent === "codex";
   if (interactive && !builtIn) await verifyInteractiveCodex(selected, cwd);
   const executable = selected.executable;
   const id = crypto.randomUUID();
   const directory = privateDir(path.join(root(), id));
   const state = { id, status: "queued", cwd, sandbox, agent, interactive, createdAt: new Date().toISOString(),
+    ...(selected.transport === "bundled_personal" ? { funding: "personal", runtimeVersion: selected.version, personalTransport: selected.transport } : {}),
     ...(builtIn ? { sessionId: builtIn.sessionId, scopeId: builtIn.scopeId, funding: "shapes_credits", runtimeVersion: selected.version,
       ...(usageBaseline ? { runtimeUsageTotal: usageBaseline } : {}) } : {}),
     promptPreview: prompt.trim().replace(/\s+/g, " ").slice(0, 160) };
   writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable, agent, interactive,
+    ...(selected.transport === "bundled_personal" ? { personalProfile: selected.profile } : {}),
     ...(builtIn ? { gateway: builtIn.gateway, resumeThreadId, usageBaseline } : {}) }));
   saveState(directory, state);
   if (requestKey) {
@@ -447,6 +457,7 @@ async function superviseInteractive(directory, state, request) {
     if (fs.existsSync(path.join(directory, "cancel"))) { stopped = "cancelled"; return; }
     session = createCodexRpcSession({
       executable: request.executable, cwd: request.cwd, sandbox: request.sandbox,
+      ...(request.personalProfile ? require("./personal-codex").personalConfiguration(request.personalProfile) : {}),
       ...(request.gateway ? { ...launchConfiguration(request.gateway), resumeThreadId: request.resumeThreadId, usageBaseline: request.usageBaseline } : {}),
       startupRetries: request.gateway ? 1 : 0,
       onLifecycle(value) {
@@ -547,13 +558,18 @@ async function superviseInteractive(directory, state, request) {
   } finally {
     clearInterval(poll); clearTimeout(timer);
     process.removeListener("SIGTERM", onSignal); process.removeListener("SIGINT", onSignal);
-    await session?.close();
+    const cleanup = await session?.close();
+    if (cleanup?.processExited === false) {
+      stopped = "failed";
+      state.errorType = "process_exit_unconfirmed";
+      state.error = "The local agent was asked to stop, but its exit could not be confirmed. Check this computer before starting another task.";
+    }
     for (const value of [...pending.values()]) clearRequest(value.native.id);
     state.pendingRequests = [];
     state.status = stopped || (failed ? "failed" : "completed");
     state.finishedAt = new Date().toISOString();
     if (state.status === "failed" && state.errorType === "permission_denied") state.error = "The local agent was blocked by tool permissions.";
-    else if (state.status === "failed" && !state.error) Object.assign(state, failureReason({ agent: "codex", agentError: state.agentError, exitCode: state.exitCode, signal: state.signal, errorType: state.errorType }));
+    else if (state.status === "failed" && !state.error) Object.assign(state, failureReason({ agent: "codex", funding: state.funding, agentError: state.agentError, exitCode: state.exitCode, signal: state.signal, errorType: state.errorType }));
     saveState(directory, state);
     if (state.sessionId) appendJobEvent(directory, { type: "job.finished", state: state.status });
   }
@@ -611,7 +627,7 @@ async function supervise(id) {
   let child;
   let poll;
   let deadline;
-  let escalation;
+  let shutdown, finishExit;
   let stopped;
   let turnCompleted = false;
   let turnFailed = false;
@@ -626,11 +642,10 @@ async function supervise(id) {
   const stop = (status) => {
     if (stopped) return;
     stopped = status;
-    killGroup("SIGTERM");
-    escalation = setTimeout(() => killGroup("SIGKILL"), 1500);
+    shutdown = closeProcessGroup(child).then((result) => { finishExit?.(result); return result; });
   };
   const finish = (status, detail = {}) => {
-    clearInterval(poll); clearTimeout(deadline); clearTimeout(escalation);
+    clearInterval(poll); clearTimeout(deadline);
     Object.assign(state, detail, { status, finishedAt: new Date().toISOString() });
     saveState(directory, state);
   };
@@ -717,13 +732,18 @@ async function supervise(id) {
     }, 250);
     deadline = setTimeout(() => stop("timed_out"), request.timeout * 1000);
     const exit = await new Promise((resolve, reject) => {
+      finishExit = resolve;
       child.once("error", reject);
       child.once("close", (code, signal) => resolve({ exitCode: code, signal }));
     });
+    const cleanup = shutdown ? await shutdown : null;
     lineBuffer += decoder.end();
     if (lineBuffer) event(lineBuffer);
-    // A child may leave subprocesses behind after closing its pipes.
-    if (stopped) killGroup("SIGKILL");
+    if (cleanup?.processExited === false) {
+      finish("failed", { errorType: "process_exit_unconfirmed",
+        error: "The local agent was asked to stop, but its exit could not be confirmed. Check this computer before starting another task." });
+      return;
+    }
     const success = exit.exitCode === 0 && turnCompleted && !turnFailed;
     finish(stopped || (success ? "completed" : "failed"), {
       ...exit,

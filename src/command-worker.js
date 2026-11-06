@@ -20,10 +20,14 @@ async function supervise(id) {
     Object.assign(record, { state: "running", supervisor_pid: process.pid, started_at: Date.now() });
     jobs.save(record);
     const result = await runCommand({ ...record.command, signal: abort.signal });
-    Object.assign(record, { state: abort.signal.aborted ? "cancelled" : result.termination_reason?.startsWith("timed out") ? "timed_out" : result.exit_code === 0 ? "completed" : "failed",
+    const uncertain = !!result.stopped && result.cleanup_confirmed !== true;
+    if (uncertain) Object.assign(result, { outcome_unknown: true, error_type: "command_exit_unconfirmed" });
+    Object.assign(record, { state: uncertain ? "interrupted" : abort.signal.aborted ? "cancelled" : result.termination_reason?.startsWith("timed out") ? "timed_out" : result.exit_code === 0 ? "completed" : "failed",
       finished_at: Date.now(), result });
     jobs.save(record);
-    jobs.release(id);
+    // Unconfirmed termination keeps the mutation fence until local owner
+    // reconciliation; a signal acknowledgement is not a completed cleanup.
+    if (!uncertain) jobs.release(id);
   } finally { clearInterval(timer); process.removeListener("SIGTERM", cancel); process.removeListener("SIGINT", cancel); }
 }
 

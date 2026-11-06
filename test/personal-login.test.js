@@ -41,7 +41,7 @@ test("private account operations authorize and recheck before opening, and retur
   await controller.updateAccount({ userId: "owner", deviceIds: [], verified: true });
   assert.deepEqual((await controller.listPersonalAgents({ expectedUserId: "owner" })).agents, [publicAgent(candidate)]);
   assert.equal(JSON.stringify(await controller.listPersonalAgents({ expectedUserId: "owner" })).includes("/private"), false);
-  assert.deepEqual(await controller.openAgentLogin({ expectedUserId: "owner", agent: "codex" }), { opened: true });
+  assert.deepEqual(await controller.openAgentLogin({ expectedUserId: "owner", agent: "codex" }), { opened: true, cancellable: false });
   assert.equal(candidate.authenticated, false, "opening a browser is not completed authentication");
   await assert.rejects(controller.openAgentLogin({ expectedUserId: "owner", agent: "all" }), { code: "invalid_request" });
   release = {};

@@ -3,7 +3,7 @@
 const { failure, MESSAGES } = require("./embedded");
 const METHODS = Object.freeze({ status: [], beginConnect: ["attemptId", "expectedUserId"], completeConnect: ["attemptId"],
   cancelConnect: ["attemptId"], disconnect: [], detach: [], requestPermission: ["permission"], updateAccount: ["userId", "deviceIds", "verified"],
-  listPersonalAgents: ["expectedUserId"], openAgentLogin: ["expectedUserId", "agent"] });
+  listPersonalAgents: ["expectedUserId"], openAgentLogin: ["expectedUserId", "agent"], cancelAgentLogin: ["expectedUserId", "agent"] });
 const MAX_REQUEST_BYTES = 16 * 1024;
 
 function parseRequest(line) {

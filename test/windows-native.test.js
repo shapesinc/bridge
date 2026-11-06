@@ -4,8 +4,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
-const { runCommand } = require("../src/server");
+const { spawnSync, execFile } = require("node:child_process");
+const { runCommand, startServer } = require("../src/server");
 const { serviceDefinition, writeServiceDefinition } = require("../src/service");
 const { elevationStatus } = require("../src/command-shell");
 
@@ -20,9 +20,41 @@ test("Windows service XML has the UTF-16 BOM promised by its declaration", () =>
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("failed elevation probes remain unknown, not administrator access", () => {
-  assert.equal(elevationStatus({ platform: "win32", execute: () => ({ status: 1, stdout: "True" }) }).elevated, null);
-  assert.equal(elevationStatus({ platform: "win32", execute: () => ({ status: 0, stdout: "False\r\n" }) }).elevated, false);
+test("failed elevation probes remain unknown, not administrator access", async () => {
+  for (const [error, stdout, expected] of [[new Error("failed"), "True", null], [null, "False\r\n", false], [null, "True", true], [null, "invalid", null]]) {
+    assert.equal((await elevationStatus({ platform: "win32", execute: (_file, _args, options, done) => {
+      assert.equal(options.timeout, 5000); assert.equal(options.windowsHide, true); done(error, stdout);
+    } })).elevated, expected);
+  }
+  assert.equal((await elevationStatus({ platform: "win32", execute: () => { throw new Error("spawn failed"); } })).elevated, null);
+});
+
+test("HTTP status and cancellation remain responsive during a pending elevation probe", { timeout: 10000 }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-elevation-")), gate = path.join(dir, "release");
+  let begin, probeFinished = false, child, discovery;
+  const started = new Promise((resolve) => { begin = resolve; });
+  const server = await startServer({ port: 0, token: "elevation-test", readElevation: () => elevationStatus({ platform: "win32", execute: (_file, _args, options, done) => {
+    child = execFile(process.execPath, ["-e", `const fs=require('fs');const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(gate)})){clearInterval(t);process.stdout.write('False');}},20)`], options, (error, stdout) => { probeFinished = true; done(error, stdout); });
+    begin();
+  } }) });
+  const base = `http://127.0.0.1:${server.address().port}`, headers = { "x-token": "elevation-test", "content-type": "application/json" };
+  try {
+    discovery = fetch(base + "/sysinfo", { headers }).then((r) => r.json());
+    await started;
+    assert.deepEqual(await (await fetch(base + "/health", { signal: AbortSignal.timeout(2000) })).json(), { ok: true });
+    const cancel = await fetch(base + "/commands/cancel", { method: "POST", headers, body: "{}", signal: AbortSignal.timeout(2000) });
+    assert.equal(cancel.status, 403); await cancel.text();
+    assert.equal(probeFinished, false);
+    fs.writeFileSync(gate, "release");
+    assert.equal((await discovery).elevated, false);
+    assert.equal(probeFinished, true);
+  } finally {
+    fs.writeFileSync(gate, "release");
+    if (discovery) await discovery.catch(() => {});
+    if (child && child.exitCode === null && child.signalCode === null) await new Promise((resolve) => child.once("exit", resolve));
+    server.closeAllConnections(); await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("native Windows command and scheduled-task integration", { skip: process.platform !== "win32", timeout: 60000 }, async (t) => {

@@ -4,9 +4,11 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
-const { startServer } = require("../src/server");
-const jobs = require("../src/command-jobs");
+const commandSource = process.env.SHAPES_BRIDGE_SOURCE || path.resolve(__dirname, "..");
+const { startServer } = require(path.join(commandSource, "src/server"));
+const jobs = require(path.join(commandSource, "src/command-jobs"));
 
 test("command receipts survive disconnects, deduplicate starts, isolate scopes and cancel", { timeout: 60000 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-commands-"));
@@ -26,7 +28,11 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
   const cmd = `${process.platform === "win32" ? "& " : ""}${quote(process.execPath)} ${quote(script)}`;
   try {
     await open();
-    assert.equal((await fetch(base + "/commands/start", { method: "POST" })).status, 401);
+    const unauthorized = await fetch(base + "/commands/start", { method: "POST" });
+    assert.equal(unauthorized.status, 401);
+    await unauthorized.text();
+    assert.equal((await request("/sysinfo")).body.command_protocol, 1);
+    assert.equal((await request("/commands/start", { cmd, timeout: 10, scope_id: scope, request_key: key })).body.error_type, "command_protocol_mismatch");
     const started = await request("/commands/start", { cmd, timeout: 10, scope, request_key: key });
     assert.equal(started.status, 202);
     const id = started.body.job_id;
@@ -68,8 +74,65 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
       const cancelled = await request("/commands/cancel", { job_id: id, scope });
       assert.equal(cancelled.body.cancel_requested, true);
       const final = await request(`/commands/status?job_id=${id}&scope=${scope}`);
-      assert.equal(final.body.state, "cancelled", JSON.stringify(final));
+      assert.equal(final.body.state, process.platform === "win32" && !final.body.cleanup_confirmed ? "interrupted" : "cancelled", JSON.stringify(final));
       assert.equal(final.body.exit_code, -1);
+      if (process.platform !== "win32") assert.equal(final.body.cleanup_confirmed, true);
+      else if (!final.body.cleanup_confirmed) {
+        assert.equal(final.body.outcome_unknown, true);
+        // Windows taskkill is exercised below by the platform integration, but
+        // this receipt does not invent independent full-tree exit evidence.
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        jobs.acknowledgeInterrupted(id);
+      }
+    });
+    await t.test("cancel-before-start tombstones are scoped and cannot be replayed", async () => {
+      const request_key = "1".repeat(64);
+      const id = crypto.createHash("sha256").update(JSON.stringify([scope, request_key])).digest("hex");
+      const stopped = await request("/commands/cancel", { job_id: id, scope });
+      assert.equal(stopped.body.state, "cancelled");
+      assert.equal(stopped.body.cancelled_before_start, true);
+      assert.equal(stopped.body.cleanup_confirmed, true);
+      assert.equal(stopped.body.command_hash, null);
+      assert.equal((await request("/commands/cancel", { job_id: id, scope: "c".repeat(64) })).status, 404);
+      const late = await request("/commands/start", { cmd, timeout: 10, scope, request_key });
+      assert.equal(late.body.state, "cancelled"); assert.equal(late.body.deduplicated, true);
+      assert.equal(fs.readFileSync(marker, "utf8"), "1");
+    });
+    await t.test("a cancellation racing the exclusive initial save cannot launch", async () => {
+      const request_key = "2".repeat(64);
+      const id = crypto.createHash("sha256").update(JSON.stringify([scope, request_key])).digest("hex");
+      const link = fs.linkSync;
+      let injected = false;
+      fs.linkSync = (from, to) => {
+        if (!injected && to.endsWith(`${id}.json`)) {
+          injected = true;
+          const cancelled = spawnSync(process.execPath, ["-e", `require(${JSON.stringify(path.join(commandSource, "src/command-jobs"))}).cancel(${JSON.stringify(id)},${JSON.stringify(scope)})`], { encoding: "utf8", timeout: 3000 });
+          assert.equal(cancelled.status, 0, cancelled.stderr);
+        }
+        return link(from, to);
+      };
+      try {
+        const late = await request("/commands/start", { cmd, timeout: 10, scope, request_key });
+        assert.equal(late.body.state, "cancelled", JSON.stringify(late));
+        assert.equal(late.body.cleanup_confirmed, true);
+        assert.equal(fs.existsSync(path.join(jobs.root(), `${id}.supervisor`)), false);
+        assert.equal(fs.existsSync(path.join(jobs.root(), "mutation.lock")), false);
+      } finally { fs.linkSync = link; }
+    });
+    await t.test("protocol1 Stop ends the owned process tree before a delayed side effect", { skip: process.platform === "win32" }, async () => {
+      const escaped = path.join(dir, "late-after-stop.txt"), identity = path.join(dir, "child-pids.json");
+      fs.writeFileSync(script, `const fs=require('fs'),{spawn}=require('child_process');const c=spawn(process.execPath,['-e',${JSON.stringify("setTimeout(()=>require('fs').writeFileSync(" + JSON.stringify(escaped) + ",'bad'),1500);setInterval(()=>{},1000)")}],{detached:true,stdio:'ignore'});fs.writeFileSync(${JSON.stringify(identity)},JSON.stringify([process.pid,c.pid]));setInterval(()=>{},1000)`);
+      const started = await request("/commands/start", { cmd, timeout: 30, scope, request_key: "3".repeat(64) });
+      const id = started.body.job_id;
+      const deadline = Date.now() + 3000;
+      while (!fs.existsSync(identity) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 15));
+      const pids = JSON.parse(fs.readFileSync(identity));
+      assert.equal((await request("/commands/cancel", { job_id: id, scope })).body.cancel_requested, true);
+      const final = (await request(`/commands/status?job_id=${id}&scope=${scope}`)).body;
+      assert.equal(final.state, "cancelled", JSON.stringify(final)); assert.equal(final.cleanup_confirmed, true);
+      for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+      await new Promise((resolve) => setTimeout(resolve, 1600));
+      assert.equal(fs.existsSync(escaped), false);
     });
     await t.test("completion racing a liveness check keeps the completed receipt", async (t) => {
       const complete = jobs.load(id);
@@ -113,7 +176,7 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
           if (/\\.json\\.[0-9]+\\.tmp$/.test(String(file))) process.exit(93);
           return write.call(this, file, ...args);
         };
-        require(${JSON.stringify(path.join(__dirname, '../src/command-jobs'))}).start(${JSON.stringify(orphanBody)});
+        require(${JSON.stringify(path.join(commandSource, 'src/command-jobs'))}).start(${JSON.stringify(orphanBody)});
       `], { encoding: "utf8", windowsHide: true, timeout: 5000 });
       assert.equal(crashed.status, 93, crashed.stderr);
       const lockPath = path.join(jobs.root(), "mutation.lock");
@@ -152,7 +215,7 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
       const lateId = "e".repeat(64);
       jobs.save({ ...jobs.load(id), job_id: lateId });
       fs.writeFileSync(script, `require('fs').appendFileSync(${JSON.stringify(marker)},'replayed')`);
-      const child = spawnSync(process.execPath, [path.join(__dirname, "../src/command-worker.js"), lateId],
+      const child = spawnSync(process.execPath, [path.join(commandSource, "src/command-worker.js"), lateId],
         { timeout: 5000, windowsHide: true, encoding: "utf8" });
       assert.equal(child.status, 0, child.stderr);
       assert.equal(jobs.load(lateId).state, "interrupted");

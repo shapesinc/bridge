@@ -7,6 +7,7 @@ const { createEmbeddedProcess } = require("./embedded-process");
 const { PERMISSIONS } = require("./permissions");
 const { listAgents, inspectAgent } = require("./agents");
 const { openPersonalLogin } = require("./personal-login");
+const { createPersonalLoginManager } = require("./personal-codex");
 
 const MESSAGES = Object.freeze({
   invalid_request: "This computer request is not supported.",
@@ -23,7 +24,7 @@ const MESSAGES = Object.freeze({
   cancel_failed: "Could not cancel computer approval. Try again.",
   not_connected: "Connect this computer before requesting permission.",
   agent_login_unavailable: "Install or update this provider's coding app, then try signing in again.",
-  agent_login_failed: "Could not open sign-in in Terminal. Open the provider's coding app to sign in.",
+  agent_login_failed: "Could not open provider sign-in. Try again.",
 });
 function failure(code) { return Object.assign(new Error(MESSAGES[code]), { code }); }
 const identifier = (value) => typeof value === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(value);
@@ -36,6 +37,7 @@ function createEmbeddedController({ read = readState, write = writeState, remove
   begin = beginPairing, poll = pollPairing, cancel = cancelPairing,
   runtime = createEmbeddedProcess(), api = DEFAULT_API, name = os.hostname(), now = Date.now,
   discoverPersonalAgents = listAgents, inspectPersonalAgent = inspectAgent, launchPersonalLogin = openPersonalLogin,
+  personalLogin = createPersonalLoginManager(),
   readinessMs = 20000, sleep = (ms, signal) => new Promise((resolve, reject) => {
     const abort = () => { clearTimeout(timer); reject(failure("pairing_cancelled")); };
     const timer = setTimeout(() => { signal.removeEventListener("abort", abort); resolve(); }, ms);
@@ -89,7 +91,7 @@ function createEmbeddedController({ read = readState, write = writeState, remove
   }
   async function suspend() {
     remove("permission-request");
-    const results = await Promise.allSettled([runtime.stop(), cancelSaved()]);
+    const results = await Promise.allSettled([runtime.stop(), cancelSaved(), personalLogin.cancel()]);
     const failed = results.find((result) => result.status === "rejected");
     if (failed) { lastError = failed.reason.code === "cancel_failed" ? "cancel_failed" : "connection_failed"; throw failure(lastError); }
     attempt = null;
@@ -244,6 +246,7 @@ function createEmbeddedController({ read = readState, write = writeState, remove
     }
     invalidate();
     return serial(async () => {
+      await personalLogin.cancel();
       if (pending || read("embedded-pairing")) {
         await suspend();
         lastError = null;
@@ -290,17 +293,34 @@ function createEmbeddedController({ read = readState, write = writeState, remove
   }
   async function openAgentLogin({ expectedUserId, agent }) {
     if (!identifier(expectedUserId) || !["codex", "claude"].includes(agent)) throw failure("invalid_request");
-    authorized(expectedUserId);
+    const startedGeneration = generation;
+    const assertCurrent = () => {
+      authorized(expectedUserId);
+      if (generation !== startedGeneration) throw failure("account_changed");
+    };
+    assertCurrent();
     const selected = await inspectPersonalAgent(agent, os.homedir());
-    authorized(expectedUserId);
+    assertCurrent();
     if (!["ready", "auth_required"].includes(selected.status) || !selected.executable) throw failure("agent_login_unavailable");
-    try { await launchPersonalLogin(selected); }
+    let result;
+    try {
+      result = selected.transport === "bundled_personal"
+        ? await personalLogin.start(selected, assertCurrent)
+        : await launchPersonalLogin(selected);
+    }
     catch { throw failure("agent_login_failed"); }
+    assertCurrent();
+    return selected.transport === "bundled_personal" ? result : { opened: true, cancellable: false };
+  }
+  async function cancelAgentLogin({ expectedUserId, agent }) {
+    if (!identifier(expectedUserId) || !["codex", "claude"].includes(agent)) throw failure("invalid_request");
     authorized(expectedUserId);
-    return { opened: true };
+    const result = agent === "codex" ? await personalLogin.cancel() : { cancelled: false };
+    authorized(expectedUserId);
+    return result;
   }
   return { status, beginConnect, completeConnect, cancelConnect, disconnect, detach, updateAccount, requestPermission,
-    listPersonalAgents, openAgentLogin, dispose };
+    listPersonalAgents, openAgentLogin, cancelAgentLogin, dispose };
 }
 
 module.exports = { createEmbeddedController, failure, MESSAGES };
