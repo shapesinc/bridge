@@ -62,6 +62,9 @@ internal static class Computer {
     [DllImport("user32.dll")] private static extern bool GetIconInfo(IntPtr icon, out ICONINFO info);
     [DllImport("user32.dll")] private static extern bool DrawIconEx(IntPtr dc, int x, int y, IntPtr icon, int width, int height, uint step, IntPtr brush, uint flags);
     [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr value);
+    [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr window);
+    [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr window, IntPtr dc);
+    [DllImport("gdi32.dll", SetLastError = true)] private static extern bool BitBlt(IntPtr target, int x, int y, int width, int height, IntPtr source, int sourceX, int sourceY, uint operation);
     [DllImport("wtsapi32.dll", CharSet = CharSet.Unicode)] private static extern bool WTSQuerySessionInformation(IntPtr server, int session, int infoClass, out IntPtr buffer, out int bytes);
     [DllImport("wtsapi32.dll")] private static extern void WTSFreeMemory(IntPtr value);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
@@ -191,6 +194,21 @@ internal static class Computer {
         } finally { if (info.mask != IntPtr.Zero) DeleteObject(info.mask); if (info.color != IntPtr.Zero) DeleteObject(info.color); }
     }
 
+    private static void CaptureDisplay(Graphics graphics, Rectangle bounds) {
+        // .NET Framework CopyFromScreen rejects the valid SRCCOPY|CAPTUREBLT
+        // combination during enum validation. Call GDI directly so layered
+        // windows are included, and release both DCs before encoding the image.
+        IntPtr source = GetDC(IntPtr.Zero);
+        if (source == IntPtr.Zero) throw Fail("capture_failed", "The active desktop could not be captured. Observe again.");
+        try {
+            IntPtr target = graphics.GetHdc();
+            try {
+                if (!BitBlt(target, 0, 0, bounds.Width, bounds.Height, source, bounds.X, bounds.Y, 0x00CC0020 | 0x40000000))
+                    throw Fail("capture_failed", "The active desktop could not be captured. Observe again.");
+            } finally { graphics.ReleaseHdc(target); }
+        } finally { ReleaseDC(IntPtr.Zero, source); }
+    }
+
     private static Dictionary<string, object> Observe(Dictionary<string, object> request) {
         var app = ActiveApp();
         var displays = Displays(); var display = SelectDisplay(displays, Value(request, "display_id"));
@@ -203,7 +221,7 @@ internal static class Computer {
         byte[] image;
         using (var capture = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format24bppRgb))
         using (var graphics = Graphics.FromImage(capture)) {
-            graphics.CopyFromScreen(bounds.Location, Point.Empty, bounds.Size, CopyPixelOperation.SourceCopy | CopyPixelOperation.CaptureBlt);
+            CaptureDisplay(graphics, bounds);
             CursorImage(graphics, bounds);
             using (var scaled = new Bitmap(width, height, PixelFormat.Format24bppRgb))
             using (var target = Graphics.FromImage(scaled))
