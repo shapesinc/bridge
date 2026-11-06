@@ -65,6 +65,40 @@ test("Windows handoff control input is hidden from the command and EOF fails clo
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("Windows handoff closes empty and independently written output streams", { skip: !available, timeout: 30000 }, async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-handoff-streams-"));
+  try {
+    for (const [name, stdout, stderr] of [["empty", "", ""], ["stderr", "", "error\n"], ["stdout", "output\n", ""], ["both", "output\n", "error\n"]]) {
+      await t.test(`Windows handoff streams ${name}`, { timeout: 7000 }, async (t) => {
+        const trace = path.join(directory, name + ".log");
+        // Avoid Console/net.Socket initialization in the command itself. The
+        // process writes only these bytes, then exits without descendants.
+        const source = "const fs=require('node:fs');if(process.argv[1])fs.writeSync(1,process.argv[1]);if(process.argv[2])fs.writeSync(2,process.argv[2]);";
+        const child = owned(["-e", source, stdout, stderr], { releaseOnSuccess: true, env: { ...process.env, SHAPES_TEST_JOB_HOST_TRACE: trace } });
+        const output = { stdout: "", stderr: "" }; let controlError, timer;
+        child.stdout.on("data", (part) => { output.stdout += part; }); child.stderr.on("data", (part) => { output.stderr += part; });
+        child.stdin.on("error", (error) => { controlError = error; });
+        const ended = Promise.all([once(child.stdout, "end"), once(child.stderr, "end")]), closed = once(child, "close");
+        try {
+          await Promise.race([ended, new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`output EOF missing: stdout=${child.stdout.readableEnded}, stderr=${child.stderr.readableEnded}, data=${JSON.stringify(output)}`)), 5000);
+          })]);
+          clearTimeout(timer);
+          assert.deepEqual(output, { stdout, stderr });
+          assert.equal(child.exitCode, null, "the helper must still own the Job when output ends");
+          child.stdin.end("release\n");
+          assert.equal((await closed)[0], 0, controlError?.message);
+          assert.equal(controlError, undefined);
+        } finally {
+          clearTimeout(timer);
+          if (child.exitCode === null && child.signalCode === null) { child.kill(); await closed; }
+          t.diagnostic(`handoff streams=${name} exit=${child.exitCode} controlError=${controlError?.code || "none"}\n${fs.existsSync(trace) ? fs.readFileSync(trace, "utf8") : "no helper trace"}`);
+        }
+      });
+    }
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("Windows control EOF kills surviving descendants after successful leader exit", { skip: !available, timeout: 15000 }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-release-eof-")), receipt = path.join(directory, "owned.json");
   const source = "const child=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:['ignore','inherit','inherit']});require('node:fs').writeFileSync(process.argv[1],JSON.stringify({parent:process.pid,child:child.pid}));child.unref();";
