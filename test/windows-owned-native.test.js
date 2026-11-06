@@ -28,7 +28,7 @@ test("Windows Job helper preserves stdin/stdout and literal command arguments", 
   assert.deepEqual(JSON.parse(output), { args, data: "private test input" });
 });
 
-test("Windows handoff control input is hidden from the command and EOF fails closed", { skip: !available, timeout: 30000 }, async () => {
+test("Windows handoff control input is hidden from the command and EOF fails closed", { skip: !available, timeout: 30000 }, async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-handoff-"));
   try {
     for (const ready of [false, true]) for (const release of [true, false]) {
@@ -36,8 +36,9 @@ test("Windows handoff control input is hidden from the command and EOF fails clo
       const child = owned(["-e", "let data='';process.stdin.on('data',p=>data+=p);process.stdin.on('end',()=>console.log(JSON.stringify({data})))"], {
         releaseOnSuccess: true, ready, env: { ...process.env, SHAPES_TEST_JOB_HOST_TRACE: trace },
       });
-      let output = "";
+      let output = "", controlError;
       child.stdout.on("data", (part) => { output += part; }); child.stderr.resume();
+      child.stdin.on("error", (error) => { controlError = error; });
       const ended = Promise.all([once(child.stdout, "end"), once(child.stderr, "end")]);
       const closed = once(child, "close"); let timer;
       try {
@@ -53,8 +54,13 @@ test("Windows handoff control input is hidden from the command and EOF fails clo
         assert.deepEqual(lines.filter((line) => !("started" in line)), [{ data: "" }]);
         assert.equal(child.exitCode, null, "successful leader must wait for its owner after both output streams end");
         child.stdin.end(release ? "release\n" : undefined);
-        assert.equal((await closed)[0], release ? 0 : 70);
-      } finally { clearTimeout(timer); if (child.exitCode === null && child.signalCode === null) { child.kill(); await closed; } }
+        assert.equal((await closed)[0], release ? 0 : 70, controlError?.message);
+        assert.equal(controlError, undefined);
+      } finally {
+        clearTimeout(timer);
+        if (child.exitCode === null && child.signalCode === null) { child.kill(); await closed; }
+        t.diagnostic(`handoff ready=${ready} release=${release} exit=${child.exitCode} controlError=${controlError?.code || "none"}\n${fs.existsSync(trace) ? fs.readFileSync(trace, "utf8") : "no helper trace"}`);
+      }
     }
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });

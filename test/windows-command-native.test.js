@@ -22,11 +22,17 @@ async function fixture(t) {
     for (const child of owned) if (child.exitCode === null && child.signalCode === null) { child.kill(); await once(child, "close"); }
     await fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
+  let runNumber = 0;
   const run = async (cmd, options = {}) => {
     const source = "require(process.argv[1]).runCommand(JSON.parse(process.argv[2])).then(result=>process.stdout.write(JSON.stringify(result)),()=>process.exit(1))";
-    const { stdout } = await execute(node, ["-e", source, path.resolve(__dirname, "../src/server.js"), JSON.stringify({ cmd, cwd: directory, ...options })],
-      { timeout: 15000, windowsHide: true, env: { ...process.env, SHAPES_BRIDGE_HOME: path.join(directory, "state") } });
-    return JSON.parse(stdout);
+    const trace = path.join(directory, `command-${++runNumber}.log`);
+    try {
+      const { stdout } = await execute(node, ["-e", source, path.resolve(__dirname, "../src/server.js"), JSON.stringify({ cmd, cwd: directory, ...options })],
+        { timeout: 15000, windowsHide: true, env: { ...process.env, SHAPES_BRIDGE_HOME: path.join(directory, "state"), SHAPES_TEST_JOB_HOST_TRACE: trace } });
+      return JSON.parse(stdout);
+    } finally {
+      t.diagnostic(`command handoff ${runNumber}\n${fs.existsSync(trace) ? fs.readFileSync(trace, "utf8") : "no helper trace"}`);
+    }
   };
   return { directory, run, own: (child) => { owned.add(child); return child; } };
 }

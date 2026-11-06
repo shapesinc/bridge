@@ -21,7 +21,7 @@ test("owned stop cleans detached descendants and leaves an unrelated process ali
   const unrelated = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });
   const fixture = `const {spawn}=require('node:child_process'); const fs=require('node:fs');
     const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{detached:true,stdio:'ignore'});
-    child.once('spawn',()=>setTimeout(()=>fs.writeFileSync(${JSON.stringify(receipt)},JSON.stringify({daemon:process.pid,child:child.pid})),100)); setInterval(()=>{},1000);`;
+    child.once('spawn',()=>setTimeout(()=>{const receipt=${JSON.stringify(receipt)};fs.writeFileSync(receipt+'.tmp',JSON.stringify({daemon:process.pid,child:child.pid}));fs.renameSync(receipt+'.tmp',receipt)},100)); setInterval(()=>{},1000);`;
   const manager = createEmbeddedProcess({ spawnProcess: (file, _args, options) => spawn(file, ["-e", fixture], options), graceMs: 200 });
   let pids;
   try {
@@ -41,7 +41,7 @@ test("controller SIGKILL closes private IPC and cancels daemon plus detached job
     const parent=require(${JSON.stringify(lifetime)}).parentLifetime();
     const child=spawn(process.execPath,['-e',"process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{detached:true,stdio:'ignore'});
     parent.signal.addEventListener('abort',async()=>{await require(${JSON.stringify(children)}).stopDescendants({graceMs:100});process.exit(0)});
-    child.once('spawn',()=>setTimeout(()=>fs.writeFileSync(${JSON.stringify(receipt)},JSON.stringify({daemon:process.pid,child:child.pid})),100));setInterval(()=>{},1000);`;
+    child.once('spawn',()=>setTimeout(()=>{const receipt=${JSON.stringify(receipt)};fs.writeFileSync(receipt+'.tmp',JSON.stringify({daemon:process.pid,child:child.pid}));fs.renameSync(receipt+'.tmp',receipt)},100));setInterval(()=>{},1000);`;
   const controllerCode = `const {spawn}=require('node:child_process');spawn(process.execPath,['-e',${JSON.stringify(daemon)}],{detached:true,stdio:['ignore','ignore','ignore','ipc']});setInterval(()=>{},1000);`;
   const controller = spawn(process.execPath, ["-e", controllerCode], { stdio: "ignore" });
   const unrelated = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });
