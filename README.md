@@ -167,6 +167,36 @@ the desktop and display server. Windows and Linux report macOS-specific TCC
 permissions as unsupported. Cross-platform service definitions are tested with
 fixtures; real desktop and restart acceptance requires each supported OS.
 
+Windows command scripts default to PowerShell and retain newlines, `$env`
+variables, quotes and Unicode. Use `shell=cmd` explicitly for a single-line
+cmd.exe command. The scheduled task remains **LeastPrivilege**: sharing a
+computer with another chat member does not grant administrator rights.
+`sysinfo.elevated` reports the actual token (or null if it cannot be checked).
+For a task needing elevation, the owner must review and perform that specific
+operation in an Administrator terminal. `update` or `restart` rewrites the
+scheduled task with a valid UTF-16 BOM; existing pairing is retained.
+
+Recoverable commands use `/commands/start`, `/commands/status` and
+`/commands/cancel` with server-issued scope and request keys. A detached local
+supervisor enforces the command deadline independently of the HTTP connection.
+On Linux user-service installations, each supervisor runs in a separate systemd
+user scope so restarting the connection does not kill an in-flight command.
+Poll the receipt after a timeout; never submit a second command to recover a
+lost response. Receipts under the private `command-jobs` directory retain job
+identity, command hash, timing, exit status and bounded output for 24 hours
+(maximum 256 records). A missing supervisor is an unknown outcome, never an
+automatic replay. Inspect an interrupted command locally before resuming work.
+After inspecting it and stopping any remaining processes, the owner can run
+`shapes-bridge acknowledge-command <job_id>` locally to release its mutation
+lock. This also recovers a lock stranded by a crash after a final receipt was
+saved. If the launcher died before saving its first receipt, acknowledgement
+commits an interrupted receipt before releasing the orphan lock. A live launcher
+or supervisor prevents acknowledgement. Existing receipts stay unchanged and
+the command never reruns. There is no remote acknowledgement endpoint.
+The public tunnel is reverified on every heartbeat; three endpoint failures
+replace the tunnel without pairing again or replaying commands. Windows CI
+tests actual Task Scheduler registration, script execution and cancellation.
+
 Keep-awake is enabled by default and can be disabled at setup with `--no-awake`.
 It prevents idle system sleep while the service runs, using `caffeinate`,
 `systemd-inhibit`, or Windows `SetThreadExecutionState`. It does not unlock the

@@ -65,6 +65,30 @@ function clock(t) {
   };
 }
 
+test("three authenticated endpoint failures replace a live tunnel without replaying work", async (t) => fixture(async (abort) => {
+  const timer = clock(t), mock = dependencies();
+  let calls = 0;
+  const running = runDaemon({ ...mock.options, heartbeatMs: 30000, retryMs: 1000, signal: abort.signal,
+    request: async (_api, route) => {
+      if (route !== "/devices/heartbeat") return {};
+      calls++;
+      if (calls <= 3) throw Object.assign(new Error("endpoint not ready"), { status: 409 });
+      return {};
+    },
+  });
+  try {
+    await timer.settle();
+    timer.next(); await timer.settle();
+    timer.next(); await timer.settle();
+    assert.equal(readState("status").connection, "reconnecting");
+    timer.next(); await timer.settle();
+    assert.equal(mock.tunnels.length, 2);
+    assert.equal(mock.tunnels[0].child.exitCode, 0);
+    assert.equal(readState("status").connection, "connected");
+    assert.equal(calls, 4);
+  } finally { abort.abort(); await running; }
+}));
+
 test("endpoint warmup retries promptly, then successful heartbeats keep their normal cadence", async (t) => fixture(async (abort) => {
   const timer = clock(t), mock = dependencies(), heartbeats = [];
   const running = runDaemon({ ...mock.options, heartbeatMs: 30000, retryMs: 1000, signal: abort.signal,

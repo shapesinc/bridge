@@ -25,16 +25,26 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm test
+      - name: Verify commands survive a real systemd user-service restart
+        run: |
+          sudo systemctl start "user@$(id -u).service"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          SHAPES_TEST_SYSTEMD=1 node --test test/systemd-commands.test.js
       - run: npm pack --dry-run
 
   windows-runtime:
     runs-on: windows-latest
     timeout-minutes: 10
+    strategy:
+      matrix:
+        node: [18, 22]
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
       - name: Compile Windows process owner
         shell: pwsh
         run: |
@@ -45,7 +55,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "SHAPES_TEST_JOB_HOST=$output" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Verify native process ownership and durable connection transport
-        run: node --test --test-concurrency=1 test/owned-process.test.js test/embedded-host.test.js test/embedded-startup-runtime.test.js test/windows-job.test.js test/windows-standalone-native.test.js test/windows-owned-native.test.js test/windows-command-native.test.js
+        run: node --test --test-concurrency=1 test/owned-process.test.js test/embedded-host.test.js test/embedded-startup-runtime.test.js test/windows-job.test.js test/windows-standalone-native.test.js test/windows-owned-native.test.js test/windows-command-native.test.js test/windows-native.test.js test/command-jobs.test.js test/runtime.test.js
       - name: Compile Windows computer helper and throwaway fixture
         id: computer
         if: ${{ !cancelled() }}
@@ -72,4 +82,3 @@ jobs:
           $node = (Get-Command node).Source
           & $env:SHAPES_TEST_JOB_HOST --parent-pid $PID -- $env:SHAPES_TEST_MEDIUM_PROCESS -- $node --test --test-concurrency=1 test/computer.test.js test/windows-computer.test.js test/windows-computer-native.test.js
           exit $LASTEXITCODE
-
