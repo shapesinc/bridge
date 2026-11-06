@@ -1,63 +1,84 @@
 # Scoped shell commands
 
-`/capabilities.features.command_jobs=true` advertises independent, token-authenticated
-command primitives. The backend composes them for the existing `run` action; no
-model polling or new inference call is needed.
+`/capabilities.features.command_jobs=true` advertises token-authenticated command
+primitives. The authenticated `/sysinfo.command_protocol=1` selects the wire
+contract; the capability boolean alone does not select a protocol.
 
-- `POST /commands/start` accepts `cmd`, optional `cwd`, optional `timeout` (default
-  60, maximum 600 seconds), `scope_id` and `request_key`. Scope and request keys are
-  strings of 1–128 ASCII letters, numbers, `_`, `-` or `:`. The backend derives the
-  scope from its authorized actor/chat/computer binding. The command ID is SHA-256
-  of `scope_id + "\0" + request_key`. New starts return 202; retries of the same
-  payload return 200 and the same command. A changed payload returns 409.
-- `GET /commands/status?command_id=…&scope_id=…` reads that command, with current
-  bounded stdout/stderr. Wrong scope and unknown commands return 404.
-- `POST /commands/cancel` accepts only `command_id` and `scope_id`. It requests
-  termination, then callers poll status for the terminal receipt. Repeated cancel
-  is safe; a late cancel never rewrites an already completed/failed result.
-  Cancelling a not-yet-recorded deterministic ID creates a durable tombstone, so
-  a delayed or retried start cannot run after Stop.
+- `POST /commands/start` accepts `cmd`, optional `cwd` and `shell`, required
+  `timeout` (1–600 seconds), `scope` and `request_key` (64 lowercase hex digits).
+  The backend derives scope from the authorized actor/chat/computer binding.
+  `job_id` is SHA-256 of compact JSON `[scope, request_key]`. Starts return 202;
+  identical retries return the same receipt with `deduplicated:true`. A changed
+  payload under the same key returns 409. There is no uncertain-start replay.
+- `GET /commands/status?job_id=…&scope=…` reads the durable receipt, waiting up to
+  15 seconds unless `wait=0`. Wrong scope and unknown jobs return 404.
+- `POST /commands/cancel` accepts only `job_id` and `scope`. It acknowledges a
+  cancellation request; callers must then read the terminal receipt. Repeated
+  cancellation is safe, and a late request does not rewrite a terminal result.
+  A deterministic ID not yet recorded gets a durable scoped tombstone. Its
+  `cancelled_before_start:true`, `command_hash:null`, `cancel_requested:true` and
+  `cleanup_confirmed:true` mean no command started; no command hash is invented.
+  Exclusive initial receipt creation prevents a delayed start overwriting it.
 
-Receipts contain `command_id`, `state`, `stdout`, `stderr`, `exit_code`,
-`cancel_requested`, `cleanup_confirmed`, `started_at`, `finished_at` and `deadline`.
-States are `running`, `completed`, `failed`, `cancelled` and `timed_out`. Cancellation
-acknowledgement is not cleanup confirmation. The command and observed descendant
-process groups receive TERM, then KILL after at most one second; a further bounded
-exit check establishes `cleanup_confirmed`. Separate commands retain separate
-process groups. Already orphaned daemons are outside this ancestry boundary;
-earlier file writes cannot be undone.
+Protocol 1 uses numeric millisecond timestamps, `job_id`, `command_hash`, state,
+exit status and bounded stdout/stderr. States are `queued`, `running`,
+`completed`, `failed`, `cancelled`, `timed_out` and `interrupted`. A detached
+supervisor owns execution and the deadline, independently of the tunnel. Linux
+user-service installations use a separate systemd scope. One mutation fence
+serializes commands with legacy `/run`, file writes and opens. At most 256
+receipts are retained, with completed results eligible for expiry after 24 hours.
 
-The daemon allows at most 32 active commands. Existing shell environment handling,
-4 MiB capture cap per output stream, 20,000-character returned tails and 600-second
-deadline remain. Private state files use 0600 under a 0700 command directory.
-Terminal results survive helper restart. An unfinished record without its live
-process object becomes a failed `command_interrupted` receipt with
-`outcome_unknown=true` and `cleanup_confirmed=false`; it is never re-executed and
-saved PIDs are never signalled. HTTP/tunnel interruption alone does not cancel a
-command, allowing polling to resume on the same helper.
+Cancellation acknowledgement is not cleanup confirmation. On POSIX, the shell
+process group and descendant groups observed before termination receive TERM,
+then KILL; a bounded exit check establishes `cleanup_confirmed`. Signal denial or
+missing ancestry evidence remains `outcome_unknown:true`. Unconfirmed termination
+keeps the mutation fence until the owner reconciles the command locally. Saved
+PIDs alone never authorize a new reader to signal a process. Already orphaned
+daemons are outside the ancestry boundary; earlier writes cannot be undone.
 
-The legacy `/run` response is unchanged. Older helpers do not advertise
-`command_jobs`; the backend must identify their unconfirmed cancellation instead
-of claiming that closing an HTTP request stopped the shell.
-Windows explicitly advertises `command_jobs=false` until process-tree termination
-is supported. A direct new-command request there also leaves
-`cleanup_confirmed=false`: observing the parent's exit does not prove descendant
-cleanup. The regression simulates parent-only signalling on the host OS; it is
-not a Windows execution test.
+Windows keeps upstream PowerShell/cmd execution and `taskkill /T /F` termination.
+This implementation does not independently verify every Windows descendant exit,
+so a started command's cancellation cannot claim `cleanup_confirmed:true` there.
+It returns an interrupted, uncertain receipt and retains the mutation fence.
+The owner can inspect and use the existing local `acknowledge-command` operation;
+there is no remote acknowledgement endpoint. Windows-native CI exercises the
+real shell/taskkill path; tests on macOS do not count as Windows execution.
 
-Actual native 106 acceptance found the original bug: a plain request started a
-120-second Node script, the human clicked Stop, and the script still wrote its
-delayed marker after the original deadline. The child then exited normally. The
-local receipt is `native 106-direct-shell-stop-failure.json`. This change remains
-**NO-GO for release until the updated signed helper repeats that actual UI flow**
-with no late marker and confirmed child exit.
+Existing environment handling, 4 MiB capture cap per stream, 20,000-character
+returned tails and 600-second maximum remain. Private records are 0600 in the
+0700 state directory. Interrupted supervisors never automatically replay work.
 
-`test/commands.test.js` uses actual loopback HTTP and local child processes for
-file creation, output/status and cancellation compositions. It verifies scoped
-authorization, exactly-once writes, conflicting retries, cancel-before-start,
-concurrent isolation, detached descendant cleanup, deadlines, bounded output and
-terminal receipt reads from a new process. The interrupted-state control is a
-simulated persisted record, not a real helper crash. These tests use no provider
-and incur no inference spend. The primitives add no AI calls or model schema;
-keeping their control metadata internal preserves a **$0/day normal-path provider
-cost increase** at unchanged task usage.
+## Upgrade compatibility
+
+Build 109 and earlier task helpers used protocol 0: no `command_protocol` field,
+`scope_id`/`command_id`, SHA-256 of `scope_id + "\0" + request_key`, ISO timestamps,
+and daemon-owned commands. New helpers retain protocol 0 receipt reads/cancels,
+including truthful unknown outcomes after a helper restart. New protocol 0
+starts receive `command_protocol_mismatch`; clients must negotiate before start.
+Deploy the version-negotiating backend before the new helper. A client must pin
+the selected wire and identity across lost responses, status and cancellation;
+it must never fall back to another hash/protocol after a possibly executed start.
+Older upstream protocol 1 helpers may lack cleanup evidence and tombstones, so
+version 1 alone is not proof of either. Inspect the actual receipt fields.
+
+## Verification and cost
+
+Actual native 106 testing reproduced a shell surviving UI Stop and writing a
+late marker. Build 108 repeated that ordinary request through the new primitives:
+UI Stop ended the captured Node process/group, persisted cancellation, and the
+marker stayed absent beyond its original deadline. Build 109 additionally
+completed a repository fix, CSV arithmetic and HTML editing through ordinary
+native chats. These are historical candidate receipts, not acceptance of this
+integrated protocol 1 package; its affected UI flows remain pending.
+
+`test/command-jobs.test.js` exercises actual HTTP, local independent supervisors,
+exactly-once writes, scope isolation, disconnected readers, a cross-process
+cancel/initial-save race, tombstones, detached descendants and delayed side
+effects. `test/commands.test.js` preserves legacy receipt/primitive checks and
+injects signal denial without changing real permissions. Missing-supervisor and
+storage-failure cases are explicit simulations. No test uses a paid provider.
+
+Version negotiation, status and cancellation add no AI calls or prompt tokens:
+**$0/day incremental provider spend** at unchanged task volume. Upstream model
+actions and the separately reviewed coding-harness context projection retain
+their own cost accounting; this transport integration adds neither.

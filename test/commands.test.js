@@ -9,6 +9,7 @@ const { spawnSync } = require("node:child_process");
 const commandSource = process.env.SHAPES_BRIDGE_SOURCE || path.resolve(__dirname, "..");
 const { startServer } = require(path.join(commandSource, "src/server"));
 const { runCommand } = require(path.join(commandSource, "src/command-process"));
+const { startCommand } = require(path.join(commandSource, "src/commands"));
 const TOKEN = "private-command-test-token";
 const scope = "actor:room:device";
 const quote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
@@ -32,7 +33,12 @@ async function fixture(t, serverOptions = {}) {
       headers: { "content-type": "application/json", "x-token": token }, ...(body ? { body: JSON.stringify(body) } : {}) });
     return { status: response.status, body: await response.json() };
   };
-  const start = (request_key, cmd, extra = {}) => request("/commands/start", { scope_id: scope, request_key, cmd, cwd: dir, ...extra });
+  // The v0 module is retained only to read/cancel pre-upgrade receipts. New
+  // HTTP starts use protocol1; these fixtures reproduce existing legacy jobs.
+  const start = async (request_key, cmd, extra = {}) => {
+    try { const body = startCommand({ scope_id: scope, request_key, cmd, cwd: dir, ...extra }); return { status: body.deduplicated ? 200 : 202, body }; }
+    catch (error) { return { status: error.statusCode || 400, body: { error: error.message } }; }
+  };
   const status = (id, selectedScope = scope) => request(`/commands/status?command_id=${id}&scope_id=${selectedScope}`);
   const cancel = (id, selectedScope = scope, token = TOKEN) => request("/commands/cancel", { command_id: id, scope_id: selectedScope }, token);
   const until = async (id, predicate = (r) => r.state !== "running") => {
@@ -43,7 +49,7 @@ async function fixture(t, serverOptions = {}) {
   return { dir, request, start, status, cancel, until };
 }
 
-test("scoped command starts deduplicate side effects, bind arguments, and retain completed receipts across a reader restart", async (t) => {
+test("legacy scoped command starts deduplicate side effects, bind arguments, and retain completed receipts across a reader restart", async (t) => {
   const f = await fixture(t);
   assert.equal((await f.request("/capabilities")).body.features.command_jobs, true);
   assert.equal((await f.request("/commands/start", { scope_id: scope, request_key: "bad", cmd: "touch unsafe" }, "wrong")).status, 401);
@@ -180,9 +186,9 @@ test("denied termination signals settle bounded uncertainty without crashing or 
   }
 });
 
-test("Windows capability fallback and parent-only termination never claim descendant cleanup", async (t) => {
+test("Windows command jobs remain available while unverified tree termination never claims cleanup", async (t) => {
   const f = await fixture(t, { platform: "win32" });
-  assert.equal((await f.request("/capabilities")).body.features.command_jobs, false);
+  assert.equal((await f.request("/capabilities")).body.features.command_jobs, true);
   const execution = runCommand({ cmd: `${quote(process.execPath)} -e 'require("node:fs").writeFileSync("pid",String(process.pid));console.log("ready");setInterval(()=>{},1000)'`, cwd: f.dir }, { platform: "win32" });
   let child;
   try {

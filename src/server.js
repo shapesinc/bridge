@@ -30,6 +30,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
+const { elevationStatus } = require("./command-shell");
+const commandJobs = require("./command-jobs");
 const { URL } = require("node:url");
 const { startJob, publicStatus, listJobs, cancelJob, respondJob } = require("./codex");
 const { listAgents } = require("./agents");
@@ -37,8 +39,8 @@ const { expandHome } = require("./local-workspace");
 const { bundledRuntime } = require("./bundled-runtime");
 const { createComputerControl } = require("./computer");
 const { createSession, startSessionTurn, readSession, sessionEvents } = require("./sessions");
-const { runCommand } = require("./command-process");
-const { startCommand, commandStatus, cancelCommand } = require("./commands");
+const { runCommand: startCommandProcess } = require("./command-process");
+const { commandStatus, cancelCommand } = require("./commands");
 
 const MAX_OUTPUT = 20000;
 const MAX_FILE_READ = 100000;
@@ -124,6 +126,10 @@ function readBody(req, limit = 50 * 1024 * 1024) {
   });
 }
 
+// Keep the public Promise contract used by independent command supervisors.
+// The reusable process primitive also exposes cancellation and live output.
+function runCommand(body) { return startCommandProcess(body).result; }
+
 
 function openTarget(target) {
   const t = expandHome(target);
@@ -157,6 +163,10 @@ function sysinfo() {
     platform: process.platform,
     arch: process.arch,
     node: process.version,
+    bridge_version: require("../package.json").version,
+    command_protocol: 1,
+    default_shell: process.platform === "win32" ? "powershell" : "sh",
+    ...elevationStatus(),
     cpu_count: os.cpus().length,
     mem_gb: Math.round((os.totalmem() / 1e9) * 10) / 10,
     home,
@@ -195,7 +205,7 @@ function startServer({ port, token, computerControl = createComputerControl(), p
     }
     if (route === "/capabilities" && method === "GET") {
       return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: {
-        interactive_codex: true, idempotent_start: true, job_list: true, command_jobs: platform !== "win32", bundled_sessions: bundledRuntime().available, computer_control: computerControl.available() } });
+        command_jobs: true, interactive_codex: true, idempotent_start: true, job_list: true, bundled_sessions: bundledRuntime().available, computer_control: computerControl.available() } });
     }
 
     // Everything below requires the token.
@@ -204,6 +214,42 @@ function startServer({ port, token, computerControl = createComputerControl(), p
     }
 
     try {
+      if (route === "/commands/start" && method === "POST") {
+        try {
+          const body = await readBody(req, 500000);
+          if (body?.scope_id !== undefined) return sendJson(res, 409, {
+            error: "Discover /sysinfo command_protocol before starting a new command.", error_type: "command_protocol_mismatch" });
+          return sendJson(res, 202, await commandJobs.start(body));
+        }
+        catch (error) { return sendJson(res, error.statusCode || 500, { error: error.message, error_type: error.errorType || "command_start_failed", ...(error.jobId ? { job_id: error.jobId } : {}) }); }
+      }
+      if (route === "/commands/status" && method === "GET") {
+        try {
+          // Existing v0 receipts remain readable after a normal helper upgrade.
+          if (url.searchParams.has("scope_id")) {
+            if ([...url.searchParams.keys()].some((key) => !["command_id", "scope_id"].includes(key))) throw new Error("Unexpected legacy command argument.");
+            return sendJson(res, 200, commandStatus(Object.fromEntries(url.searchParams)));
+          }
+          if ([...url.searchParams.keys()].some((key) => !["job_id", "scope", "wait"].includes(key))) throw new Error("Unexpected command status argument.");
+          const id = url.searchParams.get("job_id"), scope = url.searchParams.get("scope");
+          const deadline = Date.now() + (url.searchParams.get("wait") === "0" ? 0 : 15000);
+          let result = commandJobs.status(id, scope);
+          while (!commandJobs.TERMINAL.has(result.state) && Date.now() < deadline && !req.aborted && !res.destroyed) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            result = commandJobs.status(id, scope);
+          }
+          if (!res.destroyed) return sendJson(res, 200, result);
+          return;
+        } catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message, error_type: error.errorType }); }
+      }
+      if (route === "/commands/cancel" && method === "POST") {
+        try {
+          const body = await readBody(req, 4096);
+          if (body?.scope_id !== undefined) return sendJson(res, 200, cancelCommand(body));
+          if (!body || Object.keys(body).some((key) => !["job_id", "scope"].includes(key))) throw new Error("Supply only job_id and scope.");
+          return sendJson(res, 200, commandJobs.cancel(body.job_id, body.scope));
+        } catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message, error_type: error.errorType }); }
+      }
       if (route === "/computer" && method === "POST") {
         const result = await computerControl.execute(await readBody(req, 32768));
         return sendJson(res, result.success ? 200 : 409, result);
@@ -322,25 +368,6 @@ function startServer({ port, token, computerControl = createComputerControl(), p
         return sendJson(res, 200, sysinfo());
       }
 
-      if (route === "/commands/start" && method === "POST") {
-        try {
-          const result = startCommand(await readBody(req, 128 * 1024));
-          return sendJson(res, result.deduplicated ? 200 : 202, result);
-        } catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message }); }
-      }
-      if (route === "/commands/status" && method === "GET") {
-        try {
-          if ([...url.searchParams.keys()].some((key) => !["command_id", "scope_id"].includes(key))) {
-            return sendJson(res, 400, { error: "Supply command_id and scope_id." });
-          }
-          return sendJson(res, 200, commandStatus(Object.fromEntries(url.searchParams)));
-        } catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message }); }
-      }
-      if (route === "/commands/cancel" && method === "POST") {
-        try { return sendJson(res, 200, cancelCommand(await readBody(req, 4096))); }
-        catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message }); }
-      }
-
       if (route === "/run" && method === "POST") {
         const body = await readBody(req);
         if (!body || typeof body.cmd !== "string" || !body.cmd.trim()
@@ -348,8 +375,8 @@ function startServer({ port, token, computerControl = createComputerControl(), p
           return sendJson(res, 400, { error: "Supply cmd text and optional cwd text." });
         }
         log(`RUN: ${body.cmd}   (cwd=${body.cwd || process.cwd()})`);
-        const { exit_code, stdout, stderr } = await runCommand(body).result;
-        return sendJson(res, 200, { exit_code, stdout, stderr });
+        const { stopped, cleanup_confirmed, ...result } = await commandJobs.mutation(() => runCommand(body));
+        return sendJson(res, 200, result);
       }
 
       if (route === "/write" && method === "POST") {
@@ -359,9 +386,12 @@ function startServer({ port, token, computerControl = createComputerControl(), p
         }
         const p = expandHome(body.path);
         log(`WRITE: ${p} (${Buffer.byteLength(body.content)} bytes)`);
-        fs.mkdirSync(path.dirname(path.resolve(p)), { recursive: true });
-        fs.writeFileSync(p, body.content, "utf8");
-        return sendJson(res, 200, { wrote: p, bytes: Buffer.byteLength(body.content) });
+        const result = await commandJobs.mutation(() => {
+          fs.mkdirSync(path.dirname(path.resolve(p)), { recursive: true });
+          fs.writeFileSync(p, body.content, "utf8");
+          return { wrote: p, bytes: Buffer.byteLength(body.content), finished_at: Date.now() };
+        });
+        return sendJson(res, 200, result);
       }
 
       if (route === "/read" && method === "GET") {
@@ -382,6 +412,8 @@ function startServer({ port, token, computerControl = createComputerControl(), p
           path: p,
           content: buffer.toString("utf8"),
           truncated: stat.size > MAX_FILE_READ,
+          modified_at: stat.mtimeMs,
+          observed_at: Date.now(),
         });
       }
 
@@ -413,12 +445,12 @@ function startServer({ port, token, computerControl = createComputerControl(), p
         const body = await readBody(req);
         if (!body.target) return sendJson(res, 400, { error: "'target' is required" });
         log(`OPEN: ${body.target}`);
-        return sendJson(res, 200, openTarget(body.target));
+        return sendJson(res, 200, await commandJobs.mutation(() => openTarget(body.target)));
       }
 
       return sendJson(res, 404, { error: `no route ${method} ${route}` });
     } catch (err) {
-      return sendJson(res, 500, { error: String(err && err.message ? err.message : err) });
+      return sendJson(res, err.statusCode || 500, { error: String(err && err.message ? err.message : err), ...(err.errorType ? { error_type: err.errorType } : {}) });
     }
   });
 
@@ -428,4 +460,4 @@ function startServer({ port, token, computerControl = createComputerControl(), p
   });
 }
 
-module.exports = { startServer };
+module.exports = { startServer, runCommand };

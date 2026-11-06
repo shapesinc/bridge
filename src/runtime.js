@@ -98,7 +98,7 @@ async function runDaemon({ serve = startServer, tunnelFactory = startTunnel, req
           let tunnelExited = tunnel.child.exitCode !== null && tunnel.child.exitCode !== undefined;
           tunnel.child.once("exit", () => { tunnelExited = true; wake?.(); });
           tunnel.child.once("error", () => { tunnelExited = true; wake?.(); });
-          let heartbeatFailures = 0;
+          let heartbeatFailures = 0, endpointFailures = 0;
           while (!stopping && !tunnelExited) {
             let nextHeartbeatMs = heartbeatMs;
             try {
@@ -108,6 +108,7 @@ async function runDaemon({ serve = startServer, tunnelFactory = startTunnel, req
               registeredEndpoint = { bridge_url: tunnel.url, token };
               if (stopping || tunnelExited) break;
               heartbeatFailures = 0;
+              endpointFailures = 0;
               connection = "connected"; lastHeartbeat = new Date().toISOString(); lastError = null; attempts = 0; status();
             } catch (error) {
               if (error.status === 401) {
@@ -120,6 +121,12 @@ async function runDaemon({ serve = startServer, tunnelFactory = startTunnel, req
                 return;
               }
               if (stopping) break;
+              // 409 means the API authenticated this device but could not
+              // reach its endpoint. API outages (5xx) must not churn tunnels.
+              endpointFailures = error.status === 409 ? endpointFailures + 1 : 0;
+              if (endpointFailures >= 3) {
+                throw new Error("The public computer endpoint stayed unreachable; replacing the secure tunnel.");
+              }
               connection = "reconnecting"; lastError = error.message; status();
               log("Waiting for shapes.inc; retrying automatically.");
               // The tunnel URL can exist before its public endpoint is ready.
