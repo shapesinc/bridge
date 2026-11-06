@@ -15,7 +15,9 @@ function ensureWindowsJobHost({ source = path.resolve(__dirname, "../scripts/win
   const sourceStat = fs.lstatSync(source);
   if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.size > 131072) throw new Error("Invalid Windows process supervisor source.");
   const code = fs.readFileSync(source);
-  const digest = crypto.createHash("sha256").update(code).digest("hex");
+  // Build identity includes the compiler contract: an older source-only cache
+  // can contain a console-subsystem executable with identical source bytes.
+  const digest = crypto.createHash("sha256").update("winexe:x64:optimize+\0").update(code).digest("hex");
   const target = path.join(directory, digest), output = path.join(target, "shapes.inc Bridge Job.exe");
   const ready = () => {
     try { const value = fs.lstatSync(output); return value.isFile() && !value.isSymbolicLink() && value.size > 0; }
@@ -28,7 +30,7 @@ function ensureWindowsJobHost({ source = path.resolve(__dirname, "../scripts/win
     const input = path.join(work, "JobHost.cs"), executable = path.join(work, "Job.exe");
     fs.writeFileSync(input, code, { flag: "wx", mode: 0o600 });
     const compiler = path.win32.join(systemRoot, "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe");
-    const result = compile(compiler, ["/nologo", "/optimize+", "/platform:x64", "/target:exe", `/out:${executable}`, input],
+    const result = compile(compiler, ["/nologo", "/optimize+", "/platform:x64", "/target:winexe", `/out:${executable}`, input],
       { encoding: "utf8", windowsHide: true, shell: false, timeout: 20000, maxBuffer: 65536 });
     if (result.error || result.status !== 0 || !fs.existsSync(executable)) throw new Error("The Windows process supervisor could not be built. Install the Windows .NET Framework and retry.");
     try { fs.renameSync(executable, output); }

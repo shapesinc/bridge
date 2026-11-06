@@ -51,11 +51,11 @@ jobs:
           $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
           $output = Join-Path $env:RUNNER_TEMP 'shapes.inc Bridge Job.exe'
           $source = Join-Path $PWD 'scripts\windows\JobHost.cs'
-          & $compiler /nologo /target:exe /platform:x64 "/out:$output" $source
+          & $compiler /nologo /optimize+ /target:winexe /platform:x64 "/out:$output" $source
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "SHAPES_TEST_JOB_HOST=$output" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Verify native process ownership and durable connection transport
-        run: node --test --test-concurrency=1 test/owned-process.test.js test/account-revocation.test.js test/embedded-host.test.js test/embedded-startup-runtime.test.js test/windows-job.test.js test/windows-standalone-native.test.js test/windows-owned-native.test.js test/windows-command-native.test.js test/windows-cleanup-native.test.js test/windows-command-jobs-native.test.js test/windows-native.test.js test/command-jobs.test.js test/runtime.test.js
+        run: node --test --test-concurrency=1 test/owned-process.test.js test/account-revocation.test.js test/embedded-host.test.js test/embedded-startup-runtime.test.js test/windows-job.test.js test/windows-standalone-native.test.js test/windows-launch-native.test.js test/windows-owned-native.test.js test/windows-command-native.test.js test/windows-cleanup-native.test.js test/windows-command-jobs-native.test.js test/windows-native.test.js test/command-jobs.test.js test/runtime.test.js
       - name: Compile Windows computer helper and throwaway fixture
         id: computer
         if: ${{ !cancelled() }}

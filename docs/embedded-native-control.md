@@ -33,6 +33,19 @@ Controller disposal remains true shutdown: closing its private stdin, signalling
 
 The durable Windows host additionally calls private `resumeSavedConnection()` at startup. It requires an explicit `resume_on_startup:true` marker written by completed native approval or a verified owner resume, an unpaused/unrevoked embedded config, matching API and credential/device binding, and no pending pairing. This operation is absent from the RPC allowlist and leaves `account` unset. Device heartbeat authenticates the existing credential before the server publishes a fresh endpoint; account-bound pairing, permission and personal-agent operations still require independently verified foreground identity. Logout, failed verification, account switch and membership removal clear startup eligibility without changing the established explicit-reopen consent. Configurations from before this marker require a successful verified attachment once after upgrade. Host idle lifetime consults owned runtime liveness separately from the private foreground status. These are reusable controller/host primitives; this change does not make the macOS Mach-service host launch at OS sign-in.
 
+The Windows Job supervisor is compiled as x64 `/target:winexe`, including the
+standalone source cache. Task Scheduler launches it independently of the app's
+`windowsHide` setting; a console-subsystem wrapper would leave a terminal open.
+An ordinary launch owns no console and supplies inheritable NUL handles only for
+missing standard streams. Existing pipes, output/cleanup receipts and Job
+cancellation retain their contracts. Explicit `--console` still requests a new
+console for an interactive provider child. The compiler contract is part of the
+cache identity, so an older console binary is never reused for the same source.
+The Windows fixture probes actual console attachment after an ordinary native
+launch and uses the old console build as a positive control; installed Scheduler
+and provider interaction remain separate acceptance checks. This packaging fix
+adds no AI calls or context: incremental provider cost is $0/day.
+
 ### Durable account revocation
 
 The installed finite command `bin/embedded-state.js read-revocation|record-revocation`

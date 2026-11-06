@@ -77,6 +77,23 @@ class JobHost {
         try { lock (diagnosticLock) File.AppendAllText(diagnosticPath, DateTime.UtcNow.ToString("O") + " " + message + Environment.NewLine); } catch {}
     }
 
+    static IntPtr StandardHandle(int identifier, uint access, System.Collections.Generic.List<IntPtr> owned) {
+        IntPtr handle = GetStdHandle(identifier); uint flags;
+        if (handle != IntPtr.Zero && handle != new IntPtr(-1) && GetHandleInformation(handle, out flags)) return handle;
+        // A GUI-subsystem supervisor launched by Task Scheduler has no console
+        // or inherited stdio. Supply valid NUL handles only for missing slots;
+        // redirected caller pipes remain borrowed and unchanged.
+        var attributes = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), inherit = true };
+        handle = CreateFile("NUL", access, 3, ref attributes, 3, 0, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) throw new InvalidOperationException("Cannot open child stdio.");
+        owned.Add(handle); return handle;
+    }
+
+    static void CloseOwnedHandles(System.Collections.Generic.List<IntPtr> handles) {
+        foreach (IntPtr handle in handles) CloseHandle(handle);
+        handles.Clear();
+    }
+
     static bool InheritedOutputPipe(int fd, out IntPtr handle) {
         handle = IntPtr.Zero;
         StartupInfoPointers info; GetStartupInfoPointers(out info);
@@ -231,6 +248,7 @@ class JobHost {
 
     static int Main(string[] args) {
         IntPtr parent = IntPtr.Zero, childInput = IntPtr.Zero, ownedJob = IntPtr.Zero, receipt = IntPtr.Zero;
+        var standardHandles = new System.Collections.Generic.List<IntPtr>();
         try {
             int index = 0, outputFd = -1, controlFd = -1, receiptFd = -1; bool console = false, ready = false, commandString = false, releaseOnSuccess = false;
             if (args.Length > 1 && args[0] == "--parent-pid") {
@@ -277,7 +295,12 @@ class JobHost {
             if (commandString) command.Append(Quote(executable)).Append(" /d /s /c \"").Append(args[index + 1]).Append('"');
             else for (int i = index; i < args.Length; i++) { if (i != index) command.Append(' '); command.Append(Quote(args[i])); }
             var startup = new StartupInfo(); startup.cb = Marshal.SizeOf(typeof(StartupInfo));
-            if (!console) { startup.flags = 0x100; startup.stdin = GetStdHandle(-10); startup.stdout = GetStdHandle(-11); startup.stderr = GetStdHandle(-12); }
+            if (!console) {
+                startup.flags = 0x100;
+                startup.stdin = StandardHandle(-10, 0x80000000, standardHandles);
+                startup.stdout = StandardHandle(-11, 0x40000000, standardHandles);
+                startup.stderr = StandardHandle(-12, 0x40000000, standardHandles);
+            }
             if (releaseOnSuccess) {
                 startup.stdout = captureOutput;
                 if (!SetHandleInformation(startup.stdin, 1, 0)) return 70; // HANDLE_FLAG_INHERIT
@@ -290,6 +313,7 @@ class JobHost {
             if (control != null) {
                 if (WaitForSingleObject(parent, 0) != 258 || control.cancelled.WaitOne(0) || !CreateInJob(executable, command, job, startup, out child)) return 71;
             } else if (!CreateProcess(executable, command, IntPtr.Zero, IntPtr.Zero, true, console ? 0x10u : 0x08000000u, IntPtr.Zero, Environment.CurrentDirectory, ref startup, out child)) return 71;
+            CloseOwnedHandles(standardHandles);
             if (childInput != IntPtr.Zero) { CloseHandle(childInput); childInput = IntPtr.Zero; }
             if (ready) {
                 if (releaseOnSuccess) { if (!WriteReady(captureOutput)) return 70; }
@@ -320,6 +344,6 @@ class JobHost {
             GC.KeepAlive(job);
             return (int)code;
         } catch { return 70; }
-        finally { if (ownedJob != IntPtr.Zero) CloseHandle(ownedJob); if (childInput != IntPtr.Zero) CloseHandle(childInput); if (parent != IntPtr.Zero) CloseHandle(parent); }
+        finally { CloseOwnedHandles(standardHandles); if (ownedJob != IntPtr.Zero) CloseHandle(ownedJob); if (childInput != IntPtr.Zero) CloseHandle(childInput); if (parent != IntPtr.Zero) CloseHandle(parent); }
     }
 }

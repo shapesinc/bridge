@@ -12,6 +12,9 @@ test("standalone Windows source compiles and launches owned commands without app
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-job-standalone-"));
   t.after(() => fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
   const executable = ensureWindowsJobHost({ directory });
+  const bytes = fs.readFileSync(executable), pe = bytes.readUInt32LE(60);
+  assert.equal(bytes.readUInt32LE(pe), 0x4550);
+  assert.equal(bytes.readUInt16LE(pe + 24 + 68), 2, "standalone cache must also contain the headless GUI-subsystem supervisor");
   const { stdout } = await promisify(execFile)(executable, ["--parent-pid", String(process.pid), "--", process.execPath, "-e", "process.stdout.write('standalone 🌲')"], { encoding: "utf8", timeout: 5000 });
   assert.equal(stdout, "standalone 🌲");
   assert.equal(ensureWindowsJobHost({ directory }), executable);
