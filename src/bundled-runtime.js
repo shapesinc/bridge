@@ -60,7 +60,12 @@ function launchConfiguration(gateway) {
     "model_providers.shapes.stream_max_retries": 0,
     "model_providers.shapes.http_headers.Accept": "text/event-stream",
     web_search: "disabled", check_for_update_on_startup: false, "analytics.enabled": false,
-    model_auto_compact_token_limit: 24000, model_reasoning_summary: "auto",
+    // Leave useful headroom above the runtime/repository instructions. This is
+    // an early threshold calibrated to the gateway's 256 KiB request envelope,
+    // not the provider's advertised context window. Byte overflow still uses
+    // the gateway's context_length_exceeded rejection boundary; the pinned
+    // runtime reports a terminal error rather than silently replaying the task.
+    model_auto_compact_token_limit: 32000, model_reasoning_summary: "auto",
     "shell_environment_policy.ignore_default_excludes": true,
     "shell_environment_policy.exclude": ["SHAPES_RUNTIME_TOKEN"],
     "sandbox_workspace_write.writable_roots": [],

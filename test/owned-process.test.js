@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { spawnOwned, signalOwned, windowsArguments, jobHostPath } = require("../src/owned-process");
+const { spawnOwned, signalOwned, windowsArguments, jobHostPath, ownedCleanup, waitForOwnedCleanup, disposeOwned } = require("../src/owned-process");
 const { windowsCandidates } = require("../src/agents");
 const { bundledWindowsTunnel } = require("../src/cloudflared");
 
@@ -66,4 +66,52 @@ test("installed Windows host requires its pinned bundled tunnel without runtime 
   assert.equal(bundledWindowsTunnel({ ...options, exists: () => true }), "C:\\app\\computer-connection\\cloudflared.exe");
   assert.throws(() => bundledWindowsTunnel({ ...options, exists: (file) => file.endsWith("Job.exe") }), /tunnel helper is missing/);
   assert.equal(bundledWindowsTunnel({ ...options, exists: () => false }), null);
+});
+
+
+test("cleanup protocol reserves private pipes without replacing provider stdin or command stdout", async () => {
+  const { EventEmitter } = require("node:events");
+  for (const handoff of [false, true]) {
+    const child = new EventEmitter();
+    Object.assign(child, { pid: 123, exitCode: null, signalCode: null, kill: () => assert.fail("graceful cancellation must use private control") });
+    child.stdio = Array.from({ length: 6 }, () => new EventEmitter());
+    child.stdin = child.stdio[0]; child.stdout = handoff ? null : child.stdio[1]; child.stderr = child.stdio[2];
+    const messages = []; child.stdio[4].end = (message) => messages.push(message);
+    let args;
+    spawnOwned("C:\\node.exe", [], { cleanupReceipt: true, releaseOnSuccess: handoff, stdio: ["pipe", "pipe", "pipe"] },
+      { platform: "win32", host: "C:\\Job.exe", exists: () => true, spawnProcess: (...values) => { args = values; return child; } });
+    assert.deepEqual(args[2].stdio, handoff ? ["pipe", "ignore", "pipe", "pipe", "pipe", "pipe"] : ["pipe", "pipe", "pipe", "ignore", "pipe", "pipe"]);
+    assert.equal(child.stdin, child.stdio[0]); assert.equal(child.stdout, child.stdio[handoff ? 3 : 1]);
+    signalOwned(child, "SIGTERM", { platform: "win32" }); signalOwned(child, "SIGTERM", { platform: "win32" });
+    assert.deepEqual(messages, ["cancel\n"]);
+    assert.equal(ownedCleanup(child), false);
+    child.stdio[5].emit("data", Buffer.from("job-empty\n"));
+    assert.equal(ownedCleanup(child), false, "a partial receipt is not final");
+    child.stdio[5].emit("end");
+    assert.equal(await waitForOwnedCleanup(child), true);
+  }
+});
+
+test("missing, malformed, oversized and high-bit cleanup receipts never confirm a Job", async () => {
+  const { EventEmitter } = require("node:events");
+  for (const bytes of [Buffer.alloc(0), Buffer.from("job-empty\nextra"), Buffer.from("no"), Buffer.from([0xea, ...Buffer.from("ob-empty\n")])]) {
+    const child = new EventEmitter(); child.stdio = Array.from({ length: 6 }, () => new EventEmitter());
+    spawnOwned("C:\\node.exe", [], { cleanupReceipt: true, stdio: ["pipe", "pipe", "pipe"] },
+      { platform: "win32", host: "C:\\Job.exe", exists: () => true, spawnProcess: () => child });
+    child.stdio[5].emit("data", bytes); child.stdio[5].emit("end");
+    assert.equal(await waitForOwnedCleanup(child), false); assert.equal(ownedCleanup(child), false);
+  }
+});
+
+
+test("bounded disposal closes only private channels and cannot accept a late receipt", async () => {
+  const { EventEmitter } = require("node:events");
+  const child = new EventEmitter(), destroyed = [];
+  child.stdio = Array.from({ length: 6 }, (_, index) => Object.assign(new EventEmitter(), { destroy: () => destroyed.push(index) }));
+  spawnOwned("C:\\node.exe", [], { cleanupReceipt: true, stdio: ["pipe", "pipe", "pipe"] },
+    { platform: "win32", host: "C:\\Job.exe", exists: () => true, spawnProcess: () => child });
+  disposeOwned(child);
+  assert.equal(await waitForOwnedCleanup(child), false); assert.deepEqual(destroyed, [4, 5]);
+  child.stdio[5].emit("data", Buffer.from("job-empty\n")); child.stdio[5].emit("end");
+  assert.equal(ownedCleanup(child), false);
 });

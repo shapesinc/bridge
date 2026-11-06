@@ -3,7 +3,8 @@
 const { randomUUID } = require("node:crypto");
 const { StringDecoder } = require("node:string_decoder");
 const { localEnvironment } = require("./local-workspace");
-const { spawnOwned, signalOwned } = require("./owned-process");
+const { spawnOwned } = require("./owned-process");
+const { closeProcessGroup } = require("./process-close");
 
 function deferred() {
   let resolve, reject;
@@ -22,7 +23,7 @@ function normalizedItem(item) {
 // The caller owns user authentication, presentation and response validation.
 // This transport never converts model text into approvals or answers a request.
 function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent = () => {},
-  resumeThreadId, launchArgs, environment, model, modelProvider, usageBaseline,
+  resumeThreadId, launchArgs, environment, model, modelProvider, usageBaseline, requiredAccountType,
   onServerRequest, onRequestResolved = () => {}, onDiagnostic = () => {}, onLifecycle = () => {},
   startupTimeoutMs = 30000, requestTimeoutMs = 30000, shutdownTimeoutMs = 1500,
   maxLineBytes = 1024 * 1024 } = {}) {
@@ -33,7 +34,7 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
   let waitingTurn, continuing = false;
   let phase = "not_started";
   const decoder = new StringDecoder("utf8");
-  const completion = deferred(), exit = deferred();
+  const completion = deferred();
   const calls = new Map(), pending = new Map(), completedItems = new Set();
   const asyncQuestions = new Map(), answeredQuestions = [];
   let exitInfo = { exitCode: null, signal: null };
@@ -59,10 +60,6 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
   function rejectCalls(error) {
     for (const call of calls.values()) { clearTimeout(call.timer); call.reject(error); }
     calls.clear();
-  }
-  function killGroup(signal) {
-    if (!child?.pid) return;
-    signalOwned(child, signal);
   }
   function fail(error) {
     if (fatalError || terminal) return;
@@ -232,18 +229,15 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
       clearTimeout(startupTimer);
       rejectCalls(new Error("Codex app-server session closed."));
       clearPending("closed");
-      if (!child) return;
+      if (!child) return { ...exitInfo, processExited: true };
       if (!terminal && !fatalError) {
         fatalError = new Error("Codex app-server session closed before turn completion.");
         completion.reject(fatalError);
       }
       child.stdin.end();
-      // A dedicated process group includes MCP processes started by this session.
-      killGroup("SIGTERM");
-      const escalation = setTimeout(() => killGroup("SIGKILL"), shutdownTimeoutMs);
-      await exit.promise;
-      clearTimeout(escalation);
-      killGroup("SIGKILL");
+      const result = await closeProcessGroup(child, { graceMs: shutdownTimeoutMs });
+      exitInfo = { exitCode: result.exitCode, signal: result.signal };
+      return result;
     });
     return closing;
   }
@@ -254,18 +248,17 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
     started = true;
     enterPhase("initialize");
     child = spawnOwned(executable, launchArgs || ["app-server", "--listen", "stdio://", "-c", "sandbox_workspace_write.writable_roots=[]"],
-      { cwd, env: environment || localEnvironment(), detached: true, stdio: ["pipe", "pipe", "pipe"] });
+      { cwd, env: environment || localEnvironment(), detached: true, cleanupReceipt: true, stdio: ["pipe", "pipe", "pipe"] });
     child.stdin.on("error", fail);
     child.stdout.on("data", (chunk) => { try { consume(chunk); } catch (error) { fail(error); } });
     child.stderr.on("data", (chunk) => callback(onDiagnostic, "stderr", chunk));
-    child.once("error", (error) => { exited = true; exit.resolve(exitInfo); fail(error); });
+    child.once("error", (error) => { exited = true; fail(error); });
     child.once("close", (code, signal) => {
       exited = true; exitInfo = { exitCode: code, signal };
       try {
         lineBuffer += decoder.end();
         if (lineBuffer.trim()) message(JSON.parse(lineBuffer));
       } catch (error) { fail(error); }
-      exit.resolve(exitInfo);
       if (!terminal && !fatalError) fail(new Error("Codex app-server exited before turn completion."));
     });
     startupTimer = setTimeout(() => fail(timeoutError()), startupTimeoutMs);
@@ -273,6 +266,10 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
       await rpc("initialize", { clientInfo: { name: "shapes_bridge", title: "shapes.inc", version: "0.1.0" },
         capabilities: { experimentalApi: true, extensions: { "openai/form": {} } } });
       write({ method: "initialized", params: {} });
+      if (requiredAccountType) {
+        const account = await rpc("account/read", { refreshToken: false });
+        if (account?.account?.type !== requiredAccountType) throw new Error("The selected personal account is no longer signed in.");
+      }
       enterPhase("thread_start");
       // Granting a chat this computer is the consent: no per-command approval
       // prompts. Writes run with full access; read-only stays sandboxed.
@@ -292,7 +289,8 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
       clearTimeout(startupTimer);
       enterPhase("running");
       const result = await completion.promise;
-      await close();
+      const cleanup = await close();
+      if (!cleanup.processExited) throw new Error("The local agent's exit could not be confirmed.");
       return { ...result, ...exitInfo };
     } catch (error) {
       fail(error);
@@ -339,8 +337,10 @@ function createCodexRpcSession({ startupRetries = 0, onLifecycle = () => {}, ...
           // initialize cannot dispatch a task. All later failures are ambiguous
           // and MUST NOT replay a prompt, tool action, or paid model request.
           if (closed || attempt > startupRetries || error.code !== "CODEX_RPC_TIMEOUT" || error.phase !== "initialize") throw error;
-          await session.close();
-          if (closed) throw error;
+          const cleanup = await session.close();
+          // A bounded shutdown can report an unconfirmed exit. Keep that
+          // runtime's receipt; never start another process while it may live.
+          if (closed || !cleanup.processExited) throw error;
           attempt++;
           session = create();
         }

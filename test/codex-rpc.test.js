@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { createCodexRpcSession } = require("../src/codex-rpc");
+const { spawn } = require("node:child_process");
 
 function fixture(t, body, options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "shapes-codex-rpc-"));
@@ -38,6 +39,39 @@ async function until(predicate) {
   }
   throw new Error("Expected protocol event was not received.");
 }
+
+test("bundled personal auth is rechecked before any thread or inference with no provider fallback", async t => {
+  for (const account of [null, { type: "apiKey" }]) {
+    const f = fixture(t, `if(m.method==='account/read')reply(m,{account:${JSON.stringify(account)}});`, { requiredAccountType: "chatgpt" });
+    await assert.rejects(f.session.start("Never sent to a provider"), /no longer signed in/);
+    assert.deepEqual(f.input().map(item => item.method), ["initialize", "initialized", "account/read"]);
+    assert.throws(() => process.kill(f.session.child.pid, 0), { code: "ESRCH" });
+  }
+});
+
+test("RPC cancellation settles despite escaped inherited pipes and preserves unrelated processes", async (t) => {
+  const unrelated = spawn(process.execPath, ["-e", "setTimeout(()=>{},12000)"], { detached: true, stdio: "ignore" });
+  let escaped;
+  t.after(() => {
+    for (const pid of [escaped, unrelated.pid]) if (pid) try { process.kill(-pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+  });
+  const f = fixture(t, `
+    if(m.method==='turn/start'){
+      const child=require('node:child_process').spawn(process.execPath,['-e','setTimeout(()=>{},12000)'],{detached:true,stdio:['ignore',1,2]});
+      child.unref();fs.writeFileSync('escaped.pid',String(child.pid));reply(m,{turn:{id:'turn-1',status:'inProgress'}});
+    }
+  `);
+  const running = f.session.start("Pending fixture turn"); running.catch(() => {});
+  await until(() => fs.existsSync(path.join(f.dir, "escaped.pid")));
+  escaped = Number(fs.readFileSync(path.join(f.dir, "escaped.pid"), "utf8"));
+  const started = Date.now(), cleanup = await f.session.close();
+  await assert.rejects(running, /closed before turn completion/);
+  assert.equal(cleanup.processExited, true);
+  assert.ok(Date.now() - started < 2000, "Pipe inheritance cannot extend cancellation beyond shutdown");
+  assert.doesNotThrow(() => process.kill(unrelated.pid, 0));
+  assert.doesNotThrow(() => process.kill(escaped, 0), "Escaped daemon termination is not claimed");
+  assert.throws(() => process.kill(f.session.child.pid, 0), { code: "ESRCH" });
+});
 
 test("native browser request waits for an explicit response and resumes the same turn", async (t) => {
   const f = fixture(t, `

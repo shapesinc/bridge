@@ -30,20 +30,20 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
-const { commandShell, elevationStatus } = require("./command-shell");
-const { spawnOwned, signalOwned } = require("./owned-process");
+const { elevationStatus } = require("./command-shell");
 const commandJobs = require("./command-jobs");
 const { URL } = require("node:url");
 const { startJob, publicStatus, listJobs, cancelJob, respondJob } = require("./codex");
 const { listAgents } = require("./agents");
-const { localEnvironment, expandHome } = require("./local-workspace");
+const { expandHome } = require("./local-workspace");
 const { bundledRuntime } = require("./bundled-runtime");
 const { createComputerControl } = require("./computer");
 const { createSession, startSessionTurn, readSession, sessionEvents } = require("./sessions");
+const { runCommand: startCommandProcess } = require("./command-process");
+const { commandStatus, cancelCommand } = require("./commands");
 
 const MAX_OUTPUT = 20000;
 const MAX_FILE_READ = 100000;
-const MAX_COMMAND_BUFFER = 4 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES = 2000;
 
 const CAPABILITIES = {
@@ -126,120 +126,11 @@ function readBody(req, limit = 50 * 1024 * 1024) {
   });
 }
 
-function runCommand({ cmd, cwd, timeout, shell, signal }) {
-  const seconds = Math.max(1, Math.min(Number(timeout) || 60, 600));
-  // Expand a leading ~ so home-relative working dirs work, and fail loudly with
-  // a clear message when the dir is missing — otherwise a bad cwd makes exec
-  // fail at spawn time and return a bare, confusing exit_code -1 with no output.
-  const workdir = cwd ? expandHome(cwd) : undefined;
-  if (workdir !== undefined) {
-    let ok = false;
-    try {
-      ok = fs.statSync(workdir).isDirectory();
-    } catch {
-      ok = false;
-    }
-    if (!ok) {
-      return Promise.resolve({
-        exit_code: -1,
-        stdout: "",
-        stderr: `cwd does not exist or is not a directory: ${workdir}`,
-      });
-    }
-  }
-  return new Promise((resolve) => {
-    const buffers = { stdout: [], stderr: [] }, sizes = { stdout: 0, stderr: 0 };
-    let child, timer, escalation, settlement, transport, stopped, handoffError, finished = false, forceStopped = false, handoff = false;
-    const outputEnded = { stdout: false, stderr: false };
-    const abort = () => stop("command cancelled");
-    const kill = (signal) => {
-      if (!child?.pid) return;
-      if (signal === "SIGKILL") {
-        if (forceStopped) return;
-        forceStopped = true;
-      }
-      try {
-        if (process.platform === "win32") signalOwned(child, signal);
+// Keep the public Promise contract used by independent command supervisors.
+// The reusable process primitive also exposes cancellation and live output.
+function runCommand(body) { return startCommandProcess(body).result; }
 
-        else process.kill(-child.pid, signal);
-      } catch (error) { if (error.code !== "ESRCH") throw error; }
-    };
-    const stop = (reason) => {
-      if (stopped || finished || handoff) return;
-      stopped = reason;
-      // Terminate the command's process group, not only /bin/sh. Descendants
-      // that deliberately create another group are outside this boundary.
-      kill("SIGTERM");
-      escalation = setTimeout(() => {
-        kill("SIGKILL");
-        // A detached descendant can inherit the pipes after leaving the group.
-        // It must not keep an HTTP request open beyond the termination grace.
-        child?.stdout?.destroy();
-        child?.stderr?.destroy();
-        finish(null);
-      }, 1000);
-    };
-    const finish = (code, error) => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      clearTimeout(escalation);
-      clearTimeout(settlement);
-      signal?.removeEventListener("abort", abort);
-      child?.stdin?.destroy();
-      // Children may have redirected their pipes before the shell exited.
-      if (stopped) kill("SIGKILL");
-      const stdout = Buffer.concat(buffers.stdout).toString("utf8");
-      let stderr = Buffer.concat(buffers.stderr).toString("utf8");
-      const reason = stopped || error?.message;
-      if (reason) stderr += (stderr ? "\n" : "") + reason;
-      try { transport?.cleanup(); } catch { /* Windows can briefly retain a script handle. */ }
-      resolve({ exit_code: stopped || error || code === null ? -1 : code,
-        stdout: tail(stdout), stderr: tail(stderr), shell: transport?.shell || shell,
-        output_truncated: stdout.length > MAX_OUTPUT || stderr.length > MAX_OUTPUT,
-        ...(stopped ? { termination_reason: stopped } : {}) });
-    };
-    const capture = (name, chunk) => {
-      if (finished) return;
-      const remaining = MAX_COMMAND_BUFFER - sizes[name];
-      if (remaining > 0) buffers[name].push(chunk.subarray(0, remaining));
-      sizes[name] += chunk.length;
-      if (sizes[name] > MAX_COMMAND_BUFFER) stop(`${name} exceeded the command output limit`);
-    };
-    const releaseAfterOutput = (name) => {
-      outputEnded[name] = true;
-      if (!outputEnded.stdout || !outputEnded.stderr || stopped || finished || handoff || child.exitCode !== null || child.signalCode !== null) return;
-      // A live successful helper closes output before waiting for release. EOF
-      // can also precede a failed helper's exit event, so its eventual nonzero
-      // status remains authoritative even if this control write encounters EPIPE.
-      // Commit settlement before sending release; a later cancel cannot claim
-      // that intentionally detached background work was stopped. Still await
-      // the helper's exit receipt, with bounded failure if handoff cannot finish.
-      handoff = true;
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
-      settlement = setTimeout(() => { kill("SIGKILL"); finish(null, new Error("Windows process ownership handoff did not finish")); }, 5000);
-      child.stdin.end("release\n");
-    };
-    try {
-      if (signal?.aborted) { stopped = "command cancelled"; finish(null); return; }
-      transport = commandShell(cmd, shell);
-      child = spawnOwned(transport.executable, transport.args, { cwd: workdir, env: localEnvironment(), windowsCommand: transport.windowsCommand || false, releaseOnSuccess: true,
-        detached: process.platform !== "win32", windowsHide: true, stdio: [process.platform === "win32" ? "pipe" : "ignore", "pipe", "pipe"] });
-      child.stdout.on("data", (chunk) => capture("stdout", chunk));
-      child.stderr.on("data", (chunk) => capture("stderr", chunk));
-      if (process.platform === "win32") {
-        child.stdout.once("end", () => releaseAfterOutput("stdout"));
-        child.stderr.once("end", () => releaseAfterOutput("stderr"));
-        child.stdin.on("error", () => { handoffError = new Error("Windows process ownership handoff failed"); });
-      }
-      child.once("error", (error) => finish(null, error));
-      child.once("close", (code) => finish(code, code === 0 ? handoffError : undefined));
-      timer = setTimeout(() => stop(`timed out after ${seconds}s`), seconds * 1000);
-      signal?.addEventListener("abort", abort, { once: true });
-    } catch (error) { finish(null, error); }
-  });
-}
+
 
 function openTarget(target) {
   const t = expandHome(target);
@@ -254,7 +145,7 @@ function openTarget(target) {
   return { opened: t };
 }
 
-function sysinfo() {
+async function sysinfo(readElevation = elevationStatus) {
   const home = os.homedir();
   let disk = null;
   try {
@@ -276,7 +167,7 @@ function sysinfo() {
     bridge_version: require("../package.json").version,
     command_protocol: 1,
     default_shell: process.platform === "win32" ? "powershell" : "sh",
-    ...elevationStatus(),
+    ...await readElevation(),
     cpu_count: os.cpus().length,
     mem_gb: Math.round((os.totalmem() / 1e9) * 10) / 10,
     home,
@@ -290,7 +181,7 @@ function sysinfo() {
  * @param {{port:number, token:string}} opts
  * @returns {Promise<import('node:http').Server>}
  */
-function startServer({ port, token, computerControl = createComputerControl() }) {
+function startServer({ port, token, computerControl = createComputerControl(), platform = process.platform, readElevation = elevationStatus }) {
   const authed = (req) => {
     const provided = req.headers["x-token"];
     if (!token || typeof provided !== "string") return false;
@@ -325,11 +216,21 @@ function startServer({ port, token, computerControl = createComputerControl() })
 
     try {
       if (route === "/commands/start" && method === "POST") {
-        try { return sendJson(res, 202, await commandJobs.start(await readBody(req, 500000))); }
+        try {
+          const body = await readBody(req, 500000);
+          if (body?.scope_id !== undefined) return sendJson(res, 409, {
+            error: "Discover /sysinfo command_protocol before starting a new command.", error_type: "command_protocol_mismatch" });
+          return sendJson(res, 202, await commandJobs.start(body));
+        }
         catch (error) { return sendJson(res, error.statusCode || 500, { error: error.message, error_type: error.errorType || "command_start_failed", ...(error.jobId ? { job_id: error.jobId } : {}) }); }
       }
       if (route === "/commands/status" && method === "GET") {
         try {
+          // Existing v0 receipts remain readable after a normal helper upgrade.
+          if (url.searchParams.has("scope_id")) {
+            if ([...url.searchParams.keys()].some((key) => !["command_id", "scope_id"].includes(key))) throw new Error("Unexpected legacy command argument.");
+            return sendJson(res, 200, commandStatus(Object.fromEntries(url.searchParams)));
+          }
           if ([...url.searchParams.keys()].some((key) => !["job_id", "scope", "wait"].includes(key))) throw new Error("Unexpected command status argument.");
           const id = url.searchParams.get("job_id"), scope = url.searchParams.get("scope");
           const deadline = Date.now() + (url.searchParams.get("wait") === "0" ? 0 : 15000);
@@ -345,6 +246,7 @@ function startServer({ port, token, computerControl = createComputerControl() })
       if (route === "/commands/cancel" && method === "POST") {
         try {
           const body = await readBody(req, 4096);
+          if (body?.scope_id !== undefined) return sendJson(res, 200, cancelCommand(body));
           if (!body || Object.keys(body).some((key) => !["job_id", "scope"].includes(key))) throw new Error("Supply only job_id and scope.");
           return sendJson(res, 200, commandJobs.cancel(body.job_id, body.scope));
         } catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message, error_type: error.errorType }); }
@@ -464,7 +366,7 @@ function startServer({ port, token, computerControl = createComputerControl() })
 
       if (route === "/sysinfo" && method === "GET") {
         log("sysinfo requested");
-        return sendJson(res, 200, sysinfo());
+        return sendJson(res, 200, await sysinfo(readElevation));
       }
 
       if (route === "/run" && method === "POST") {
@@ -476,7 +378,7 @@ function startServer({ port, token, computerControl = createComputerControl() })
         }
         log(`RUN: ${body.cmd}   (cwd=${body.cwd || process.cwd()})`);
         // Cancellation handles remain private to the runtime, never remote JSON.
-        const result = await commandJobs.mutation(() => runCommand({ cmd: body.cmd, cwd: body.cwd, timeout: body.timeout, shell: body.shell }));
+        const { stopped, cleanup_confirmed, ...result } = await commandJobs.mutation(() => runCommand({ cmd: body.cmd, cwd: body.cwd, timeout: body.timeout, shell: body.shell }));
         return sendJson(res, 200, result);
       }
 

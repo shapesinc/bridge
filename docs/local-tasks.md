@@ -68,12 +68,14 @@ Shell aliases/functions, arbitrary nvm/asdf installations, and environment
 variables created only by startup scripts are not loaded. Explicit PATH and
 executable overrides remain available.
 
-Process-group cancellation does not guarantee termination of arbitrary detached
-daemons that deliberately escape the command's group. Such a process can keep
-running and produce side effects after the timeout; the receipt guarantees a
-bounded wait, not rollback or containment of escaped processes. Intentional
-background commands and the existing HTTP-disconnect behavior are unchanged.
-Windows retains its existing process termination scope.
+Process-group cancellation also captures descendant groups that still have
+observable ancestry at Stop/timeout. Already orphaned daemons can remain outside
+that boundary and produce later side effects; this is not rollback or general
+process containment. Intentional background commands and the existing legacy
+HTTP-disconnect behavior are unchanged. [Scoped command start/status/cancel](commands.md)
+provide explicit cancellation instead of relying on closing an HTTP request.
+Windows uses the owned Job and independently confirmed cleanup receipt described
+in the command contract; uncertain termination retains its mutation fence.
 
 No AI calls or prompt context were added. Incremental recurring provider cost is
 **$0/day** at every traffic level; the local replay fixtures also incur no

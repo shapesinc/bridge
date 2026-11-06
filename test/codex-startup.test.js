@@ -86,3 +86,35 @@ test("closing during initialization prevents a retry", async (t) => {
   assert.ok(f.read().filter((m) => m.method === "initialize").length <= 1);
   assert.equal(f.read().some((m) => m.method === "turn/start"), false);
 });
+
+test("an unconfirmed first runtime exit prevents initialization retry", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-unconfirmed-startup-"));
+  const executable = path.join(directory, "app-server"), launches = path.join(directory, "launches");
+  fs.writeFileSync(executable, `#!${process.execPath}
+require('node:fs').appendFileSync(${JSON.stringify(launches)}, String(process.pid)+'\\n');
+process.stdin.resume();setInterval(()=>{},1000);
+`, { mode: 0o700 });
+  const originalKill = process.kill;
+  const session = createCodexRpcSession({ executable, cwd: directory, startupRetries: 1,
+    startupTimeoutMs: 500, shutdownTimeoutMs: 30 });
+  t.after(async () => {
+    process.kill = originalKill;
+    const child = session.child;
+    if (child?.pid && child.exitCode == null && child.signalCode == null) {
+      child.ref();
+      const exited = require("node:events").once(child, "exit");
+      originalKill(-child.pid, "SIGKILL");
+      await exited;
+    }
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  const running = session.start("Do not overlap runtimes");
+  process.kill = (pid, signal) => {
+    if (pid === -session.child?.pid) throw Object.assign(new Error("fixture signal failure"), { code: "EPERM" });
+    return originalKill(pid, signal);
+  };
+  await assert.rejects(running, { code: "CODEX_RPC_TIMEOUT", phase: "initialize" });
+  assert.equal((await session.close()).processExited, false);
+  assert.equal(fs.readFileSync(launches, "utf8").trim().split("\n").length, 1);
+  assert.doesNotThrow(() => originalKill(session.child.pid, 0));
+});

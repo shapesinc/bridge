@@ -3,7 +3,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
 const http = require("node:http"), crypto = require("node:crypto");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const { once } = require("node:events");
 const { createEmbeddedController } = require("../src/embedded");
 const { createEmbeddedHost } = require("../src/embedded-host");
@@ -11,6 +11,7 @@ const { createEmbeddedProcess } = require("../src/embedded-process");
 const { spawnOwned } = require("../src/owned-process");
 const { readState, writeState } = require("../src/state");
 const { parseRequest } = require("../src/embedded-protocol");
+const { createAccountRevocation } = require("../src/account-revocation");
 
 const DEVICE = "11111111-1111-4111-8111-111111111111", TOKEN = `sbd_${DEVICE}.${"c".repeat(43)}`;
 const available = process.platform !== "win32" || Boolean(process.env.SHAPES_TEST_JOB_HOST);
@@ -96,7 +97,7 @@ async function fixture(t) {
     if (previous === undefined) delete process.env.SHAPES_BRIDGE_HOME; else process.env.SHAPES_BRIDGE_HOME = previous;
     fs.rmSync(directory, { recursive: true, force: true });
   });
-  return { seed, launch, requests, accepted, offline, pids,
+  return { directory, seed, launch, requests, accepted, offline, pids,
     revoke: () => { credentialValid = false; }, outage: (value) => { unavailable = value; } };
 }
 
@@ -134,6 +135,47 @@ test("fresh host resumes established access with device authority and leaves for
   assert.equal(second.runtime.pid(), resumedPid, "same verified owner must adopt without terminating background work");
   assert.equal(f.offline.length, offlineBeforeAdoption);
   assert.equal(f.accepted.at(-1).token, resumedEndpoint.token);
+});
+
+test("offline clear prevents next startup; fresh proof restores existing grants and live clear stops owned command work", { skip: !available, timeout: 25000 }, async (t) => {
+  const f = await fixture(t); f.seed();
+  const original = readState("config"), store = createAccountRevocation();
+  function record() {
+    const result = spawnSync(process.execPath, [path.resolve(__dirname, "../bin/embedded-state.js"), "record-revocation"], {
+      env: { ...process.env, SHAPES_BRIDGE_HOME: f.directory }, encoding: "utf8", timeout: 5000, maxBuffer: 1024,
+    });
+    assert.equal(result.status, 0, result.stderr); return JSON.parse(result.stdout).revocationToken;
+  }
+  const token = record();
+  assert.deepEqual(readState("config"), original, "offline writer never edits credentials/config or starts the helper");
+  const stopped = await f.launch(); await until(stopped.idle);
+  assert.equal(f.requests.length, 0); assert.equal(stopped.runtime.running(), false);
+  assert.equal(readState("config").resume_on_startup, false); assert.equal(store.read().pending, false);
+  assert.equal(readState("config").paused, false); assert.equal(readState("config").device_token, TOKEN);
+  const current = await f.launch(), proof = { userId: "owner-a", deviceIds: [DEVICE], verified: true };
+  await assert.rejects(current.controller.updateAccount(proof), { code: "account_changed" });
+  await current.controller.updateAccount({ ...proof, revocationToken: token });
+  f.pids.add(current.runtime.pid()); await until(() => current.controller.status().online);
+  assert.equal(readState("config").resume_on_startup, true);
+  const endpoint = f.accepted.at(-1), runtimePid = current.runtime.pid();
+  const ready = path.join(f.directory, "owned-command-ready"), late = path.join(f.directory, "owned-command-late");
+  const script = path.join(f.directory, "owned-command.js");
+  fs.writeFileSync(script, `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(ready)},'ready');setTimeout(()=>fs.writeFileSync(${JSON.stringify(late)},'escaped'),2500);`);
+  const quote = value => `'${value.replaceAll("'", process.platform === "win32" ? "''" : "'\\''")}'`;
+  const command = `${process.platform === "win32" ? "& " : ""}${quote(process.execPath)} ${quote(script)}`;
+  const result = fetch(`${endpoint.bridge_url}/run`, { method: "POST", headers: { "x-token": endpoint.token, "content-type": "application/json" },
+    body: JSON.stringify({ cmd: command, timeout: 10 }) }).then(response => response.text(), () => null);
+  await until(() => fs.existsSync(ready), "owned command never became active");
+  const latest = record();
+  await until(() => !alive(runtimePid) && !store.read().pending, "live clear did not stop and acknowledge the runtime");
+  await result;
+  await delay(2800);
+  assert.equal(fs.existsSync(late), false, "command cannot perform its delayed write after revocation");
+  assert.equal(readState("config").resume_on_startup, false);
+  assert.equal(readState("config").device_token, TOKEN); assert.equal(readState("config").paused, false);
+  assert.equal(store.read().revocationToken, latest);
+  await current.host.dispose(); const count = f.requests.length, reopened = await f.launch(); await until(reopened.idle);
+  assert.equal(f.requests.length, count, "stopped/reopened controller cannot resurrect a cleared account");
 });
 
 test("startup credential rejection and later revocation persist and cannot republish on next host", { skip: !available, timeout: 20000 }, async (t) => {

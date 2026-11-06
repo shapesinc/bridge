@@ -62,6 +62,7 @@ test("Windows command timeout kills descendants before a delayed write", { skip:
   const script = `Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile', '-File', '"${child.replaceAll("'", "''")}"') -WindowStyle Hidden\nStart-Sleep -Seconds 30`;
   const result = await f.run(script, { timeout: 1 });
   assert.equal(result.exit_code, -1); assert.match(result.stderr, /timed out/);
+  assert.equal(result.cleanup_confirmed, true, "native Job must report no active processes");
   await new Promise((resolve) => setTimeout(resolve, 4500));
   assert.equal(fs.existsSync(marker), false);
 });
@@ -111,6 +112,7 @@ for (const cancellation of [false, true]) {
     await waitFor(() => fs.existsSync(resultFile), 25000);
     const result = JSON.parse(fs.readFileSync(resultFile, "utf8"));
     assert.equal(result.exit_code, -1);
+    assert.equal(result.cleanup_confirmed, true, "native Job emptiness, not wrapper exit, confirms Stop");
     assert.match(result.termination_reason, cancellation ? /command cancelled/ : /timed out/);
     await waitFor(() => !alive(pids.descendant));
     await new Promise((resolve) => setTimeout(resolve, Math.max(0, descendantStarted.startedAt + lateWriteMs + 1000 - Date.now())));

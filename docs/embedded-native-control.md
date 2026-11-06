@@ -9,7 +9,7 @@ The signed native app's bundled XPC service launches the bundled Node runtime wi
 Requests are one JSON object per line: `{version:1,id,operation,params}`. Replies contain `{version:1,id,result}` or `{version:1,id,error:{code,message}}`. Requests are limited to 16 KiB, replies to 64 KiB, and concurrent request IDs to 32. Unknown fields and operations are rejected. stdout carries only protocol replies; daemon diagnostics stay in its private log.
 
 - `status({})` reads sanitized current state. It never authenticates, launches a runtime, probes permissions, or requests consent.
-- `updateAccount({userId,deviceIds,verified})` supplies the host's independently verified current account and device membership. Sign-out, failed verification, account change, or removed device stops access. A saved enabled device resumes only for its verified owner and current membership. The native host must verify this using the current authenticated session; a web page's asserted IDs alone are insufficient.
+- `updateAccount({userId,deviceIds,verified,revocationToken})` supplies the host's independently verified current account and device membership. Sign-out, failed verification, account change, or removed device stops access. A saved enabled device resumes only for its verified owner and current membership. The native host captures the private revocation token **before** checking the current authenticated session and supplies it with the verified result; a web page's asserted IDs or token are insufficient. A stale token is rejected. Legacy omission means only `none`, and cannot pass after a recorded clear.
 - `beginConnect({attemptId,expectedUserId})` returns `{attemptId,userCode}` for a new pairing, or `{attemptId,deviceId}` for a verified existing device. Exactly one field is present. Repeating the active attempt is idempotent.
 - `completeConnect({attemptId})` polls the private pairing and verifies its server-proven `owner_user_id` against the host account and fresh device list. The page must refresh that list after approval. It returns success only after the owned daemon publishes a fresh matching heartbeat. `pairing_pending` and `connection_pending` are retryable on the same attempt. Each readiness wait is bounded to 20 seconds; the host should allow a 90-second overall setup deadline and cancel on navigation or timeout.
 - `cancelConnect({attemptId})` cancels that setup, including the exact latest completed attempt when its success reply was lost. New pairing cancellation uses its private cancellation capability and revokes only the device issued by that pairing. Cancelling a resume of an explicitly paused device leaves it paused without revoking its grants. Cancelling a retry of an already-enabled device stops the current runtime but preserves its existing reopen consent. It never clears a newer pause or revocation; resuming still requires verified owner and device membership. Old attempt IDs cannot stop a newer attempt.
@@ -32,6 +32,42 @@ Closing an app window leaves its native process and connection running. A durabl
 Controller disposal remains true shutdown: closing its private stdin, signalling it, or terminating its host stops the runtime and owned jobs. The host must distinguish UI detach from service shutdown. The primitive alone does not make the original application-scoped XPC service survive Quit; persistence requires the native background-host integration and its signed lifecycle acceptance.
 
 The durable Windows host additionally calls private `resumeSavedConnection()` at startup. It requires an explicit `resume_on_startup:true` marker written by completed native approval or a verified owner resume, an unpaused/unrevoked embedded config, matching API and credential/device binding, and no pending pairing. This operation is absent from the RPC allowlist and leaves `account` unset. Device heartbeat authenticates the existing credential before the server publishes a fresh endpoint; account-bound pairing, permission and personal-agent operations still require independently verified foreground identity. Logout, failed verification, account switch and membership removal clear startup eligibility without changing the established explicit-reopen consent. Configurations from before this marker require a successful verified attachment once after upgrade. Host idle lifetime consults owned runtime liveness separately from the private foreground status. These are reusable controller/host primitives; this change does not make the macOS Mach-service host launch at OS sign-in.
+
+### Durable account revocation
+
+The installed finite command `bin/embedded-state.js read-revocation|record-revocation`
+uses only the native-selected absolute `SHAPES_BRIDGE_HOME`. It writes one bounded
+JSON reply: `{version:1,revocationToken:"none"|UUID}`. It does not launch a host,
+change startup registration, edit credentials/config, or contact a network. The
+native app records before sending its existing live account-clear request, even
+when background access is disabled and the controller is stopped. A writer reply
+means durable intent; it is not a claim that running work has stopped.
+
+`createAccountRevocation` exposes independent read, record and consume operations.
+Record atomically replaces a bounded private receipt after flushing the file;
+POSIX also flushes the containing directory (Node has no Windows directory-fsync
+API). Consume invokes the controller cleanup and acknowledges only that exact
+receipt ID. It retains the receipt, so a later clear cannot be erased by an older
+consumer. A persisted acknowledgement or current reader history prevents a missing
+receipt from regressing to `none`. Invalid bytes, read/write errors and failed
+cleanup block startup/authority and never produce a success acknowledgement.
+
+The controller checks before startup/ownership changes, before enabling access and
+after awaited startup. A 250ms live observer invalidates account/attempt authority
+and initiates owned-runtime stop without waiting behind a readiness request. The
+serialized consumer stops work, durably writes `resume_on_startup:false`, and only
+then acknowledges. The observer stops on disposal. This is bounded eventual live
+observation, not instantaneous cancellation at the writer reply. A new verified
+proof with the latest token may restore an existing enabled device; an explicitly
+paused device remains paused. Device credentials, chat grants and funding are
+preserved. No AI calls/context are added by these primitives: **$0/day incremental**.
+
+The compositions are offline logout→later startup, live logout→owned-work cleanup,
+and fresh account verification→same-device recovery. Filesystem/writer and actual
+daemon/HTTP tests cover these plus stale proof, concurrent clears, failed writes,
+lost receipt history and explicit pause. Remote device authority/tunnel probes are
+fixtures; installed native logout and Windows Job execution still require their
+own acceptance evidence on the exact combined candidate.
 
 The daemon is a private child process group with a Node IPC parent-lifetime watchdog. Controller death closes IPC, aborts the daemon, and bounds cleanup. Detached agent supervisors and their groups are identified by actual process ancestry before shutdown; no global process name or saved arbitrary PID grants kill authority. Agent job state is isolated under the app's private directory. Existing standalone jobs are not touched.
 

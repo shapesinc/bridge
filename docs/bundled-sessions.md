@@ -15,9 +15,13 @@ Every endpoint below requires the existing Bridge token except public capability
 
 Receipts identify `agent:"codex"`, `funding:"shapes_credits"`, `session_id` and `runtime_version`. Receipt usage is this job's increment, not cumulative previous-turn usage; the gateway independently meters actual provider calls. Prompts are limited to 64 KiB, jobs retain existing deadlines, and sessions cap at 5,000 turns. A reused request key that never launched can follow the existing job retry contract.
 
+Failure receipts preserve the sanitized provider status and reason. Recovery advice uses the job's immutable funding: a funded 401 points to retry/support in shapes.inc, and a funded 429 points to shapes.inc credits or retry. Neither asks for personal Codex sign-in or plan changes. Explicit personal jobs keep their existing vendor-account guidance. Error presentation does not change dispatch, grants, retries, billing or terminal state.
+
 Funding tokens are supplied through the supervisor environment and never written in request metadata. The runtime uses an isolated private `CODEX_HOME`; personal Codex/OpenAI/Anthropic profile environment is removed. Shell tools exclude the gateway token, and Bridge redacts it from event, result and diagnostic persistence. A fresh grant is required for a later turn. Server-side revocation, reservation settlement and billable usage journaling remain backend responsibilities.
 
 Existing execution semantics are preserved: read-only uses the native read-only sandbox; authorized write mode uses the existing full-access execution setting, with primary Git checkouts rejected in favor of dedicated worktrees. Plain folders do not require Git or macOS Command Line Tools. A cwd is not a filesystem isolation boundary. Cancellation owns the app-server process group; intentionally escaped detached daemons are not guaranteed to terminate.
+
+`/agents/cancel` acknowledges the cancellation request; callers must read status for the terminal result. Once the runner observes cancellation, it gives its process group 1.5 seconds to exit after SIGTERM, escalates to SIGKILL, and waits at most another 1.5 seconds for the owned parent to exit. It then closes its own pipes, so an escaped descendant holding stdout cannot keep the receipt pending. If parent exit cannot be confirmed, the job fails with `process_exit_unconfirmed` instead of claiming cancellation completed. This same bounded shutdown contract applies to bundled sessions and personal CLI jobs. Windows uses the private owned-Job receipt described in [commands](commands.md); a wrapper exit without native proof does not confirm cleanup. It does not guarantee termination of escaped daemons or undo earlier file changes.
 
 The signed native host also has `listPersonalAgents({expectedUserId})` and `openAgentLogin({expectedUserId,agent})`. These private operations require the currently verified shapes.inc account; native UI confirms opening sign-in. Discovery returns existing sanitized agent readiness, without executable paths, identities or credentials. Login opens the installed vendor CLI's `codex login` or `claude auth login` through a private, self-deleting Terminal command file. LaunchServices avoids requiring AppleEvents automation permission. `{opened:true}` means handoff only; a fresh readiness check establishes authentication. These are not remote HTTP/model capabilities. Personal accounts require a compatible installed vendor CLI and keep their existing billing/profile; they do not use the isolated funded runtime profile. Vendor OAuth completion remains user-operated.
 
@@ -33,12 +37,73 @@ Sources: [official pinned release](https://github.com/openai/codex/releases/tag/
 
 Focused real HTTP/child-process regressions cover immutable creation without inference; missing Bridge authorization; mismatched/expired grants; idempotent start and lost-receipt lookup; progress pagination; restart and same-thread follow-up; per-job token usage; pending-input cancellation and process cleanup; provider/runtime failure; and absent credentials in persisted receipts/logs. Existing interactive personal-agent and packaging tests also pass.
 
-An actual pinned 0.166.0 binary replay through the Bridge HTTP API and a simulated Responses provider executes three compositions: JavaScript writes/runs and persists `40`; HTML creation persists a checklist, then a resumed follow-up after Bridge HTTP restart appends another item in the same native thread; CSV analysis persists a total of `20`. It also verifies read-only patch refusal, duplicate start, wrong scope, missing authentication and cancellation while a provider request is pending. Model responses are scripted: this proves protocol, actual local tool execution and files, not model quality or live billing. Paid inference, real wallet settlement, complete connected UI acceptance and Intel execution are separate acceptance gates. No production rollout is claimed.
+Funding-aware failure regressions send simulated 401/429 failures through actual HTTP jobs, verify durable failure receipts and identical retry recovery, and preserve personal-agent sign-in/plan advice. These simulated failures incur no provider charge and do not claim live payment verification.
+
+The November 5 integration includes main's pre-task initialization recovery: at most one retry, only before a thread or turn is dispatched. The replacement starts only after the first parent process has a confirmed exit. A real-child signal-failure regression preserves the unconfirmed receipt and prevents overlap; cancellation still prevents retry. The integrated startup, RPC, session, failure and process-boundary checks passed 43/43 with simulated providers and zero inference spend.
+
+Cancellation regressions also run real child processes that detach while retaining the parent's stdout. Bundled HTTP jobs and personal CLI jobs settle after the owned parent exits, terminal state survives reopening the HTTP server, unrelated processes stay alive, and each fixture explicitly cleans up its escaped child. A separate signal-failure fixture verifies the unconfirmed-exit result. Helper assembly checks that the shared shutdown module and both callers are included. These checks use no provider; complete connected UI replay on the changed signed candidate remains a separate acceptance gate.
+
+An actual pinned 0.166.0 binary replay through the Bridge HTTP API and a simulated Responses provider executes three compositions: JavaScript writes/runs and persists `40`; HTML creation persists a checklist, then a resumed follow-up after Bridge HTTP restart appends another item in the same native thread; CSV analysis persists a total of `20`. It also verifies read-only patch refusal, duplicate start, wrong scope, missing authentication and cancellation while a provider request is pending. Model responses are scripted: this proves protocol, actual local tool execution and files, not model quality or live billing.
+
+The authorized November 5 live acceptance subsequently verified a funded checklist follow-up through native build 104 (`fa43d64`), Bridge `52cab024`, frontend `b2282a189` and backend `dc9c67af2`. The official bundled runtime resumed the earlier writer's same native thread and completed at 09:14:20 UTC, with exit 0, three actual Astra gateway HTTP 200 responses, a closed lease with no pending usage, and both worker processes exited. The native UI and persisted assistant result confirmed completion. The 5,120-byte HTML artifact remained unchanged during that verification. The earlier writer had persisted the artifact before a backend membership-read outage incorrectly revoked its lease; that backend failure is distinct from the successful follow-up. The local receipt is `first-completed-funded-checklist-receipt.json`; screenshots and cross-repository evidence are tracked in [native PR #126](https://github.com/shapesinc/shapes-inc-native-apps/pull/126).
+
+The later fresh CSV composition passed through native build 106 (`2b56f4c`), Bridge `292fc764`, frontend `9337127e6` and backend `8d8dcd37f`. The official bundled runtime completed with shapes.inc credits and exit 0 at 22:06:00 UTC. Actual View Reload followed by app Quit/reopen while the task was running retained the same job, session, native thread and worker processes; fresh account verification succeeded after reopen. All five input rows remained unchanged, and independent recomputation verified Food 19.75, Games 10.00, Travel 4.00 and a 33.75 grand total in the generated outputs. The final UI reply persisted, worker processes exited, and the lease closed without pending usage. Local receipts are `native106-csv-completed-verification.json`, `native106-csv-after-active-reload.json`, `native106-csv-after-active-reopen.json` and `qa-generic-csv-funded-costs-20261105.json`; [native PR #126](https://github.com/shapesinc/shapes-inc-native-apps/pull/126) links the actual screenshots. Earlier CSV attempts selected cloud tools or refused built-in execution before backend discovery/routing corrections; those failed attempts are not counted as native success.
+
+The following plain cart-fix request on frontend `d22377b43` / backend `f441721fa` completed through the bundled runtime at 22:43:17 UTC. Actual View Reload retained the same active job/thread, the implementation was corrected, all four unchanged tests passed independently, and the workers exited. The earlier human-Stop run fenced inference before native cancel arrived: native recorded the real gateway403 failure, UI persisted Stopped, and the later cancel did not rewrite that terminal history. A new HTTP regression covers this late-cancel ordering and a completed-run control, including continued use of the same thread.
+
+The later signed native108 Home task verified new-private-chat defaults and the [command primitives](commands.md): a plain request inherited the selected folder and credits, wrote its relative script there, and ran it in the foreground. Actual UI Stop cancelled the command, its process group exited, the delayed marker remained absent beyond its original deadline, and Stopped persisted after Reload. This closes the earlier direct-shell Stop failure; the failed original marker is retained as evidence.
+
+**Remaining NO-GO scope:** a completed real repository replay on the final candidate and actual native109 transient-verification outage/recovery remain required. The successful earlier CSV/cart and lifecycle checks are not substitutes for that replay. Intel execution, personal CLI execution and user-operated Claude OAuth completion, direct `file://` opening/storage, and remaining permission/funding failure paths are unverified. No production rollout is claimed.
 
 Replay with `SHAPES_BUNDLED_CODEX_BINARY=<pinned-app-server> node scripts/replay-bundled-sessions.js`. To exercise a signed helper's exact JavaScript and default runtime discovery, set `SHAPES_BRIDGE_SOURCE=<helper>/Contents/Resources/runtime` instead. `SHAPES_CANARY_REPORT=<file>` optionally writes fixture receipts; it never invokes a real provider. Cleanup waits for owned jobs before removing the fixture workspace.
 
 ## Incremental operating cost
 
-Discovery, session creation/read/events and the Node regression/replay fixtures add **$0/day provider cost**; evaluation spend so far is **$0**. Enabling funded local tasks adds actual provider usage. Adoption and token distributions are unknown, so the pre-implementation projection uses explicit scenarios, not historical all-product traffic.
+Discovery, session creation/read/events and the Node regression/replay fixtures add **$0/day provider cost**. The original implementation evaluation used only simulated providers and cost **$0**. Later authorized live acceptance incurred real inference spend: the completed checklist follow-up used **$0.3353295 provider spend / 0.670659 credits charged**, and the completed CSV turn used **$0.370749 provider spend / 0.741498 credits charged**; both settled with no pending usage. These are individual task-turn receipts, not total evaluation spend; outer orchestration and earlier partial/failed attempts are separate. They are also not recurring daily projections. Adoption and token distributions remain unknown, so the pre-implementation operating-cost projection below uses explicit scenarios, not historical all-product traffic.
+
+The cancellation settlement fix adds no AI, classifier or tool calls and has **$0/day normal-path cost delta**. The exceptional `process_exit_unconfirmed` receipt may enter existing model continuations. With unknown failure frequency, a conservative scenario of up to 100 additional input tokens per later call, read five times at $10/million input tokens, costs **$0.005 per affected failure**, or **$0.005–$0.50/day at 1–100 failures/day**, assuming no caching. A half/double price or history allowance gives $0.0025–$1/day across that scenario range. This is incremental provider spend, separate from user credits and the overall task-cost projection below.
+
+The funding-aware recovery advice replaces existing text with shorter guidance; it adds no calls or context fields. Its incremental operating-cost increase is **$0/day**, including later receipt history. Its HTTP regression fixtures and simulated-provider replay also cost $0.
 
 At the backend's current configured GPT-6 Astra policy, use $10/$50 per million input/output tokens (prices checked November 2, 2026), **200,000 input + 20,000 output tokens across all task calls**, then 20% retry overhead. The allowance includes orchestration, repeated history, tool continuations, compaction and any auxiliary calls; this implementation adds no classifier or summarizer. With no cache discount, the projection is **$3.60/task: $360/day at 100 tasks, $3,600/day at 1,000, $36,000/day at 10,000**. Half/double workload gives **$1,800–$7,200/day at 1,000 tasks**. No paid hosted tools, embeddings or infrastructure fees are included; enabling those needs a separate measured addition. Provider spend is distinct from user credits/revenue. [Pricing source](https://developers.openai.com/api/docs/pricing).
+
+### Early compaction and request envelopes, November 6
+
+The runtime compacts early at 32,000 tokens. This is calibrated to the billed
+gateway's **262,144-byte serialized request limit**, not Astra's advertised
+1,050,000-token context. The gateway retains its 16,384-output-token and $8
+per-request policy limits. A request over the byte limit still receives the
+Responses SSE `context_length_exceeded` error before any provider reservation.
+The pinned runtime reports that error as terminal; it does not automatically
+compact or replay the failed turn. Token-to-byte ratios vary,
+so the early token threshold never overrides that authoritative byte check.
+
+The prior 24,000-token threshold left only 4,568 tokens above a measured
+19,432-token repository/runtime baseline. Five ordinary inspections triggered
+three approximately 39-second compactions, consuming 79,150 input tokens
+(65,903 cached) and 5,853 output tokens. The task was later cancelled by a local
+verification outage and did not complete; this is diagnosis, not a successful
+coding replay or a savings claim.
+
+Before committing the change, the gross incremental retained-history cost was
+projected with explicit scenarios: up to 8,000 extra input tokens on 5–20
+continuations, 20% retry overhead, $10/million fresh input and $1/million cached
+input, with 0–75% cache coverage. That is **$0.156–1.92/task**, or
+**+$15.60–192/day at 100 tasks, +$156–1,920/day at 1,000 tasks, and
++$1,560–19,200/day at 10,000 tasks**. Adoption is unknown. These are gross input
+increases; fewer compactions may offset them, but no net savings are assumed.
+There is no new classifier or mandatory inference call, and task history remains
+inside the existing session. Actual output, orchestration, compaction and retry
+changes still require measured end-to-end comparison. Personal-provider usage
+and user credits are separate from these provider-spend scenarios.
+
+No-inference gateway fixtures with 32k tokens plus a 26,000-character tool result
+serialize to 198,240 bytes (repository ASCII), 227,468 bytes (UTF-8 CSV), and
+196,833 bytes (HTML), all below the unchanged byte/reservation limits. A larger
+low-token-density output is rejected. The pinned-runtime replay injects that
+exact SSE rejection and verifies one terminal failure without a hidden provider
+retry or new job. Ordinary proactive compaction remains supported. The gateway's
+separate ASGI tests verify that a smaller follow-up can use the same lease; that
+does not establish automatic native recovery. This is simulated transport, not live
+provider/payment verification. Actual coding acceptance on the new package
+remains required.

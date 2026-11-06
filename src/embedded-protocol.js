@@ -3,7 +3,7 @@
 const { failure, MESSAGES } = require("./embedded");
 const METHODS = Object.freeze({ status: [], beginConnect: ["attemptId", "expectedUserId"], completeConnect: ["attemptId"],
   cancelConnect: ["attemptId"], disconnect: [], detach: [], requestPermission: ["permission"], updateAccount: ["userId", "deviceIds", "verified"],
-  listPersonalAgents: ["expectedUserId"], openAgentLogin: ["expectedUserId", "agent"] });
+  listPersonalAgents: ["expectedUserId"], openAgentLogin: ["expectedUserId", "agent"], cancelAgentLogin: ["expectedUserId", "agent"] });
 const MAX_REQUEST_BYTES = 16 * 1024;
 
 function parseRequest(line, { allowLifecycle = false } = {}) {
@@ -15,7 +15,8 @@ function parseRequest(line, { allowLifecycle = false } = {}) {
     !(Object.hasOwn(METHODS, request.operation) || allowLifecycle && request.operation === "lifecycleStatus")) throw failure("invalid_request");
   const params = request.params ?? {};
   const keys = request.operation === "lifecycleStatus" ? [] : METHODS[request.operation];
-  if (!params || typeof params !== "object" || Array.isArray(params) || Object.keys(params).length !== keys.length || keys.some((key) => !Object.hasOwn(params, key))) throw failure("invalid_request");
+  const optional = request.operation === "updateAccount" ? ["revocationToken"] : [];
+  if (!params || typeof params !== "object" || Array.isArray(params) || Object.keys(params).some((key) => !keys.includes(key) && !optional.includes(key)) || keys.some((key) => !Object.hasOwn(params, key))) throw failure("invalid_request");
   return { ...request, params };
 }
 

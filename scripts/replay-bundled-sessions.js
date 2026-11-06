@@ -25,9 +25,23 @@ const modelServer = http.createServer(async (req, res) => {
     plan.calls++;
     requests.push({ scenario: plan.name, call: plan.calls, body });
     if (plan.stall) { plan.started?.(); return; }
+    if (plan.overflow && plan.calls === 2) {
+      // Exact billed-gateway overflow wire. The rejection is injected here;
+      // separate gateway tests enforce serialized UTF-8 byte/reservation caps.
+      const failed = { type: "response.failed", sequence_number: 0, response: {
+        id: "sandbox-rejected", object: "response", status: "failed", error: {
+          type: "invalid_request_error", code: "context_length_exceeded",
+          message: "Sandbox request exceeds 262144 UTF-8 bytes. Compact the conversation or reduce tool output.",
+        }, output: [], usage: null,
+      } };
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
+      res.end(`event: response.failed\ndata: ${JSON.stringify(failed)}\n\n`);
+      return;
+    }
     const n = requests.length;
-    const item = plan.calls === 1 && plan.code ? {
-      type: "custom_tool_call", id: `tool_${n}`, call_id: `call_${n}`, name: "exec", input: plan.code,
+    const code = plan.calls === 1 ? plan.code : null;
+    const item = code ? {
+      type: "custom_tool_call", id: `tool_${n}`, call_id: `call_${n}`, name: "exec", input: code,
     } : { type: "message", id: `msg_${n}`, role: "assistant", status: "completed",
       content: [{ type: "output_text", text: `${plan.name} fixture complete.`, annotations: [] }] };
     const response = { id: `resp_${n}`, object: "response", status: "completed", model: body.model, output: [item],
@@ -57,9 +71,9 @@ async function create(name, write = true) {
   assert.equal(result.value.turn_count, 0); assert.equal(requests.length, receipts.reduce((n, item) => n + item.calls, 0));
   return session;
 }
-async function run(session, name, code) {
+async function run(session, name, code, options = {}) {
   const requestKey = randomUUID(), token = `fixture-${randomUUID()}`;
-  const plan = { name, code, calls: 0 }; plans.set(token, plan);
+  const plan = { name, code, calls: 0, ...options }; plans.set(token, plan);
   const body = { session_id: session.session_id, scope_id: session.scope_id, prompt: name, request_key: requestKey,
     gateway: { token, session_id: session.session_id, scope_id: session.scope_id, request_key: requestKey,
       base_url: `http://127.0.0.1:${modelServer.address().port}/v1`, model: "gpt-6-astra", run_id: randomUUID(), expires_at: new Date(Date.now() + 120000).toISOString() } };
@@ -70,7 +84,7 @@ async function run(session, name, code) {
   do { result = (await api(`/agents/status?job_id=${started.value.job_id}`)).value;
     if (["completed", "failed", "cancelled", "timed_out"].includes(result.state)) break;
   } while (Date.now() < deadline);
-  assert.equal(result.state, "completed", JSON.stringify(result));
+  assert.equal(result.state, options.expectedState || "completed", JSON.stringify(result));
   const events = (await api(`/sessions/events?session_id=${session.session_id}&scope_id=${session.scope_id}`)).value;
   receipts.push({ name, result, calls: plan.calls, events });
   return result;
@@ -97,6 +111,34 @@ function command(cmd) { return `text(await tools.exec_command(${JSON.stringify({
     const readonly = await create("read-only", false);
     await run(readonly, "Read-only write refusal", patch("must-not-exist.txt", "no"));
     assert.equal(fs.existsSync(path.join(readonly.cwd, "must-not-exist.txt")), false);
+    const overflow = await create("overflow-rejection");
+    const overflowResult = await run(overflow, "Gateway overflow rejection", 'text("synthetic tool output ".repeat(1000));', {
+      overflow: true, expectedState: "failed",
+    });
+    assert.equal(overflowResult.error_type, "agent_error");
+    assert.match(overflowResult.error, /context window/);
+    const overflowReceipt = receipts.at(-1);
+    assert.equal(overflowReceipt.calls, 2, "One tool request and one overflow rejection; no hidden compaction or start retry");
+    const overflowState = fs.readFileSync(path.join(process.env.SHAPES_CODEX_JOB_DIR, jobs.at(-1), "events.jsonl"), "utf8").split("\n").filter(Boolean).map(JSON.parse);
+    assert.equal(overflowState.filter(event => event.type === "item.completed" && event.item?.type === "contextCompaction").length, 0);
+    assert.equal(overflowState.filter(event => event.type === "turn.failed").length, 1);
+    // Observe natural terminal cleanup before the finally block can send cancel.
+    const failedState = JSON.parse(fs.readFileSync(path.join(process.env.SHAPES_CODEX_JOB_DIR, jobs.at(-1), "state.json"), "utf8"));
+    const processAlive = pid => {
+      try { process.kill(pid, 0); return true; }
+      catch (error) { if (error.code === "ESRCH") return false; throw error; }
+    };
+    assert.ok(Number.isInteger(failedState.agentPid) && Number.isInteger(failedState.supervisorPid));
+    const cleanupDeadline = Date.now() + 3000;
+    while ((processAlive(failedState.agentPid) || processAlive(failedState.supervisorPid)) && Date.now() < cleanupDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal(processAlive(failedState.agentPid), false, "failed agent exited before cleanup");
+    assert.equal(processAlive(failedState.supervisorPid), false, "failed supervisor exited before cleanup");
+    if (process.platform !== "win32") assert.equal(processAlive(-failedState.agentPid), false, "failed task process group exited");
+    overflowReceipt.terminal_cleanup = { agent_pid: failedState.agentPid, supervisor_pid: failedState.supervisorPid,
+      agent_exited: true, supervisor_exited: true, process_group_exited: process.platform === "win32" ? null : true,
+      observed_before_final_cleanup: true };
     const rejected = await api(`/sessions/read?session_id=${html.session_id}&scope_id=${randomUUID()}`); assert.equal(rejected.status, 403);
     const persisted = (await api(`/sessions/read?session_id=${html.session_id}&scope_id=${html.scope_id}`)).value;
     assert.equal(persisted.turn_count, 2);
@@ -124,7 +166,7 @@ function command(cmd) { return `text(await tools.exec_command(${JSON.stringify({
     assert.equal(cancelPlan.calls, 1);
     receipts.push({ name: cancelPlan.name, result: cancelStatus, calls: cancelPlan.calls });
     const out = { version: "0.166.0", simulated_provider: true, real_local_execution: true, receipts, requests,
-      assertions: ["unauthorized access rejected", "three compositions persisted", "duplicate send reused job", "follow-up resumed same thread after Bridge restart", "read-only edit refused", "wrong scope rejected", "raw request key recovers job", "numeric expiry accepted", "stalled provider cancelled without retry"] };
+      assertions: ["unauthorized access rejected", "three compositions persisted", "duplicate send reused job", "follow-up resumed same thread after Bridge restart", "read-only edit refused", "gateway overflow failed truthfully without hidden retry", "wrong scope rejected", "raw request key recovers job", "numeric expiry accepted", "stalled provider cancelled without retry"] };
     if (process.env.SHAPES_CANARY_REPORT) fs.writeFileSync(process.env.SHAPES_CANARY_REPORT, JSON.stringify({ ...out, requests: undefined }, null, 2));
     console.log(JSON.stringify({ success: true, scenarios: receipts.map(r => ({ name: r.name, state: r.result.state, calls: r.calls, usage: r.result.usage })), assertions: out.assertions }));
   } catch (error) {

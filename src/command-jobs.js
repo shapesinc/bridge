@@ -48,10 +48,14 @@ function launchSupervisor(id) {
   return spawn(binary, args, { detached: true, windowsHide: true, stdio: "ignore", env: process.env });
 }
 
-function save(record) {
+function save(record, { exclusive = false } = {}) {
   const file = jobFile(record.job_id), temp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temp, JSON.stringify(record), { mode: 0o600 });
-  fs.renameSync(temp, file);
+  if (exclusive) {
+    // Cancel can overtake a delayed start in a second daemon. An initial write
+    // must never replace its durable tombstone.
+    try { fs.linkSync(temp, file); } finally { fs.rmSync(temp, { force: true }); }
+  } else fs.renameSync(temp, file);
 }
 
 function load(id) {
@@ -131,7 +135,7 @@ async function start(body) {
   const fingerprint = digest([body.cmd, body.cwd || null, body.timeout, body.shell || null]);
   try {
     const existing = load(id);
-    if (existing.fingerprint !== fingerprint) throw error("The command request key was reused for different arguments.", 409, "command_conflict");
+    if (existing.fingerprint && existing.fingerprint !== fingerprint) throw error("The command request key was reused for different arguments.", 409, "command_conflict");
     return { ...status(id, body.scope), deduplicated: true };
   } catch (cause) { if (cause.errorType !== "command_not_found") throw cause; }
   claim(id, body.scope, { fingerprint, command_hash: digest(body.cmd) });
@@ -140,7 +144,14 @@ async function start(body) {
     prune();
     record = { job_id: id, scope: body.scope, fingerprint, command_hash: digest(body.cmd),
       command: body, state: "queued", created_at: Date.now(), launcher_pid: process.pid };
-    save(record);
+    try { save(record, { exclusive: true }); }
+    catch (cause) {
+      if (cause.code !== "EEXIST") throw cause;
+      release(id);
+      const existing = load(id);
+      if (existing.scope !== body.scope || existing.fingerprint && existing.fingerprint !== fingerprint) throw error("The command request key was reused for different arguments.", 409, "command_conflict");
+      return { ...status(id, body.scope), deduplicated: true };
+    }
     const child = launchSupervisor(id);
     await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
     launched = true;
@@ -150,14 +161,35 @@ async function start(body) {
   } catch (cause) {
     if (launched) throw error("Command supervisor started but its launch receipt could not be saved. Poll the existing job; do not repeat it.", 503, "command_start_unconfirmed");
     try {
-      if (record) save({ ...record, state: "failed", finished_at: Date.now(), result: { exit_code: -1, stdout: "", stderr: "Command supervisor could not start." } });
+      if (record && fs.existsSync(jobFile(id)) && load(id).state === "queued") save({ ...record, state: "failed", finished_at: Date.now(), result: { exit_code: -1, stdout: "", stderr: "Command supervisor could not start.", cleanup_confirmed: true } });
     } finally { release(id); }
     throw cause;
   }
 }
 
 function cancel(id, scope) {
-  const result = status(id, scope);
+  if (typeof scope !== "string" || !HEX.test(scope)) throw error("A trusted command scope is required.", 403);
+  jobFile(id); // Validate before constructing any filename.
+  let result;
+  try { result = status(id, scope); }
+  catch (cause) {
+    if (cause.errorType !== "command_not_found") throw cause;
+    // A wrong scope must never overwrite an existing receipt. If no receipt
+    // exists, a scoped tombstone makes a late/lost start safely non-executable.
+    let existing;
+    try { existing = load(id); }
+    catch (missing) { if (missing.errorType !== "command_not_found") throw missing; }
+    if (existing) throw error("Command job not found.", 404, "command_not_found");
+    ensureStateDir(); fs.mkdirSync(root(), { recursive: true, mode: 0o700 });
+    prune();
+    const now = Date.now();
+    const record = { job_id: id, scope, fingerprint: null, command_hash: null,
+      state: "cancelled", created_at: now, finished_at: now, cancel_requested: true,
+      result: { exit_code: -1, stdout: "", stderr: "cancelled before start", cleanup_confirmed: true, cancelled_before_start: true } };
+    try { save(record, { exclusive: true }); return receipt(record); }
+    catch (race) { if (race.code !== "EEXIST") throw race; }
+    result = status(id, scope);
+  }
   if (TERMINAL.has(result.state)) return result;
   fs.writeFileSync(path.join(root(), `${id}.cancel`), "cancel", { mode: 0o600 });
   return { ...result, cancel_requested: true };
