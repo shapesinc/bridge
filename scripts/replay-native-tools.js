@@ -72,14 +72,15 @@ async function waitUntil(predicate, milliseconds = 12000) {
   while (Date.now() < deadline) { if (await predicate()) return; await new Promise(resolve => setTimeout(resolve, 40)); }
   throw new Error("Replay deadline expired");
 }
-async function start(name, session, { code, disabled = false, hang = false, recover = false, crash = false, recoverFrom } = {}) {
+async function start(name, session, { code, input, disabled = false, hang = false, recover = false, crash = false, recoverFrom } = {}) {
   const plan = { name, session, code, hang, recover, recoverFrom, requests: 0, request_key: randomUUID(), run_id: randomUUID(), modelToken: "model-" + randomUUID(), toolToken: "tool-" + randomUUID() };
   plans.set(plan.modelToken, plan); plans.set(plan.toolToken, plan);
   const identity = { session_id: session.session_id, scope_id: session.scope_id, request_key: plan.request_key, run_id: plan.run_id, expires_at: Date.now() / 1000 + 600 };
   const base = `http://127.0.0.1:${service.address().port}`;
   const gateway = { ...identity, token: plan.modelToken, model: "gpt-6-astra", base_url: base + "/v1",
     ...(!disabled ? { tool_proxy: { ...identity, version: 1, token: plan.toolToken, base_url: base + "/bridge/native-tools" } } : {}) };
-  plan.job = await api("/agents/start", { session_id: session.session_id, scope_id: session.scope_id, request_key: plan.request_key, gateway, prompt: `Synthetic ${name} fixture` });
+  plan.job = await api("/agents/start", { session_id: session.session_id, scope_id: session.scope_id, request_key: plan.request_key, gateway,
+    ...(input ? { input } : { prompt: `Synthetic ${name} fixture` }) });
   jobs.push(plan.job.job_id);
   if (hang) {
     await waitUntil(() => plan.pending);
@@ -118,6 +119,11 @@ function strings(value) {
   if (Array.isArray(value)) return value.flatMap(strings);
   return value && typeof value === "object" ? Object.values(value).flatMap(strings) : [];
 }
+function images(value) {
+  if (Array.isArray(value)) return value.flatMap(images);
+  if (!value || typeof value !== "object") return [];
+  return value.type === "input_image" ? [value] : Object.values(value).flatMap(images);
+}
 (async () => {
   try {
     await new Promise(resolve => service.listen(0, "127.0.0.1", resolve));
@@ -126,7 +132,11 @@ function strings(value) {
     const cwd = path.join(root, "workspace"); fs.mkdirSync(cwd);
     const session = { session_id: randomUUID(), scope_id: randomUUID(), cwd, workspace_write: false, funding: "shapes_credits" };
     await api("/sessions/create", session);
-    await start("original-browser-composition", session, { code: 'text(ALL_TOOLS.filter(tool=>tool.name.startsWith("mcp__shapes__"))); text(await tools.mcp__shapes__shapes_discover({query:"browser"})); text(await tools.mcp__shapes__shapes_describe({capability_id:"fixture.read"})); text(await tools.mcp__shapes__shapes_call({capability_id:"fixture.read",schema_revision:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",arguments:{purpose:"inspect browser"}}));' });
+    const originalImage = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGP4z8CAFWEXHbQSACj/P8Fu7N9hAAAAAElFTkSuQmCC";
+    await start("original-browser-composition", session, {
+      input: [{ type: "text", text: "Inspect the connection label in this screenshot and verify it in my browser.", context_key: "proxy-source:0" },
+        { type: "image", url: originalImage, context_key: "proxy-source:1" }],
+      code: 'text(ALL_TOOLS.filter(tool=>tool.name.startsWith("mcp__shapes__"))); text(await tools.mcp__shapes__shapes_discover({query:"browser"})); text(await tools.mcp__shapes__shapes_describe({capability_id:"fixture.read"})); text(await tools.mcp__shapes__shapes_call({capability_id:"fixture.read",schema_revision:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",arguments:{purpose:"inspect browser"}}));' });
     await start("connected-document-composition", session, { code: 'text(await tools.mcp__shapes__shapes_discover({query:"documents"})); text(await tools.mcp__shapes__shapes_describe({capability_id:"fixture.read"})); text(await tools.mcp__shapes__shapes_call({capability_id:"fixture.read",schema_revision:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",arguments:{purpose:"read document"}}));' });
     await start("operation-recovery-composition", session, { recover: true, code: 'text(await tools.mcp__shapes__shapes_call({capability_id:"fixture.read",schema_revision:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",arguments:{purpose:"recover receipt"}}));' });
     await start("feature-disabled-resume", session, { disabled: true, code: 'text(await tools.mcp__shapes__shapes_discover({query:"must not execute"}));' });
@@ -141,6 +151,11 @@ function strings(value) {
     assert.equal(calls.filter(value => value.scenario === lost.name && value.action === "call").length, 1);
     assert.equal(calls.filter(value => value.scenario === "recover-after-supervisor-loss" && value.action === "call").length, 0);
     assert.equal(new Set(results.map(value => value.thread_id)).size, 1, "Native conversation is resumed");
+    for (const request of requests) {
+      assert.deepEqual(images(request.body.input).map(image => image.image_url), [originalImage],
+        "Typed original image survives tool calls, resume, feature removal and crash recovery exactly once");
+      assert.equal(JSON.stringify(request.body).includes("context_key"), false);
+    }
     const enabledPrompt = strings(requests[0].body.input[0]).join("\n");
     const disabledPrompt = strings(requests.find(value => value.scenario === "feature-disabled-resume").body.input[0]).join("\n");
     const resumedDisabledSchemaRetained = disabledPrompt.includes("### `shapes_discover`");
