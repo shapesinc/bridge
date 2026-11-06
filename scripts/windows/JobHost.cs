@@ -86,10 +86,10 @@ class JobHost {
         return handle.ToInt64() + ":valid=" + valid + ":flags=" + flags + ":type=" + GetFileType(handle) + ":error=" + error;
     }
 
-    static IntPtr[] TraceOutputHandles() {
+    static IntPtr[] TraceOutputHandles(string phase) {
         if (String.IsNullOrEmpty(diagnosticPath)) return new IntPtr[0];
-        IntPtr output = GetStdHandle(-11), error = GetStdHandle(-12);
-        Trace("output stdout=" + HandleDescription(output) + " stderr=" + HandleDescription(error));
+        IntPtr input = GetStdHandle(-10), output = GetStdHandle(-11), error = GetStdHandle(-12);
+        Trace("output phase=" + phase + " stdin=" + HandleDescription(input) + " stdout=" + HandleDescription(output) + " stderr=" + HandleDescription(error));
         var aliases = new List<IntPtr>(); var evidence = new StringBuilder();
         IntPtr snapshot = IntPtr.Zero, marker = IntPtr.Zero;
         try {
@@ -109,7 +109,7 @@ class JobHost {
                         bool sameOutput = CompareObjectHandles(entry.handle, output), sameError = CompareObjectHandles(entry.handle, error);
                         if (sameOutput || sameError) {
                             aliases.Add(entry.handle);
-                            evidence.Append(" match=").Append(entry.handle.ToInt64()).Append(":stdout=").Append(sameOutput).Append(":stderr=").Append(sameError);
+                            evidence.Append(" match=").Append(entry.handle.ToInt64()).Append(":stdout=").Append(sameOutput).Append(":stderr=").Append(sameError).Append(":stdin=").Append(CompareObjectHandles(entry.handle, input));
                         }
                     }
                     evidence.Append(" walked=").Append(count).Append(" status=").Append(status).Append(" entry-size=").Append(size);
@@ -121,7 +121,7 @@ class JobHost {
             if (snapshot != IntPtr.Zero) evidence.Append(" snapshot-free=").Append(PssFreeSnapshot(GetCurrentProcess(), snapshot));
         }
         // No snapshot or duplicate pipe reference remains during output close.
-        Trace("output-aliases" + evidence);
+        Trace("output-aliases phase=" + phase + evidence);
         return aliases.ToArray();
     }
 
@@ -190,6 +190,7 @@ class JobHost {
     static int Main(string[] args) {
         IntPtr parent = IntPtr.Zero, childInput = IntPtr.Zero;
         try {
+            TraceOutputHandles("entry");
             int index = 0; bool console = false, ready = false, commandString = false, releaseOnSuccess = false;
             if (args.Length > 1 && args[0] == "--parent-pid") {
                 uint parentId; if (!uint.TryParse(args[1], out parentId) || parentId == 0) return 64;
@@ -237,7 +238,7 @@ class JobHost {
                 // A successful shell can leave descendants holding its output
                 // pipes. Remain cancellable until the owner observes both EOFs
                 // and explicitly commits successful background ownership handoff.
-                IntPtr[] diagnosticAliases = TraceOutputHandles();
+                IntPtr[] diagnosticAliases = TraceOutputHandles("handoff");
                 if (!CloseOutputHandles(diagnosticAliases)) return 70;
                 if (!AwaitRelease(parent)) return 70;
                 limits.BasicLimitInformation.LimitFlags = 0;
