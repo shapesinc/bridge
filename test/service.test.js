@@ -122,7 +122,7 @@ test("macOS helper assembly includes process shutdown and scoped command modules
     fs.writeFileSync(binary, "fixture");
     const source = path.resolve(__dirname, "..");
     const { runtime } = assembleMacApp(source, path.join(base, "Bridge.app"), { nodeBinary: binary, launcherBinary: binary });
-    for (const name of ["process-close.js", "codex-rpc.js", "codex.js", "commands.js", "command-process.js", "server.js"]) {
+    for (const name of ["process-close.js", "codex-rpc.js", "codex.js", "session-input.js", "commands.js", "command-process.js", "server.js"]) {
       const packaged = path.join(runtime, "src", name);
       assert.deepEqual(fs.readFileSync(packaged), fs.readFileSync(path.join(source, "src", name)));
       assert.doesNotThrow(() => require(packaged));

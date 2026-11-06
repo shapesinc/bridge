@@ -11,6 +11,7 @@ const { normalizeRequest, nativeResponse } = require("./approvals");
 const { localEnvironment } = require("./local-workspace");
 const { bundledRuntime, launchConfiguration } = require("./bundled-runtime");
 const { closeProcessGroup } = require("./process-close");
+const { normalizeSessionInput, runtimeSessionInput } = require("./session-input");
 
 const MAX_OUTPUT = 64 * 1024;
 const MAX_PROMPT = 64 * 1024;
@@ -218,7 +219,7 @@ function publicStatus(id, expectedAgent) {
   return receipt;
 }
 
-async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex", interactive = false, requestKey, builtIn, resumeThreadId, usageBaseline }) {
+async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInput, deliveredInputContext, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex", interactive = false, requestKey, builtIn, resumeThreadId, usageBaseline }) {
   if (process.platform === "win32") throw new Error("The local agent launcher currently requires macOS or Linux.");
   if (!["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
   cwd = validateCwd(cwd, sandbox);
@@ -234,15 +235,21 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
   }
   if (typeof prompt !== "string" || Buffer.byteLength(prompt) > MAX_PROMPT) throw new Error("Prompt must be text no larger than 64 KiB.");
   if (!prompt.trim()) throw new Error("Prompt must not be empty.");
+  if (suppliedInput !== undefined && !builtIn) throw new Error("Typed input requires a built-in session.");
+  const input = suppliedInput === undefined ? undefined : normalizeSessionInput(suppliedInput);
   if (typeof interactive !== "boolean") throw new Error("interactive must be boolean.");
   validRequestKey(requestKey);
   const fingerprint = requestKey && crypto.createHash("sha256")
     .update(JSON.stringify([prompt, cwd, sandbox, timeout, agent, interactive,
-      ...(builtIn ? [builtIn.sessionId, builtIn.scopeId, builtIn.gateway.model] : [])])).digest("hex");
+      ...(builtIn ? [builtIn.sessionId, builtIn.scopeId, builtIn.gateway.model] : []),
+      ...(input ? [input] : [])])).digest("hex");
   if (requestKey && fs.existsSync(root())) {
     const existing = existingRequest(requestKey, fingerprint);
     if (existing) return { ...publicStatus(existing), deduplicated: true };
   }
+  // Idempotency uses the complete packet above. Only a genuinely new job may
+  // omit source items already acknowledged on this session's resumed thread.
+  const preparedInput = input ? runtimeSessionInput(input, deliveredInputContext) : undefined;
   let selected;
   if (builtIn) {
     const runtime = bundledRuntime();
@@ -261,6 +268,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
       ...(usageBaseline ? { runtimeUsageTotal: usageBaseline } : {}) } : {}),
     promptPreview: prompt.trim().replace(/\s+/g, " ").slice(0, 160) };
   writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable, agent, interactive,
+    ...(input ? { input, ...preparedInput } : {}),
     ...(selected.transport === "bundled_personal" ? { personalProfile: selected.profile } : {}),
     ...(builtIn ? { gateway: builtIn.gateway, resumeThreadId, usageBaseline } : {}) }));
   saveState(directory, state);
@@ -472,6 +480,12 @@ async function superviseInteractive(directory, state, request) {
         if (state.sessionId) appendJobEvent(directory, value);
         if (value.type === "usage.updated") { state.usage = value.usage; state.runtimeUsageTotal = value.total_usage; persist(); }
         if (value.type === "thread.started") { state.threadId = value.thread_id; persist(); }
+        if (value.type === "input.delivered" && request.input) {
+          state.inputDelivered = true;
+          state.inputDeliveredThreadId = value.thread_id;
+          state.inputContext = request.inputContext || {};
+          persist();
+        }
         if (value.type === "item.completed" && isCodexPermissionDenial(value.item)) {
           state.permissionDenials = (state.permissionDenials || 0) + 1;
           state.errorType = "permission_denied";
@@ -534,7 +548,7 @@ async function superviseInteractive(directory, state, request) {
       }
     }, 100);
     timer = setTimeout(() => stop("timed_out"), request.timeout * 1000);
-    const completion = session.start(request.prompt);
+    const completion = session.start(request.runtimeInput || request.input || request.prompt);
     state.agentPid = session.child?.pid;
     persist();
     const result = await completion;
@@ -606,7 +620,9 @@ function jobEvents(id, cursor = 0, limit = 100) {
 
 function resumeContext(id) {
   const state = loadState(jobDir(id));
-  return { resumeThreadId: state.threadId, usageBaseline: state.runtimeUsageTotal };
+  return { resumeThreadId: state.threadId, usageBaseline: state.runtimeUsageTotal,
+    inputDeliveredThreadId: state.inputDelivered ? state.inputDeliveredThreadId : undefined,
+    inputContext: state.inputDelivered ? state.inputContext || {} : {} };
 }
 
 async function supervise(id) {

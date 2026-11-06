@@ -66,6 +66,7 @@ function launchConfiguration(gateway) {
     // the gateway's context_length_exceeded rejection boundary; the pinned
     // runtime reports a terminal error rather than silently replaying the task.
     model_auto_compact_token_limit: 32000, model_reasoning_summary: "auto",
+    "features.view_image": true,
     "shell_environment_policy.ignore_default_excludes": true,
     "shell_environment_policy.exclude": ["SHAPES_RUNTIME_TOKEN"],
     "sandbox_workspace_write.writable_roots": [],
@@ -73,7 +74,7 @@ function launchConfiguration(gateway) {
   // Match the capabilities supported by the existing billed Responses gateway.
   for (const feature of ["apps", "browser_use", "computer_use", "enable_request_compression", "goals", "hooks",
     "image_generation", "memories", "multi_agent", "multi_agent_v2", "plugins", "realtime_conversation",
-    "remote_plugin", "skill_search", "sleep_tool", "tool_suggest", "unbounded_connection_retries", "view_image", "workspace_dependencies"]) {
+    "remote_plugin", "skill_search", "sleep_tool", "tool_suggest", "unbounded_connection_retries", "workspace_dependencies"]) {
     config[`features.${feature}`] = false;
   }
   return { environment, model: gateway.model, modelProvider: "shapes",

@@ -9,6 +9,8 @@ const crypto = require("node:crypto");
 const { startServer } = require("../src/server");
 const { getStatus, cancelJob } = require("../src/codex");
 const terminal = new Set(["completed", "failed", "cancelled", "timed_out"]);
+const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGP4z8CAFWEXHbQSACj/P8Fu7N9hAAAAAElFTkSuQmCC";
+const OTHER_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg==";
 
 async function until(id, condition = (value) => terminal.has(value.state), attempts = 150) {
   for (let index = 0; index < attempts; index++) {
@@ -19,7 +21,7 @@ async function until(id, condition = (value) => terminal.has(value.state), attem
   throw new Error(`Job did not settle: ${JSON.stringify(getStatus(id))}`);
 }
 
-async function fixture(t, { stallFirstInitialize = false } = {}) {
+async function fixture(t, { stallFirstInitialize = false, rejectFirstTurn = false } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-sessions-test-"));
   const state = path.join(directory, "state"), jobs = path.join(directory, "jobs");
   const executable = path.join(directory, "app-server"), calls = path.join(directory, "calls.jsonl");
@@ -51,6 +53,8 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
  }
  if(m.method==='turn/start'){
   turns++;fs.writeFileSync(stored,JSON.stringify({threadId,turns,billed}));
+  const rejection=${JSON.stringify(path.join(directory, "rejected-first-turn"))};
+  if(${rejectFirstTurn}&&!fs.existsSync(rejection)){fs.writeFileSync(rejection,'rejected');send({id:m.id,error:{code:-32602,message:'Fixture rejected turn before input delivery'}});return;}
   const turnId='turn-'+turns,prompt=m.params.input[0].text;
   reply(m,{turn:{id:turnId,status:'inProgress'}});
   if(prompt==='detached-pipe'){
@@ -113,6 +117,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line',line=>
 test("session discovery and immutable creation need no personal login or inference", async (t) => {
   const f = await fixture(t);
   assert.equal((await f.request("/capabilities")).body.features.bundled_sessions, true);
+  assert.equal((await f.request("/capabilities")).body.features.session_input, true);
   assert.equal((await f.request("/sessions/create", f.create, "wrong")).status, 401);
   assert.equal(fs.existsSync(f.state), false);
   const first = await f.request("/sessions/create", f.create);
@@ -126,7 +131,182 @@ test("session discovery and immutable creation need no personal login or inferen
   assert.equal(fs.existsSync(f.calls), false);
   fs.unlinkSync(f.executable);
   assert.equal((await f.request("/capabilities")).body.features.bundled_sessions, false);
+  assert.equal((await f.request("/capabilities")).body.features.session_input, false);
   assert.equal((await f.request("/agents/start", f.turn())).status, 409);
+});
+
+test("typed original input survives authenticated dispatch, retry, restart and same-thread followup", async (t) => {
+  const f = await fixture(t);
+  await f.request("/sessions/create", f.create);
+  const { prompt: _prompt, ...base } = f.turn();
+  const input = [{ type: "text", text: "Fix this exact bug.\nKeep my wording." },
+    { type: "image", url: PNG },
+    { type: "text", text: "Inspect the selected project before making changes." }];
+  const body = { ...base, input };
+  assert.equal((await f.request("/agents/start", body, "wrong")).status, 401);
+  assert.equal(fs.existsSync(f.calls), false);
+  const start = await f.request("/agents/start", body);
+  assert.equal(start.status, 202);
+  const first = await until(start.body.job_id);
+  assert.equal(first.state, "completed");
+  const stored = path.join(f.jobs, start.body.job_id, "request.json");
+  assert.deepEqual(JSON.parse(fs.readFileSync(stored)).input, input);
+  assert.equal(fs.statSync(stored).mode & 0o777, 0o600);
+  assert.equal((await f.request(`/agents/jobs?request_key=${body.request_key}`)).body.jobs[0].task_preview.includes("base64"), false);
+  assert.equal((await f.request("/agents/start", body)).body.job_id, start.body.job_id);
+  const changed = input.map((item) => item.type === "image" ? { ...item, url: OTHER_PNG } : item);
+  assert.equal((await f.request("/agents/start", { ...body, input: changed })).status, 409);
+  assert.equal((await f.request("/agents/start", { ...body, input: [...input].reverse() })).status, 409);
+  await f.restart();
+  assert.equal((await f.request(`/agents/jobs?request_key=${body.request_key}`)).body.jobs[0].job_id, start.body.job_id);
+  assert.equal((await f.request(`/sessions/read?${new URLSearchParams(f.identity)}`)).body.turn_count, 1);
+  const { prompt: _followup, ...followup } = f.turn("unused", "typed_input_followup_key");
+  const nextInput = [{ type: "text", text: "Now verify the result." }];
+  const next = await f.request("/agents/start", { ...followup, input: nextInput });
+  const second = await until(next.body.job_id);
+  assert.equal(second.thread_id, first.thread_id);
+  const turns = fs.readFileSync(f.calls, "utf8").trim().split("\n").map(JSON.parse).filter((call) => call.method === "turn/start");
+  assert.deepEqual(turns.map((turn) => turn.params.input), [input, nextInput]);
+});
+
+test("typed text at the aggregate byte limit keeps all input despite preview separators", async (t) => {
+  const f = await fixture(t);
+  await f.request("/sessions/create", f.create);
+  const { prompt: _prompt, ...base } = f.turn();
+  const input = [{ type: "text", text: "é".repeat(16384) }, { type: "text", text: "x".repeat(32768) }];
+  assert.equal(input.reduce((bytes, item) => bytes + Buffer.byteLength(item.text), 0), 65536);
+  const started = await f.request("/agents/start", { ...base, input });
+  assert.equal(started.status, 202, JSON.stringify(started.body));
+  assert.equal((await until(started.body.job_id)).state, "completed");
+  const request = JSON.parse(fs.readFileSync(path.join(f.jobs, started.body.job_id, "request.json")));
+  assert.deepEqual(request.input, input);
+  assert.ok(Buffer.byteLength(request.prompt) <= 65536);
+  const calls = fs.readFileSync(f.calls, "utf8").trim().split("\n").map(JSON.parse);
+  assert.deepEqual(calls.find((call) => call.method === "turn/start").params.input, input);
+});
+
+test("source context is delivered once across five followups and restart, with stable retry and isolated sessions", async (t) => {
+  const f = await fixture(t);
+  await f.request("/sessions/create", f.create);
+  const context = [{ type: "text", text: "Fix this exact screenshot", context_key: "source:sha256:0" },
+    { type: "image", url: PNG, context_key: "source:sha256:1" }];
+  const { prompt: _prompt, ...base } = f.turn();
+  const body = { ...base, input: [...context, { type: "text", text: "Inspect before editing." }] };
+  const first = await f.request("/agents/start", body);
+  assert.equal(first.status, 202);
+  const initial = await until(first.body.job_id);
+  assert.equal(initial.state, "completed");
+  for (let index = 0; index < 5; index++) {
+    if (index === 2) await f.restart();
+    const { prompt: _unused, ...next } = f.turn("unused", `source_followup_${index}_key`);
+    const input = [...context, { type: "text", text: `Continue step ${index}.` }];
+    const started = await f.request("/agents/start", { ...next, input });
+    assert.equal(started.status, 202);
+    const result = await until(started.body.job_id);
+    assert.equal(result.state, "completed");
+    assert.equal(result.thread_id, initial.thread_id);
+    const stored = JSON.parse(fs.readFileSync(path.join(f.jobs, started.body.job_id, "request.json")));
+    assert.deepEqual(stored.input, input);
+    assert.deepEqual(stored.runtimeInput, [input.at(-1)]);
+  }
+  const read = await f.request(`/sessions/read?${new URLSearchParams(f.identity)}`);
+  assert.equal(read.body.context_thread_id, initial.thread_id);
+  assert.deepEqual(read.body.delivered_context_keys.sort(), context.map((item) => item.context_key).sort());
+  assert.equal((await f.request(`/sessions/read?${new URLSearchParams(f.identity)}`, undefined, "wrong")).status, 401);
+  const retried = await f.request("/agents/start", body);
+  assert.equal(retried.body.job_id, first.body.job_id);
+  assert.equal(retried.body.deduplicated, true);
+  const { prompt: _unused, ...changed } = f.turn("unused", "changed_context_new_key");
+  assert.equal((await f.request("/agents/start", { ...changed,
+    input: [{ ...context[0], text: "Different source under same key" }, body.input.at(-1)] })).status, 409);
+  const other = { ...f.identity, session_id: crypto.randomUUID(), scope_id: "different-session-scope" };
+  await f.request("/sessions/create", { ...f.create, ...other });
+  const isolated = await f.request("/agents/start", { ...changed, ...other, input: body.input,
+    gateway: { ...changed.gateway, ...other } });
+  assert.equal(isolated.status, 202);
+  assert.equal((await until(isolated.body.job_id)).state, "completed");
+  const calls = fs.readFileSync(f.calls, "utf8").trim().split("\n").map(JSON.parse).filter((call) => call.method === "turn/start");
+  const original = body.input.map(({ context_key: _key, ...item }) => item);
+  assert.deepEqual(calls[0].params.input, original);
+  assert.deepEqual(calls.at(-1).params.input, original);
+  assert.ok(calls.slice(1, -1).every((call) => call.params.input.length === 1));
+  assert.ok(calls.every((call) => call.params.input.every((item) => !Object.hasOwn(item, "context_key"))));
+});
+
+test("a created thread with rejected input does not suppress context on the next turn", async (t) => {
+  const f = await fixture(t, { rejectFirstTurn: true });
+  await f.request("/sessions/create", f.create);
+  const input = [{ type: "text", text: "Original request", context_key: "original:0" },
+    { type: "image", url: PNG, context_key: "original:1" }];
+  const { prompt: _prompt, ...base } = f.turn();
+  const first = await f.request("/agents/start", { ...base, input });
+  const failed = await until(first.body.job_id);
+  assert.equal(failed.state, "failed");
+  const read = (await f.request(`/sessions/read?${new URLSearchParams(f.identity)}`)).body;
+  assert.equal(read.context_thread_id, failed.thread_id);
+  assert.deepEqual(read.delivered_context_keys, []);
+  const { prompt: _next, ...next } = f.turn("unused", "retry_after_rejected_input");
+  const second = await f.request("/agents/start", { ...next, input });
+  assert.equal((await until(second.body.job_id)).state, "completed");
+  const calls = fs.readFileSync(f.calls, "utf8").trim().split("\n").map(JSON.parse).filter((call) => call.method === "turn/start");
+  assert.deepEqual(calls[0].params.input, calls[1].params.input);
+  assert.equal((await f.request(`/sessions/read?${new URLSearchParams(f.identity)}`)).body.delivered_context_keys.length, 2);
+});
+
+test("invalid typed input is rejected before creating a job or calling the runtime", async (t) => {
+  const f = await fixture(t);
+  await f.request("/sessions/create", f.create);
+  const { prompt: _prompt, ...base } = f.turn();
+  const text = { type: "text", text: "original" }, image = { type: "image", url: PNG };
+  const largeImage = (size) => ({ type: "image", url: "data:image/png;base64," + Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(size - 8),
+  ]).toString("base64") });
+  const invalid = [null, [], {}, [null], [{ ...text, role: "system" }], [{ type: "localImage", path: "/private.png" }],
+    [{ ...text, context_key: "" }], [{ ...text, context_key: "x".repeat(161) }], [{ ...text, context_key: "has space" }],
+    [{ ...text, context_key: "same" }, { ...image, context_key: "same" }],
+    [text, { ...image, detail: "high" }], [{ type: "text", text: 1 }], [{ type: "text", text: "  " }],
+    Array(65).fill(text), Array(5).fill(image), [{ type: "text", text: "é".repeat(32769) }],
+    [largeImage(65537)], [largeImage(40000), largeImage(40000)],
+    [{ type: "text", text: "x".repeat(65536) }, largeImage(50000)],
+    [{ type: "image", url: PNG.replace("image/png", "image/jpeg") }],
+    [{ type: "image", url: PNG + "=" }], [{ type: "image", url: PNG.replace("base64,", "base64,\n") }],
+    ...["https://files.example.test/a.png", "http://files.example.test/a.png", "file:///private.png", "data:image/png;base64,eA==", "https://user:pass@files.example.test/a.png",
+      "https://files.example.test/a.png#", "https://files.example.test/a.png#part", "https://files.example.test/a b.png",
+      "https://files.example.test/" + "x".repeat(4096)].map((url) => [{ type: "image", url }])];
+  for (const input of invalid) assert.equal((await f.request("/agents/start", { ...base, input })).status, 400, JSON.stringify(input).slice(0, 200));
+  assert.equal((await f.request("/agents/start", { ...base, prompt: "duplicate", input: [text] })).status, 400);
+  assert.equal((await f.request("/agents/start", base)).status, 400);
+  assert.equal(fs.existsSync(f.calls), false);
+  assert.deepEqual((await f.request("/agents/jobs")).body.jobs, []);
+  assert.equal((await f.request(`/sessions/read?${new URLSearchParams(f.identity)}`)).body.turn_count, 0);
+});
+
+test("image-only session input remains image input and uses a text-only preview", async (t) => {
+  const f = await fixture(t);
+  await f.request("/sessions/create", f.create);
+  const { prompt: _prompt, ...base } = f.turn();
+  const input = Array.from({ length: 4 }, () => ({ type: "image", url: PNG }));
+  const start = await f.request("/agents/start", { ...base, input });
+  assert.equal(start.status, 202);
+  assert.equal((await until(start.body.job_id)).state, "completed");
+  const calls = fs.readFileSync(f.calls, "utf8").trim().split("\n").map(JSON.parse);
+  assert.deepEqual(calls.find((call) => call.method === "turn/start").params.input, input);
+  assert.equal((await f.request(`/agents/jobs?request_key=${base.request_key}`)).body.jobs[0].task_preview, "Image attachment");
+});
+
+test("typed image turns retain existing cancellation and allow a later legacy prompt", async (t) => {
+  const f = await fixture(t);
+  await f.request("/sessions/create", f.create);
+  const { prompt: _prompt, ...base } = f.turn();
+  const start = await f.request("/agents/start", { ...base, input: [{ type: "text", text: "wait" },
+    { type: "image", url: PNG }] });
+  await until(start.body.job_id, (value) => value.state === "waiting_on_user");
+  assert.equal((await f.request("/agents/cancel", { job_id: start.body.job_id })).status, 200);
+  const cancelled = await until(start.body.job_id);
+  assert.equal(cancelled.state, "cancelled");
+  await f.restart();
+  const next = await f.request("/agents/start", f.turn("legacy followup", "legacy_after_image_key"));
+  assert.equal((await until(next.body.job_id)).thread_id, cancelled.thread_id);
 });
 
 test("HTTP session cancellation reaches a durable terminal receipt despite escaped pipes", async (t) => {
