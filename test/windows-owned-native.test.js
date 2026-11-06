@@ -28,6 +28,42 @@ test("Windows Job helper preserves stdin/stdout and literal command arguments", 
   assert.deepEqual(JSON.parse(output), { args, data: "private test input" });
 });
 
+test("Windows handoff control input is hidden from the command and EOF fails closed", { skip: !available, timeout: 15000 }, async () => {
+  for (const release of [true, false]) {
+    const child = owned(["-e", "let data='';process.stdin.on('data',p=>data+=p);process.stdin.on('end',()=>console.log(JSON.stringify({data})))"], { releaseOnSuccess: true });
+    let output = "";
+    child.stdout.on("data", (part) => { output += part; }); child.stderr.resume();
+    const closed = once(child, "close"); let timer;
+    try {
+      await Promise.race([once(child.stdout, "end"), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("command received the private control pipe instead of EOF")), 5000); })]);
+      clearTimeout(timer);
+      assert.deepEqual(JSON.parse(output), { data: "" });
+      assert.equal(child.exitCode, null, "successful leader must wait for its owner");
+      child.stdin.end(release ? "release\n" : undefined);
+      assert.equal((await closed)[0], release ? 0 : 70);
+    } finally { clearTimeout(timer); if (child.exitCode === null && child.signalCode === null) { child.kill(); await closed; } }
+  }
+});
+
+test("Windows control EOF kills surviving descendants after successful leader exit", { skip: !available, timeout: 15000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-release-eof-")), receipt = path.join(directory, "owned.json");
+  const source = "const child=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:['ignore','inherit','inherit']});require('node:fs').writeFileSync(process.argv[1],JSON.stringify({parent:process.pid,child:child.pid}));child.unref();";
+  const wrapper = owned(["-e", source, receipt], { releaseOnSuccess: true });
+  const closed = once(wrapper, "close"); wrapper.stdout.resume(); wrapper.stderr.resume();
+  try {
+    await waitFor(() => fs.existsSync(receipt));
+    const pids = JSON.parse(fs.readFileSync(receipt, "utf8"));
+    await waitFor(() => !alive(pids.parent));
+    assert.equal(alive(pids.child), true);
+    wrapper.stdin.end();
+    assert.equal((await closed)[0], 70);
+    await waitFor(() => !alive(pids.child));
+  } finally {
+    if (wrapper.exitCode === null && wrapper.signalCode === null) { wrapper.kill(); await closed; }
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("terminating a Windows Job wrapper kills its live child and grandchild", { skip: !available, timeout: 15000 }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-owned-"));
   const receipt = path.join(directory, "owned.json");

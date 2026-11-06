@@ -149,7 +149,8 @@ function runCommand({ cmd, cwd, timeout, shell, signal }) {
   }
   return new Promise((resolve) => {
     const buffers = { stdout: [], stderr: [] }, sizes = { stdout: 0, stderr: 0 };
-    let child, timer, escalation, transport, stopped, finished = false, forceStopped = false;
+    let child, timer, escalation, settlement, transport, stopped, handoffError, finished = false, forceStopped = false, handoff = false;
+    const outputEnded = { stdout: false, stderr: false };
     const abort = () => stop("command cancelled");
     const kill = (signal) => {
       if (!child?.pid) return;
@@ -164,7 +165,7 @@ function runCommand({ cmd, cwd, timeout, shell, signal }) {
       } catch (error) { if (error.code !== "ESRCH") throw error; }
     };
     const stop = (reason) => {
-      if (stopped || finished) return;
+      if (stopped || finished || handoff) return;
       stopped = reason;
       // Terminate the command's process group, not only /bin/sh. Descendants
       // that deliberately create another group are outside this boundary.
@@ -183,7 +184,9 @@ function runCommand({ cmd, cwd, timeout, shell, signal }) {
       finished = true;
       clearTimeout(timer);
       clearTimeout(escalation);
+      clearTimeout(settlement);
       signal?.removeEventListener("abort", abort);
+      child?.stdin?.destroy();
       // Children may have redirected their pipes before the shell exited.
       if (stopped) kill("SIGKILL");
       const stdout = Buffer.concat(buffers.stdout).toString("utf8");
@@ -203,16 +206,35 @@ function runCommand({ cmd, cwd, timeout, shell, signal }) {
       sizes[name] += chunk.length;
       if (sizes[name] > MAX_COMMAND_BUFFER) stop(`${name} exceeded the command output limit`);
     };
+    const releaseAfterOutput = (name) => {
+      outputEnded[name] = true;
+      if (!outputEnded.stdout || !outputEnded.stderr || stopped || finished || handoff || child.exitCode !== null || child.signalCode !== null) return;
+      // A live successful helper closes output before waiting for release. EOF
+      // can also precede a failed helper's exit event, so its eventual nonzero
+      // status remains authoritative even if this control write encounters EPIPE.
+      // Commit settlement before sending release; a later cancel cannot claim
+      // that intentionally detached background work was stopped. Still await
+      // the helper's exit receipt, with bounded failure if handoff cannot finish.
+      handoff = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      settlement = setTimeout(() => { kill("SIGKILL"); finish(null, new Error("Windows process ownership handoff did not finish")); }, 5000);
+      child.stdin.end("release\n");
+    };
     try {
       if (signal?.aborted) { stopped = "command cancelled"; finish(null); return; }
       transport = commandShell(cmd, shell);
       child = spawnOwned(transport.executable, transport.args, { cwd: workdir, env: localEnvironment(), windowsCommand: transport.windowsCommand || false, releaseOnSuccess: true,
-
-        detached: process.platform !== "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+        detached: process.platform !== "win32", windowsHide: true, stdio: [process.platform === "win32" ? "pipe" : "ignore", "pipe", "pipe"] });
       child.stdout.on("data", (chunk) => capture("stdout", chunk));
       child.stderr.on("data", (chunk) => capture("stderr", chunk));
+      if (process.platform === "win32") {
+        child.stdout.once("end", () => releaseAfterOutput("stdout"));
+        child.stderr.once("end", () => releaseAfterOutput("stderr"));
+        child.stdin.on("error", () => { handoffError = new Error("Windows process ownership handoff failed"); });
+      }
       child.once("error", (error) => finish(null, error));
-      child.once("close", (code) => finish(code));
+      child.once("close", (code) => finish(code, code === 0 ? handoffError : undefined));
       timer = setTimeout(() => stop(`timed out after ${seconds}s`), seconds * 1000);
       signal?.addEventListener("abort", abort, { once: true });
     } catch (error) { finish(null, error); }

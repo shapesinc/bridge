@@ -20,6 +20,7 @@ function windowsArguments(executable, args, { parentPid = process.pid, console =
   }
   if (windowsCommand && (path.win32.basename(executable).toLowerCase() !== "cmd.exe" || args.length !== 1 || /[\r\n]/.test(args[0]))) throw new Error("Invalid Windows command transport.");
   if (parentPid !== null && (!Number.isSafeInteger(parentPid) || parentPid <= 0)) throw new Error("Invalid Windows process owner.");
+  if (releaseOnSuccess && (parentPid === null || console)) throw new Error("Windows ownership handoff requires a parent and private control input.");
   return [...(parentPid === null ? [] : ["--parent-pid", String(parentPid)]), ...(ready ? ["--ready"] : []), ...(console ? ["--console"] : []),
     ...(releaseOnSuccess ? ["--release-on-success"] : []), ...(windowsCommand ? ["--command-string"] : []), "--", executable, ...args];
 }
@@ -31,6 +32,7 @@ function spawnOwned(executable, args, options = {}, { platform = process.platfor
   if (platform !== "win32") return spawnProcess(executable, args, { ...options, detached: true });
   if (!exists(host)) throw new Error("The installed Windows process supervisor is missing.");
   if (options.stdio?.includes("ipc")) throw new Error("Windows Job host does not forward Node IPC.");
+  if (options.releaseOnSuccess && (!Array.isArray(options.stdio) || options.stdio[0] !== "pipe")) throw new Error("Windows ownership handoff requires piped control input.");
   return spawnProcess(host, windowsArguments(executable, args, { parentPid: options.parentPid, console: options.console, ready: options.ready,
     windowsCommand: options.windowsCommand, releaseOnSuccess: options.releaseOnSuccess }),
     { ...options, shell: false, detached: options.parentPid === null, windowsHide: true });

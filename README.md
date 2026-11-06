@@ -181,6 +181,12 @@ Recoverable commands use `/commands/start`, `/commands/status` and
 supervisor enforces the command deadline independently of the HTTP connection.
 On Linux user-service installations, each supervisor runs in a separate systemd
 user scope so restarting the connection does not kill an in-flight command.
+Native app-owned runtimes keep their existing cancellation boundary: explicit
+pause, logout, disconnect, update retirement or owner termination stops owned
+commands too. An interrupted command keeps its receipt and mutation lock until
+the local owner reconciles it; reopening the app never replays it. A foreground
+close or Quit merely detaches from an established background connection and
+does not retire its runtime. This differs from an explicit disconnect.
 Poll the receipt after a timeout; never submit a second command to recover a
 lost response. Receipts under the private `command-jobs` directory retain job
 identity, command hash, timing, exit status and bounded output for 24 hours

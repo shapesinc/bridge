@@ -76,3 +76,32 @@ test("successful Windows background launch survives its command and ends with th
   runtime.kill(); await once(runtime, "close");
   await waitFor(() => !alive(pid));
 });
+
+for (const cancellation of [false, true]) {
+  test(`Windows ${cancellation ? "cancellation" : "timeout"} still owns inherited output after the shell exits successfully`, { skip: !available, timeout: 30000 }, async (t) => {
+    const f = await fixture(t), resultFile = path.join(f.directory, "result.json"), pidsFile = path.join(f.directory, "pids.json");
+    const started = path.join(f.directory, "descendant-started.txt"), escaped = path.join(f.directory, "must-not-write.txt");
+    const descendant = path.join(f.directory, "descendant.js"), launcher = path.join(f.directory, "launcher.js");
+    fs.writeFileSync(descendant, `require('node:fs').writeFileSync(${JSON.stringify(started)},'started');setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(escaped)},'escaped'),4000);setInterval(()=>{},1000);`);
+    fs.writeFileSync(launcher, `const child=require('node:child_process').spawn(process.execPath,[${JSON.stringify(descendant)}],{stdio:['ignore','inherit','inherit'],detached:true});require('node:fs').writeFileSync(${JSON.stringify(pidsFile)},JSON.stringify({leader:process.pid,descendant:child.pid}));child.unref();`);
+    const quote = (value) => "'" + value.replaceAll("'", "''") + "'";
+    const command = { cmd: `& ${quote(path.join(f.directory, "node.exe"))} ${quote(launcher)}`, cwd: f.directory, timeout: cancellation ? 15 : 2 };
+    // Keep the enclosing runtime alive after runCommand settles, so it cannot
+    // conceal an escaped descendant by cleaning up the command for this test.
+    const source = "const controller=new AbortController();const timer=process.argv[4]==='cancel'?setTimeout(()=>controller.abort(),2000):null;require(process.argv[1]).runCommand({...JSON.parse(process.argv[2]),signal:controller.signal}).then(result=>{clearTimeout(timer);require('node:fs').writeFileSync(process.argv[3],JSON.stringify(result));setInterval(()=>{},1000)},()=>process.exit(1));";
+    f.own(spawn(path.join(f.directory, "shapes.inc Bridge Job.exe"), ["--parent-pid", String(process.pid), "--", path.join(f.directory, "node.exe"), "-e", source,
+      path.resolve(__dirname, "../src/server.js"), JSON.stringify(command), resultFile, cancellation ? "cancel" : "timeout"],
+    { stdio: "ignore", windowsHide: true, env: { ...process.env, SHAPES_BRIDGE_HOME: path.join(f.directory, "state") } }));
+    await waitFor(() => fs.existsSync(started) && fs.existsSync(pidsFile));
+    const pids = JSON.parse(fs.readFileSync(pidsFile, "utf8"));
+    await waitFor(() => !alive(pids.leader));
+    assert.equal(alive(pids.descendant), true, "descendant must retain output after its launcher exits");
+    await waitFor(() => fs.existsSync(resultFile));
+    const result = JSON.parse(fs.readFileSync(resultFile, "utf8"));
+    assert.equal(result.exit_code, -1);
+    assert.match(result.termination_reason, cancellation ? /command cancelled/ : /timed out/);
+    await waitFor(() => !alive(pids.descendant));
+    await new Promise((resolve) => setTimeout(resolve, 4500));
+    assert.equal(fs.existsSync(escaped), false, "a stopped receipt must prevent the descendant's delayed side effect");
+  });
+}

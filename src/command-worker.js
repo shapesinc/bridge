@@ -20,7 +20,7 @@ async function supervise(id) {
     Object.assign(record, { state: "running", supervisor_pid: process.pid, started_at: Date.now() });
     jobs.save(record);
     const result = await runCommand({ ...record.command, signal: abort.signal });
-    Object.assign(record, { state: abort.signal.aborted ? "cancelled" : result.termination_reason?.startsWith("timed out") ? "timed_out" : result.exit_code === 0 ? "completed" : "failed",
+    Object.assign(record, { state: result.termination_reason === "command cancelled" ? "cancelled" : result.termination_reason?.startsWith("timed out") ? "timed_out" : result.exit_code === 0 ? "completed" : "failed",
       finished_at: Date.now(), result });
     jobs.save(record);
     jobs.release(id);

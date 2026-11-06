@@ -21,6 +21,12 @@ test("missing Job helper and command-script paths fail before spawning", () => {
   assert.throws(() => windowsArguments("C:\\npm\\codex.cmd", []), /Windows executable/);
   assert.throws(() => windowsArguments("codex.exe", []), /Windows executable/);
 });
+test("successful ownership handoff requires a live parent and an isolated input pipe", () => {
+  assert.throws(() => windowsArguments("C:\\node.exe", [], { parentPid: null, releaseOnSuccess: true }), /private control input/);
+  assert.throws(() => windowsArguments("C:\\node.exe", [], { console: true, releaseOnSuccess: true }), /private control input/);
+  assert.throws(() => spawnOwned("C:\\node.exe", [], { releaseOnSuccess: true, stdio: ["ignore", "pipe", "pipe"] },
+    { platform: "win32", host: "C:\\app\\Job.exe", exists: () => true, spawnProcess: () => assert.fail("must fail before spawn") }), /piped control input/);
+});
 test("signed app helper selection never compiles or falls back when its bundled helper is missing", () => {
   const settings = { platform: "win32", executable: "C:\\app\\node.exe", sourceDirectory: "C:\\app\\bridge\\src" };
   assert.equal(jobHostPath({ ...settings, exists: (file) => file === "C:\\app\\manifest.json", compile: () => assert.fail("must not compile signed app fallback") }),
