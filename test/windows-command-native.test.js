@@ -30,8 +30,8 @@ async function fixture(t) {
   };
   return { directory, run, own: (child) => { owned.add(child); return child; } };
 }
-const waitFor = async (predicate) => {
-  const deadline = Date.now() + 10000;
+const waitFor = async (predicate, timeout = 10000) => {
+  const deadline = Date.now() + timeout;
   while (Date.now() < deadline) { if (predicate()) return; await new Promise((resolve) => setTimeout(resolve, 30)); }
   assert.fail("The owned Windows command did not settle.");
 };
@@ -78,30 +78,36 @@ test("successful Windows background launch survives its command and ends with th
 });
 
 for (const cancellation of [false, true]) {
-  test(`Windows ${cancellation ? "cancellation" : "timeout"} still owns inherited output after the shell exits successfully`, { skip: !available, timeout: 30000 }, async (t) => {
+  test(`Windows ${cancellation ? "cancellation" : "timeout"} still owns inherited output after the shell exits successfully`, { skip: !available, timeout: 45000 }, async (t) => {
     const f = await fixture(t), resultFile = path.join(f.directory, "result.json"), pidsFile = path.join(f.directory, "pids.json");
     const started = path.join(f.directory, "descendant-started.txt"), escaped = path.join(f.directory, "must-not-write.txt");
+    const cancelFile = path.join(f.directory, "cancel-requested");
+    const lateWriteMs = cancellation ? 4000 : 25000;
     const descendant = path.join(f.directory, "descendant.js"), launcher = path.join(f.directory, "launcher.js");
-    fs.writeFileSync(descendant, `require('node:fs').writeFileSync(${JSON.stringify(started)},'started');setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(escaped)},'escaped'),4000);setInterval(()=>{},1000);`);
-    fs.writeFileSync(launcher, `const child=require('node:child_process').spawn(process.execPath,[${JSON.stringify(descendant)}],{stdio:['ignore','inherit','inherit'],detached:true});require('node:fs').writeFileSync(${JSON.stringify(pidsFile)},JSON.stringify({leader:process.pid,descendant:child.pid}));child.unref();`);
+    fs.writeFileSync(descendant, `const fs=require('node:fs'),file=${JSON.stringify(started)},startedAt=Date.now();fs.writeFileSync(file+'.tmp',JSON.stringify({startedAt}));fs.renameSync(file+'.tmp',file);setTimeout(()=>fs.writeFileSync(${JSON.stringify(escaped)},'escaped'),${lateWriteMs});setInterval(()=>{},1000);`);
+    fs.writeFileSync(launcher, `const fs=require('node:fs'),file=${JSON.stringify(pidsFile)};const child=require('node:child_process').spawn(process.execPath,[${JSON.stringify(descendant)}],{stdio:['ignore','inherit','inherit'],detached:true});fs.writeFileSync(file+'.tmp',JSON.stringify({leader:process.pid,descendant:child.pid}));fs.renameSync(file+'.tmp',file);child.unref();`);
     const quote = (value) => "'" + value.replaceAll("'", "''") + "'";
-    const command = { cmd: `& ${quote(path.join(f.directory, "node.exe"))} ${quote(launcher)}`, cwd: f.directory, timeout: cancellation ? 15 : 2 };
+    const command = { cmd: `& ${quote(path.join(f.directory, "node.exe"))} ${quote(launcher)}`, cwd: f.directory, timeout: cancellation ? 30 : 20 };
     // Keep the enclosing runtime alive after runCommand settles, so it cannot
     // conceal an escaped descendant by cleaning up the command for this test.
-    const source = "const controller=new AbortController();const timer=process.argv[4]==='cancel'?setTimeout(()=>controller.abort(),2000):null;require(process.argv[1]).runCommand({...JSON.parse(process.argv[2]),signal:controller.signal}).then(result=>{clearTimeout(timer);require('node:fs').writeFileSync(process.argv[3],JSON.stringify(result));setInterval(()=>{},1000)},()=>process.exit(1));";
+    const source = "const fs=require('node:fs'),controller=new AbortController();const timer=process.argv[4]?setInterval(()=>{if(fs.existsSync(process.argv[4]))controller.abort()},25):null;require(process.argv[1]).runCommand({...JSON.parse(process.argv[2]),signal:controller.signal}).then(result=>{clearInterval(timer);const file=process.argv[3];fs.writeFileSync(file+'.tmp',JSON.stringify(result));fs.renameSync(file+'.tmp',file);setInterval(()=>{},1000)},()=>process.exit(1));";
     f.own(spawn(path.join(f.directory, "shapes.inc Bridge Job.exe"), ["--parent-pid", String(process.pid), "--", path.join(f.directory, "node.exe"), "-e", source,
-      path.resolve(__dirname, "../src/server.js"), JSON.stringify(command), resultFile, cancellation ? "cancel" : "timeout"],
+      path.resolve(__dirname, "../src/server.js"), JSON.stringify(command), resultFile, cancellation ? cancelFile : ""],
     { stdio: "ignore", windowsHide: true, env: { ...process.env, SHAPES_BRIDGE_HOME: path.join(f.directory, "state") } }));
-    await waitFor(() => fs.existsSync(started) && fs.existsSync(pidsFile));
+    await waitFor(() => fs.existsSync(started) && fs.existsSync(pidsFile) && !alive(JSON.parse(fs.readFileSync(pidsFile, "utf8")).leader));
     const pids = JSON.parse(fs.readFileSync(pidsFile, "utf8"));
-    await waitFor(() => !alive(pids.leader));
+    const descendantStarted = JSON.parse(fs.readFileSync(started, "utf8"));
     assert.equal(alive(pids.descendant), true, "descendant must retain output after its launcher exits");
-    await waitFor(() => fs.existsSync(resultFile));
+    if (cancellation) {
+      fs.writeFileSync(cancelFile + ".tmp", "cancel");
+      fs.renameSync(cancelFile + ".tmp", cancelFile);
+    }
+    await waitFor(() => fs.existsSync(resultFile), 25000);
     const result = JSON.parse(fs.readFileSync(resultFile, "utf8"));
     assert.equal(result.exit_code, -1);
     assert.match(result.termination_reason, cancellation ? /command cancelled/ : /timed out/);
     await waitFor(() => !alive(pids.descendant));
-    await new Promise((resolve) => setTimeout(resolve, 4500));
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, descendantStarted.startedAt + lateWriteMs + 1000 - Date.now())));
     assert.equal(fs.existsSync(escaped), false, "a stopped receipt must prevent the descendant's delayed side effect");
   });
 }

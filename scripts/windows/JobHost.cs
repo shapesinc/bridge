@@ -9,6 +9,8 @@ using System.Text;
 using System.Threading;
 
 class JobHost {
+    static readonly string diagnosticPath = Environment.GetEnvironmentVariable("SHAPES_TEST_JOB_HOST_TRACE");
+    static readonly object diagnosticLock = new object();
     [StructLayout(LayoutKind.Sequential)] struct BasicLimits {
         public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
         public uint LimitFlags;
@@ -35,18 +37,48 @@ class JobHost {
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
     [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
     [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int handle);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetStdHandle(int handle, IntPtr value);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetHandleInformation(IntPtr handle, out uint flags);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern uint GetFileType(IntPtr handle);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern void GetStartupInfo(out StartupInfo startup);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateFile(string name, uint access, uint share, ref SecurityAttributes attributes, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CreateProcess(string applicationName, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory, ref StartupInfo startupInfo, out ProcessInformation processInformation);
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
     [DllImport("kernel32.dll")] static extern uint WaitForMultipleObjects(uint count, IntPtr[] handles, bool waitAll, uint milliseconds);
     [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process, out uint code);
-    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
+
+    static void Trace(string message) {
+        if (String.IsNullOrEmpty(diagnosticPath)) return;
+        // Opt-in native-test evidence only: no command, environment or output.
+        try { lock (diagnosticLock) File.AppendAllText(diagnosticPath, DateTime.UtcNow.ToString("O") + " " + message + Environment.NewLine); } catch {}
+    }
+
+    static string HandleDescription(IntPtr handle) {
+        uint flags; bool valid = GetHandleInformation(handle, out flags); int error = valid ? 0 : Marshal.GetLastWin32Error();
+        return handle.ToInt64() + ":valid=" + valid + ":flags=" + flags + ":type=" + GetFileType(handle) + ":error=" + error;
+    }
+
+    static void TraceOutputHandles() {
+        if (String.IsNullOrEmpty(diagnosticPath)) return;
+        Trace("output stdout=" + HandleDescription(GetStdHandle(-11)) + " stderr=" + HandleDescription(GetStdHandle(-12)));
+        // libuv supplies CRT descriptors as well as STARTF_USESTDHANDLES. Record
+        // only the three standard handle values to detect aliases on Windows.
+        StartupInfo startup; GetStartupInfo(out startup);
+        if (startup.reserved2 != IntPtr.Zero && startup.reserved2Count >= 4) {
+            int count = Marshal.ReadInt32(startup.reserved2);
+            if (count >= 3 && count <= 255 && 4 + count + count * IntPtr.Size <= startup.reserved2Count) {
+                for (int i = 0; i < 3; i++) Trace("crt-" + i + "=" + Marshal.ReadIntPtr(startup.reserved2, 4 + count + i * IntPtr.Size).ToInt64());
+            }
+        }
+    }
 
     static bool AwaitRelease(IntPtr parent) {
         // The command cannot read this pipe: its stdin is NUL and the control
         // handle is non-inheritable. EOF, malformed input and owner death keep
         // the kill-on-close Job intact. Bound the only accepted message.
+        Trace("await-release");
         using (var received = new ManualResetEvent(false)) {
             int release = 0;
             var reader = new Thread(delegate() {
@@ -58,6 +90,7 @@ class JobHost {
                         if (read == 0) break;
                         count += read;
                     }
+                    Trace("control-bytes=" + count);
                     if (count == bytes.Length && Encoding.ASCII.GetString(bytes) == "release\n") Interlocked.Exchange(ref release, 1);
                 } catch { /* A closed control pipe never authorizes release. */ }
                 finally { try { received.Set(); } catch (ObjectDisposedException) {} }
@@ -65,15 +98,28 @@ class JobHost {
             reader.IsBackground = true; reader.Start();
             // Put the parent first: if both become signaled, owner death wins.
             var handles = new[] { parent, received.SafeWaitHandle.DangerousGetHandle() };
-            return WaitForMultipleObjects(2, handles, false, 0xffffffff) == 1 && Interlocked.CompareExchange(ref release, 0, 0) == 1;
+            uint completed = WaitForMultipleObjects(2, handles, false, 0xffffffff);
+            bool accepted = completed == 1 && Interlocked.CompareExchange(ref release, 0, 0) == 1;
+            Trace("release-wait=" + completed + " accepted=" + accepted);
+            return accepted;
         }
     }
 
-    static void CloseOutputHandles() {
-        Console.Out.Flush(); Console.Error.Flush();
+    static bool CloseOutputHandles() {
+        // The wrapper has no buffered output here (--ready is flushed at its
+        // write site). Do not initialize Console writers while relinquishing
+        // the inherited pipe handles. Remove stale standard-handle table entries
+        // before closing the exact handles; a failed close must not release Job
+        // ownership or wait indefinitely for an EOF that the owner cannot see.
         IntPtr output = GetStdHandle(-11), error = GetStdHandle(-12);
-        if (output != IntPtr.Zero && output != new IntPtr(-1)) CloseHandle(output);
-        if (error != output && error != IntPtr.Zero && error != new IntPtr(-1)) CloseHandle(error);
+        bool outputReset = SetStdHandle(-11, IntPtr.Zero), errorReset = SetStdHandle(-12, IntPtr.Zero);
+        bool outputClosed = output == IntPtr.Zero || output == new IntPtr(-1) || CloseHandle(output);
+        int outputError = outputClosed ? 0 : Marshal.GetLastWin32Error();
+        bool errorClosed = error == output || error == IntPtr.Zero || error == new IntPtr(-1) || CloseHandle(error);
+        int errorError = errorClosed ? 0 : Marshal.GetLastWin32Error();
+        string state = String.IsNullOrEmpty(diagnosticPath) ? "" : " after-stdout=" + HandleDescription(output) + " after-stderr=" + HandleDescription(error);
+        Trace("close-output reset=" + outputReset + "," + errorReset + " closed=" + outputClosed + "," + errorClosed + " error=" + outputError + "," + errorError + state);
+        return outputReset && errorReset && outputClosed && errorClosed;
     }
 
     static string Quote(string value) {
@@ -136,10 +182,12 @@ class JobHost {
                 // A successful shell can leave descendants holding its output
                 // pipes. Remain cancellable until the owner observes both EOFs
                 // and explicitly commits successful background ownership handoff.
-                CloseOutputHandles();
+                TraceOutputHandles();
+                if (!CloseOutputHandles()) return 70;
                 if (!AwaitRelease(parent)) return 70;
                 limits.BasicLimitInformation.LimitFlags = 0;
                 if (!SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf(typeof(ExtendedLimits)))) return 70;
+                Trace("released");
             }
             GC.KeepAlive(job);
             return (int)code;

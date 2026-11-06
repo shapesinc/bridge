@@ -28,21 +28,35 @@ test("Windows Job helper preserves stdin/stdout and literal command arguments", 
   assert.deepEqual(JSON.parse(output), { args, data: "private test input" });
 });
 
-test("Windows handoff control input is hidden from the command and EOF fails closed", { skip: !available, timeout: 15000 }, async () => {
-  for (const release of [true, false]) {
-    const child = owned(["-e", "let data='';process.stdin.on('data',p=>data+=p);process.stdin.on('end',()=>console.log(JSON.stringify({data})))"], { releaseOnSuccess: true });
-    let output = "";
-    child.stdout.on("data", (part) => { output += part; }); child.stderr.resume();
-    const closed = once(child, "close"); let timer;
-    try {
-      await Promise.race([once(child.stdout, "end"), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("command received the private control pipe instead of EOF")), 5000); })]);
-      clearTimeout(timer);
-      assert.deepEqual(JSON.parse(output), { data: "" });
-      assert.equal(child.exitCode, null, "successful leader must wait for its owner");
-      child.stdin.end(release ? "release\n" : undefined);
-      assert.equal((await closed)[0], release ? 0 : 70);
-    } finally { clearTimeout(timer); if (child.exitCode === null && child.signalCode === null) { child.kill(); await closed; } }
-  }
+test("Windows handoff control input is hidden from the command and EOF fails closed", { skip: !available, timeout: 30000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-handoff-"));
+  try {
+    for (const ready of [false, true]) for (const release of [true, false]) {
+      const trace = path.join(directory, `${ready}-${release}.log`);
+      const child = owned(["-e", "let data='';process.stdin.on('data',p=>data+=p);process.stdin.on('end',()=>console.log(JSON.stringify({data})))"], {
+        releaseOnSuccess: true, ready, env: { ...process.env, SHAPES_TEST_JOB_HOST_TRACE: trace },
+      });
+      let output = "";
+      child.stdout.on("data", (part) => { output += part; }); child.stderr.resume();
+      const ended = Promise.all([once(child.stdout, "end"), once(child.stderr, "end")]);
+      const closed = once(child, "close"); let timer;
+      try {
+        await Promise.race([ended, new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            const evidence = fs.existsSync(trace) ? fs.readFileSync(trace, "utf8") : "no helper trace";
+            reject(new Error(`command output did not reach EOF (ready=${ready}, stdout=${child.stdout.readableEnded}, stderr=${child.stderr.readableEnded}, output=${JSON.stringify(output)}):\n${evidence}`));
+          }, 5000);
+        })]);
+        clearTimeout(timer);
+        const lines = output.trim().split(/\r?\n/).map((line) => JSON.parse(line));
+        assert.deepEqual(lines.filter((line) => "started" in line), ready ? [{ started: true }] : []);
+        assert.deepEqual(lines.filter((line) => !("started" in line)), [{ data: "" }]);
+        assert.equal(child.exitCode, null, "successful leader must wait for its owner after both output streams end");
+        child.stdin.end(release ? "release\n" : undefined);
+        assert.equal((await closed)[0], release ? 0 : 70);
+      } finally { clearTimeout(timer); if (child.exitCode === null && child.signalCode === null) { child.kill(); await closed; } }
+    }
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("Windows control EOF kills surviving descendants after successful leader exit", { skip: !available, timeout: 15000 }, async () => {

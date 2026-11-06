@@ -37,7 +37,7 @@ test("native owner shutdown interrupts a command without replay or releasing its
   const serverModule = path.resolve(__dirname, "../src/server.js");
   const jobsModule = path.resolve(__dirname, "../src/command-jobs.js");
   const script = path.join(dir, "server.js");
-  fs.writeFileSync(script, `require(${JSON.stringify(serverModule)}).startServer({port:0,token:'owned-command-fixture'}).then(s=>require('node:fs').writeFileSync(process.argv[2],String(s.address().port)))`);
+  fs.writeFileSync(script, `require(${JSON.stringify(serverModule)}).startServer({port:0,token:'owned-command-fixture'}).then(s=>{const fs=require('node:fs'),file=process.argv[2];fs.writeFileSync(file+'.tmp',String(s.address().port));fs.renameSync(file+'.tmp',file)})`);
   let generation = 0;
   const open = async () => {
     const ready = path.join(dir, `ready-${++generation}`);
@@ -53,7 +53,7 @@ test("native owner shutdown interrupts a command without replay or releasing its
   };
   const childPid = path.join(dir, "command.pid"), late = path.join(dir, "late.txt");
   const command = path.join(dir, "command.js");
-  fs.writeFileSync(command, `require('node:fs').writeFileSync(${JSON.stringify(childPid)},String(process.pid));setTimeout(()=>require('node:fs').appendFileSync(${JSON.stringify(late)},'unexpected'),10000);setInterval(()=>{},1000);`);
+  fs.writeFileSync(command, `const fs=require('node:fs'),file=${JSON.stringify(childPid)},startedAt=Date.now();fs.writeFileSync(file+'.tmp',JSON.stringify({pid:process.pid,startedAt}));fs.renameSync(file+'.tmp',file);setTimeout(()=>fs.appendFileSync(${JSON.stringify(late)},'unexpected'),10000);setInterval(()=>{},1000);`);
   const quote = (value) => "'" + value.replaceAll("'", "''") + "'";
   const body = { cmd: `& ${quote(node)} ${quote(command)}`, cwd: dir, timeout: 30, scope: "a".repeat(64), request_key: "b".repeat(64) };
   const first = await open();
@@ -61,7 +61,7 @@ test("native owner shutdown interrupts a command without replay or releasing its
   assert.equal(started.status, 202);
   const id = started.body.job_id;
   await waitFor(() => fs.existsSync(childPid));
-  const pid = Number(fs.readFileSync(childPid, "utf8"));
+  const commandStarted = JSON.parse(fs.readFileSync(childPid, "utf8")), pid = commandStarted.pid;
   assert.equal(alive(pid), true);
   const recordFile = path.join(env.SHAPES_BRIDGE_HOME, "command-jobs", `${id}.json`);
   const running = JSON.parse(fs.readFileSync(recordFile, "utf8"));
@@ -81,7 +81,7 @@ test("native owner shutdown interrupts a command without replay or releasing its
   });
   assert.equal(interrupted.body.outcome_unknown, true);
   // Wait past the actual delayed mutation, including the process startup gap.
-  await new Promise((resolve) => setTimeout(resolve, Math.max(0, running.started_at + 12000 - Date.now())));
+  await new Promise((resolve) => setTimeout(resolve, Math.max(0, commandStarted.startedAt + 12000 - Date.now())));
   assert.equal(fs.existsSync(late), false);
   const replay = await second.request("/commands/start", body);
   assert.equal(replay.body.state, "interrupted");
