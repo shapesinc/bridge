@@ -174,6 +174,8 @@ scheduled task with a valid UTF-16 BOM; existing pairing is retained.
 Recoverable commands use `/commands/start`, `/commands/status` and
 `/commands/cancel` with server-issued scope and request keys. A detached local
 supervisor enforces the command deadline independently of the HTTP connection.
+On Linux user-service installations, each supervisor runs in a separate systemd
+user scope so restarting the connection does not kill an in-flight command.
 Poll the receipt after a timeout; never submit a second command to recover a
 lost response. Receipts under the private `command-jobs` directory retain job
 identity, command hash, timing, exit status and bounded output for 24 hours
@@ -182,8 +184,10 @@ automatic replay. Inspect an interrupted command locally before resuming work.
 After inspecting it and stopping any remaining processes, the owner can run
 `shapes-bridge acknowledge-command <job_id>` locally to release its mutation
 lock. This also recovers a lock stranded by a crash after a final receipt was
-saved. A live supervisor prevents acknowledgement. The existing receipt stays
-unchanged and the command never reruns. There is no remote acknowledgement endpoint.
+saved. If the launcher died before saving its first receipt, acknowledgement
+commits an interrupted receipt before releasing the orphan lock. A live launcher
+or supervisor prevents acknowledgement. Existing receipts stay unchanged and
+the command never reruns. There is no remote acknowledgement endpoint.
 The public tunnel is reverified on every heartbeat; three endpoint failures
 replace the tunnel without pairing again or replaying commands. Windows CI
 tests actual Task Scheduler registration, script execution and cancellation.

@@ -104,6 +104,36 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
         assert.equal(fs.readFileSync(marker, "utf8"), "1");
       }
     });
+    await t.test("local acknowledgement recovers a crash before the first receipt without replay", async () => {
+      const orphanBody = { cmd, timeout: 10, scope, request_key: "f".repeat(64) };
+      const crashed = spawnSync(process.execPath, ["-e", `
+        const fs = require('node:fs');
+        const write = fs.writeFileSync;
+        fs.writeFileSync = function(file, ...args) {
+          if (/\\.json\\.[0-9]+\\.tmp$/.test(String(file))) process.exit(93);
+          return write.call(this, file, ...args);
+        };
+        require(${JSON.stringify(path.join(__dirname, '../src/command-jobs'))}).start(${JSON.stringify(orphanBody)});
+      `], { encoding: "utf8", windowsHide: true, timeout: 5000 });
+      assert.equal(crashed.status, 93, crashed.stderr);
+      const lockPath = path.join(jobs.root(), "mutation.lock");
+      const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+      assert.throws(() => jobs.load(lock.id), /not found/);
+      assert.equal((await request("/write", { path: path.join(dir, "orphan-recovered.txt"), content: "ok" })).status, 409);
+      fs.writeFileSync(lockPath, JSON.stringify({ ...lock, launcher_pid: process.pid }));
+      assert.throws(() => jobs.acknowledgeInterrupted(lock.id), /live launcher/);
+      fs.writeFileSync(lockPath, JSON.stringify(lock));
+      assert.throws(() => jobs.acknowledgeInterrupted("0".repeat(64)), /not found/);
+      const acknowledged = jobs.acknowledgeInterrupted(lock.id);
+      assert.equal(acknowledged.state, "interrupted");
+      assert.equal(acknowledged.outcome_unknown, true);
+      assert.equal(fs.existsSync(lockPath), false);
+      assert.equal((await request("/write", { path: path.join(dir, "orphan-recovered.txt"), content: "ok" })).status, 200);
+      const replay = await jobs.start(orphanBody);
+      assert.equal(replay.deduplicated, true);
+      assert.equal(replay.state, "interrupted");
+      assert.equal(fs.readFileSync(marker, "utf8"), "1");
+    });
     await t.test("missing supervisor is reported as uncertain and never replayed", async () => {
       const record = jobs.load(id);
       // The daemon is alive, but its worker died before persisting running state.

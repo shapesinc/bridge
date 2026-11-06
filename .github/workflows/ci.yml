@@ -25,6 +25,12 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - run: npm test
+      - name: Verify commands survive a real systemd user-service restart
+        run: |
+          sudo systemctl start "user@$(id -u).service"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          SHAPES_TEST_SYSTEMD=1 node --test test/systemd-commands.test.js
       - run: npm pack --dry-run
 
   windows-native:

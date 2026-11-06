@@ -5,7 +5,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const { stateDir, ensureStateDir } = require("./state");
 
 const HEX = /^[a-f0-9]{64}$/;
@@ -25,6 +25,27 @@ function supervisorPid(record) {
   if (record.supervisor_pid) return record.supervisor_pid;
   try { return Number(fs.readFileSync(path.join(root(), `${record.job_id}.supervisor`), "utf8")); }
   catch (cause) { if (cause.code !== "ENOENT") throw cause; }
+}
+
+let systemdVersion;
+function launchSupervisor(id) {
+  let binary = process.execPath;
+  let args = [path.join(__dirname, "command-worker.js"), id];
+  if (process.platform === "linux" && process.env.SHAPES_BRIDGE_SYSTEMD_SERVICE === "1") {
+    if (systemdVersion === undefined) {
+      const version = spawnSync("systemd-run", ["--version"], { encoding: "utf8", timeout: 2000 });
+      const match = /^systemd (\d+)/.exec(version.stdout || "");
+      if (version.status !== 0 || !match) throw error("Cannot start an independent systemd command scope.", 503);
+      systemdVersion = Number(match[1]);
+    }
+    // setsid/detached alone still belongs to the daemon's service cgroup.
+    // A separate user scope preserves the inherited environment and owns its
+    // lifecycle independently of connection restarts. Keep normal KillMode.
+    args = ["--user", "--scope", "--quiet", "--collect", `--unit=shapes-bridge-command-${id}`,
+      ...(systemdVersion >= 254 ? ["--expand-environment=no"] : []), "--", binary, ...args];
+    binary = "systemd-run";
+  }
+  return spawn(binary, args, { detached: true, windowsHide: true, stdio: "ignore", env: process.env });
 }
 
 function save(record) {
@@ -70,11 +91,11 @@ function release(id) {
   } catch (cause) { if (cause.code !== "ENOENT") throw cause; }
 }
 
-function claim(id, scope) {
+function claim(id, scope, metadata) {
   if (ephemeralMutation) throw error("Another computer mutation is running. Wait for its receipt.", 409, "computer_busy");
   ensureStateDir();
   fs.mkdirSync(root(), { recursive: true, mode: 0o700 });
-  try { fs.writeFileSync(lockFile(), JSON.stringify({ id, scope }), { flag: "wx", mode: 0o600 }); }
+  try { fs.writeFileSync(lockFile(), JSON.stringify({ id, scope, ...metadata, launcher_pid: process.pid, created_at: Date.now() }), { flag: "wx", mode: 0o600 }); }
   catch (cause) {
     if (cause.code !== "EEXIST") throw cause;
     const lock = JSON.parse(fs.readFileSync(lockFile(), "utf8"));
@@ -113,16 +134,14 @@ async function start(body) {
     if (existing.fingerprint !== fingerprint) throw error("The command request key was reused for different arguments.", 409, "command_conflict");
     return { ...status(id, body.scope), deduplicated: true };
   } catch (cause) { if (cause.errorType !== "command_not_found") throw cause; }
-  claim(id, body.scope);
+  claim(id, body.scope, { fingerprint, command_hash: digest(body.cmd) });
   let record, launched = false;
   try {
     prune();
     record = { job_id: id, scope: body.scope, fingerprint, command_hash: digest(body.cmd),
       command: body, state: "queued", created_at: Date.now(), launcher_pid: process.pid };
     save(record);
-    const child = spawn(process.execPath, [path.join(__dirname, "command-worker.js"), id], {
-      detached: true, windowsHide: true, stdio: "ignore", env: process.env,
-    });
+    const child = launchSupervisor(id);
     await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
     launched = true;
     fs.writeFileSync(path.join(root(), `${id}.supervisor`), String(child.pid), { mode: 0o600 });
@@ -145,7 +164,28 @@ function cancel(id, scope) {
 }
 
 function acknowledgeInterrupted(id) {
-  const record = load(id);
+  let record;
+  try { record = load(id); }
+  catch (cause) {
+    if (cause.errorType !== "command_not_found") throw cause;
+    let lock;
+    try { lock = JSON.parse(fs.readFileSync(lockFile(), "utf8")); }
+    catch (lockError) { if (lockError.code === "ENOENT") throw cause; throw lockError; }
+    if (lock.id !== id || !HEX.test(lock.scope) || !HEX.test(lock.fingerprint)) throw cause;
+    // A launcher commits its initial receipt before spawning anything. Never
+    // clear that gap while the owning process could still finish the launch.
+    if (!Number.isInteger(lock.launcher_pid) || lock.launcher_pid <= 0 || alive(lock.launcher_pid)) {
+      throw error("An orphan command lock with a live launcher cannot be acknowledged locally.");
+    }
+    record = { job_id: id, scope: lock.scope, fingerprint: lock.fingerprint,
+      command_hash: lock.command_hash, created_at: lock.created_at,
+      state: "interrupted", finished_at: Date.now(), result: {
+        exit_code: -1, stdout: "", stderr: "The launcher stopped before saving the first command receipt. The owner reconciled its orphan lock locally; this request will not run again.", outcome_unknown: true,
+      } };
+    // Commit a tombstone before releasing the lock so the same request key
+    // cannot become a fresh command, even if acknowledgement is interrupted.
+    save(record);
+  }
   status(id, record.scope);
   const latest = load(id);
   const supervisor = supervisorPid(latest);

@@ -131,7 +131,7 @@ async function main() {
   if (command === "acknowledge-command") {
     if (!argv[1]) throw new Error("After inspecting a finished or interrupted command and stopping any remaining processes locally, use acknowledge-command <job_id>. This does not retry it or mark it successful.");
     require("../src/command-jobs").acknowledgeInterrupted(argv[1]);
-    log("Command lock acknowledged locally. The existing receipt is unchanged; new computer operations are allowed. The command was not replayed.");
+    log("Command lock acknowledged locally. Existing receipts are unchanged; an orphan lock receives an interrupted receipt. New computer operations are allowed. The command was not replayed.");
     return;
   }
   if (command === "logs") {
