@@ -16,7 +16,8 @@ try {
   process.stderr.write("Account revocation state is unavailable.\n");
   if (process.env.SHAPES_BRIDGE_STATE_DIAGNOSTICS === "1") {
     const code = typeof error?.code === "string" && /^[A-Z_]{1,40}$/.test(error.code) ? error.code : "UNKNOWN";
-    process.stderr.write(`Private state failure: ${code}\n`);
+    const operation = typeof error?.syscall === "string" && /^[a-z]{1,20}$/.test(error.syscall) ? error.syscall : "unknown";
+    process.stderr.write(`Private state failure: ${code} (${operation})\n`);
   }
   process.exitCode = 1;
 }

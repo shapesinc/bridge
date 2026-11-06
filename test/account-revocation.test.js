@@ -5,7 +5,7 @@ const { spawnSync, spawn } = require("node:child_process");
 const { once } = require("node:events");
 const { createAccountRevocation, RECEIPT, ACK } = require("../src/account-revocation");
 const { createEmbeddedController } = require("../src/embedded");
-const { readState, writeState } = require("../src/state");
+const { readState, writeState, replaceStateFile } = require("../src/state");
 const entry = path.resolve(__dirname, "../bin/embedded-state.js");
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 function directory(t) {
@@ -30,18 +30,28 @@ test("finite installed writer records durable intent without reading/changing cr
   assert.deepEqual(fs.readdirSync(dir).sort(), [`${RECEIPT}.json`, "config.json"].sort());
   assert.equal(invoke(dir, "launch").status, 1);
 });
-test("racing writers publish whole bounded receipts; consuming an older clear cannot acknowledge the newer one", async (t) => {
+test("racing writers publish whole bounded receipts; consuming an older clear cannot acknowledge the newer one", { timeout: 40000 }, async (t) => {
   const dir = directory(t), store = createAccountRevocation();
-  const runs = Array.from({ length: 4 }, () => {
+  const records = [];
+  for (let round = 0; round < 6; round++) {
+    const runs = Array.from({ length: 4 }, () => {
     const child = spawn(process.execPath, [entry, "record-revocation"], { env: { ...process.env, SHAPES_BRIDGE_HOME: dir, SHAPES_BRIDGE_STATE_DIAGNOSTICS: "1" }, stdio: ["ignore", "pipe", "pipe"] });
     let output = "", error = ""; child.stdout.on("data", chunk => { output += chunk; }); child.stderr.on("data", chunk => { error += chunk; });
-    return once(child, "close").then(([code]) => ({ code, output, error }));
-  });
-  // Drain every finite writer before an assertion can trigger fixture cleanup.
-  const results = await Promise.all(runs);
-  for (const result of results) assert.equal(result.code, 0, result.error);
-  const records = results.map(result => JSON.parse(result.output)), latest = store.read();
-  assert.equal(new Set(records.map(r => r.revocationToken)).size, 4);
+      const timer = setTimeout(() => child.kill(), 5000);
+      return once(child, "close").then(([code]) => ({ code, output, error })).finally(() => clearTimeout(timer));
+    });
+    // Drain every finite writer, including spawn failures, before an assertion
+    // can trigger fixture cleanup. Repeat to exercise real Windows contention.
+    const results = await Promise.allSettled(runs);
+    for (const result of results) {
+      assert.equal(result.status, "fulfilled", result.reason?.code);
+      if (result.value.error) t.diagnostic(result.value.error.trim());
+      assert.equal(result.value.code, 0, result.value.error);
+      records.push(JSON.parse(result.value.output));
+    }
+  }
+  const latest = store.read();
+  assert.equal(new Set(records.map(r => r.revocationToken)).size, 24);
   assert.ok(records.some(r => r.revocationToken === latest.revocationToken));
   let newer;
   await store.consume(async token => { assert.equal(token, latest.revocationToken); newer = store.record(); });
@@ -49,6 +59,24 @@ test("racing writers publish whole bounded receipts; consuming an older clear ca
   await store.consume(async token => assert.equal(token, newer.revocationToken));
   assert.equal(store.read().pending, false); assert.equal(readState(ACK).revocationToken, newer.revocationToken);
   assert.ok(fs.existsSync(path.join(dir, `${RECEIPT}.json`)), "receipt remains durable after acknowledgement");
+});
+test("Windows replacement retries retain atomic bytes and permanent errors remain bounded", (t) => {
+  const dir = directory(t), temporary = path.join(dir, "temporary"), destination = path.join(dir, "destination");
+  fs.writeFileSync(temporary, "new-complete-value"); fs.writeFileSync(destination, "old-complete-value");
+  let clock = 0, calls = 0;
+  replaceStateFile(temporary, destination, { platform: "win32", now: () => clock, wait: ms => { clock += ms; },
+    rename: (source, target) => { if (++calls <= 2) throw Object.assign(new Error("locked"), { code: "EPERM" }); fs.renameSync(source, target); } });
+  assert.equal(fs.readFileSync(destination, "utf8"), "new-complete-value"); assert.equal(fs.existsSync(temporary), false);
+  assert.ok(clock > 0 && clock <= 250);
+  fs.writeFileSync(temporary, "next-complete-value"); clock = 0;
+  assert.throws(() => replaceStateFile(temporary, destination, { platform: "win32", now: () => clock, wait: ms => { clock += ms; },
+    rename: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); } }), { code: "EACCES" });
+  assert.ok(clock <= 250); assert.equal(fs.readFileSync(temporary, "utf8"), "next-complete-value");
+  assert.equal(fs.readFileSync(destination, "utf8"), "new-complete-value");
+  for (const [platform, code] of [["darwin", "EPERM"], ["win32", "EISDIR"]]) {
+    assert.throws(() => replaceStateFile(temporary, destination, { platform, wait: () => assert.fail("must not retry"),
+      rename: () => { throw Object.assign(new Error("non-transient"), { code }); } }), { code });
+  }
 });
 test("missing, malformed, oversized or failed receipt state cannot become the legacy no-clear token", async (t) => {
   const dir = directory(t), store = createAccountRevocation();

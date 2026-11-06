@@ -46,7 +46,10 @@ means durable intent; it is not a claim that running work has stopped.
 `createAccountRevocation` exposes independent read, record and consume operations.
 Record atomically replaces a bounded private receipt after flushing the file;
 POSIX also flushes the containing directory (Node has no Windows directory-fsync
-API). Consume invokes the controller cleanup and acknowledges only that exact
+API). Windows replacement retries transient access/busy errors against the same
+flushed temporary file for at most250ms; it never removes the destination or
+changes permissions to force success. Permanent errors remain failed writes.
+Consume invokes the controller cleanup and acknowledges only that exact
 receipt ID. It retains the receipt, so a later clear cannot be erased by an older
 consumer. A persisted acknowledgement or current reader history prevents a missing
 receipt from regressing to `none`. Invalid bytes, read/write errors and failed

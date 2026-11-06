@@ -5,6 +5,27 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const securedWindowsDirectories = new Set();
+const retryWait = new Int32Array(new SharedArrayBuffer(4));
+
+// Windows atomic replacement can briefly reject a competing open/rename with
+// EPERM. Retry the same fully written private file; never unlink the destination
+// or relax its ACL. Persistent permission errors remain bounded failures.
+function replaceStateFile(temporary, destination, { platform = process.platform, rename = fs.renameSync,
+  now = () => performance.now(), wait = ms => Atomics.wait(retryWait, 0, 0, ms) } = {}) {
+  const deadline = now() + 250;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rename(temporary, destination);
+      if (attempt > 0 && process.env.SHAPES_BRIDGE_STATE_DIAGNOSTICS === "1") process.stderr.write(`Private state replacement retries: ${attempt}\n`);
+      return;
+    }
+    catch (error) {
+      const remaining = deadline - now();
+      if (platform !== "win32" || !["EPERM", "EACCES", "EBUSY"].includes(error.code) || remaining <= 0 || attempt >= 25) throw error;
+      wait(Math.min(10, remaining));
+    }
+  }
+}
 
 function stateDir() {
   return process.env.SHAPES_BRIDGE_HOME || path.join(os.homedir(), ".shapes-bridge");
@@ -50,7 +71,7 @@ function writeState(name, value, { durable = false } = {}) {
     const fd = fs.openSync(temporary, "w", 0o600);
     try { fs.writeFileSync(fd, JSON.stringify(value, null, 2) + "\n"); if (durable) fs.fsyncSync(fd); }
     finally { fs.closeSync(fd); }
-    fs.renameSync(temporary, destination);
+    replaceStateFile(temporary, destination);
     // Windows does not expose directory fsync through Node. File flush and
     // atomic replacement are still required; never report a failed write as saved.
     if (durable && process.platform !== "win32") {
@@ -65,4 +86,4 @@ function removeState(name) {
   fs.rmSync(path.join(stateDir(), `${name}.json`), { force: true });
 }
 
-module.exports = { stateDir, ensureStateDir, readState, writeState, removeState };
+module.exports = { stateDir, ensureStateDir, readState, writeState, removeState, replaceStateFile };
