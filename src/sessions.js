@@ -129,7 +129,7 @@ async function startSessionTurn(body) {
     try {
       const receipt = await startJob({ prompt, ...(input ? { input, deliveredInputContext } : {}), cwd: session.cwd, sandbox: session.sandbox,
         agent: "codex", interactive: true, requestKey, ...resume,
-        builtIn: { sessionId: session.session_id, scopeId: session.scope_id, gateway: grant.metadata, token: grant.token } });
+        builtIn: { sessionId: session.session_id, scopeId: session.scope_id, gateway: grant.metadata, token: grant.token, toolToken: grant.toolToken } });
       if (!session.jobs.includes(receipt.job_id)) session.jobs.push(receipt.job_id);
       delete session.pending_request;
       save(session);

@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { localEnvironment } = require("./local-workspace");
 const { ensureStateDir } = require("./state");
+const { validateToolProxy } = require("./native-tool-proxy");
 
 const VERSION = require("../assets/codex/runtime.json").version;
 const expiryMillis = (value) => typeof value === "number" ? value * 1000 : typeof value === "string" ? Date.parse(value) : NaN;
@@ -17,7 +18,7 @@ function bundledRuntime() {
   } catch { return { available: false, version: VERSION, funding: "shapes_credits" }; }
 }
 
-function validateGateway(gateway, { sessionId, scopeId, requestKey }) {
+function validateGateway(gateway, { sessionId, scopeId, requestKey, platform = process.platform }) {
   if (!gateway || typeof gateway !== "object" || Array.isArray(gateway)
       || gateway.session_id !== sessionId || gateway.scope_id !== scopeId || gateway.request_key !== requestKey
       || typeof gateway.token !== "string" || !gateway.token || gateway.token.length > 16384
@@ -32,7 +33,9 @@ function validateGateway(gateway, { sessionId, scopeId, requestKey }) {
     throw new Error("The gateway must use HTTPS, or loopback HTTP for local development.");
   }
   const { token } = gateway;
-  return { token, metadata: { base_url: url.toString().replace(/\/$/, ""), model: gateway.model,
+  const { toolToken, toolProxy } = validateToolProxy(gateway, { platform });
+  return { token, toolToken, metadata: { base_url: url.toString().replace(/\/$/, ""), model: gateway.model,
+    ...(toolProxy ? { tool_proxy: toolProxy } : {}),
     run_id: gateway.run_id, expires_at: gateway.expires_at, scope_id: scopeId, session_id: sessionId, request_key: requestKey } };
 }
 
@@ -46,6 +49,7 @@ function launchConfiguration(gateway) {
   const environment = localEnvironment();
   // Never reuse the person's unrelated provider credentials or Codex profile.
   for (const key of Object.keys(environment)) if (/^(?:OPENAI_|CODEX_|ANTHROPIC_|SHAPES_CODEX_)/.test(key)) delete environment[key];
+  delete environment.SHAPES_NATIVE_TOOL_TOKEN;
   environment.CODEX_HOME = home;
   environment.SHAPES_RUNTIME_TOKEN = token;
   const config = {

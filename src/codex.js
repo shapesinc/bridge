@@ -10,6 +10,8 @@ const { selectAgent, argumentsFor, verifyInteractiveCodex } = require("./agents"
 const { normalizeRequest, nativeResponse } = require("./approvals");
 const { localEnvironment } = require("./local-workspace");
 const { bundledRuntime, launchConfiguration } = require("./bundled-runtime");
+const { createNativeToolProxy } = require("./native-tool-proxy");
+const { createToolBroker } = require("./native-tool-broker");
 const { closeProcessGroup } = require("./process-close");
 const { normalizeSessionInput, runtimeSessionInput } = require("./session-input");
 
@@ -286,7 +288,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
   try {
     const child = spawn(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
       detached: true, stdio: "ignore", env: { ...localEnvironment(), SHAPES_CODEX_JOB_DIR: root(),
-        ...(builtIn ? { SHAPES_RUNTIME_TOKEN: builtIn.token } : {}) },
+        ...(builtIn ? { SHAPES_RUNTIME_TOKEN: builtIn.token, SHAPES_NATIVE_TOOL_TOKEN: builtIn.toolToken || "" } : {}) },
     });
     await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
     child.unref();
@@ -436,7 +438,7 @@ function cancelJob(id, expectedAgent) {
 async function superviseInteractive(directory, state, request) {
   const { createCodexRpcSession } = require("./codex-rpc");
   const pending = new Map();
-  let stopped, failed = false, timer, poll, session;
+  let stopped, failed = false, timer, poll, session, toolProxy, toolBroker;
   const logs = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
   const persist = () => {
     state.pendingRequests = [...pending.values()].map((value) => value.display);
@@ -455,6 +457,7 @@ async function superviseInteractive(directory, state, request) {
   const stop = (status) => {
     if (stopped) return;
     stopped = status;
+    void (toolBroker ? toolBroker.close() : toolProxy?.close());
     // Closing owns only this job's app-server process group, including workers.
     void session?.close();
   };
@@ -463,10 +466,19 @@ async function superviseInteractive(directory, state, request) {
   persist();
   try {
     if (fs.existsSync(path.join(directory, "cancel"))) { stopped = "cancelled"; return; }
+    if (request.gateway) toolProxy = createNativeToolProxy({ gateway: request.gateway, token: process.env.SHAPES_NATIVE_TOOL_TOKEN,
+      getContext: () => ({ threadId: session?.threadId, turnId: session?.turnId }) });
+    if (toolProxy?.definitions.length) {
+      toolBroker = await createToolBroker(toolProxy);
+      state.toolBrokerDirectory = toolBroker.directory;
+      persist();
+    }
+    const runtimeConfig = request.gateway ? launchConfiguration(request.gateway) : {};
+    if (toolBroker) runtimeConfig.launchArgs.push(...toolBroker.launchArgs);
     session = createCodexRpcSession({
       executable: request.executable, cwd: request.cwd, sandbox: request.sandbox,
       ...(request.personalProfile ? require("./personal-codex").personalConfiguration(request.personalProfile) : {}),
-      ...(request.gateway ? { ...launchConfiguration(request.gateway), resumeThreadId: request.resumeThreadId, usageBaseline: request.usageBaseline } : {}),
+      ...(request.gateway ? { ...runtimeConfig, resumeThreadId: request.resumeThreadId, usageBaseline: request.usageBaseline } : {}),
       startupRetries: request.gateway ? 1 : 0,
       onLifecycle(value) {
         state.runtimeStartup = { ...value, at: new Date().toISOString() };
@@ -572,6 +584,7 @@ async function superviseInteractive(directory, state, request) {
   } finally {
     clearInterval(poll); clearTimeout(timer);
     process.removeListener("SIGTERM", onSignal); process.removeListener("SIGINT", onSignal);
+    await (toolBroker ? toolBroker.close() : toolProxy?.close());
     const cleanup = await session?.close();
     if (cleanup?.processExited === false) {
       stopped = "failed";
@@ -590,22 +603,22 @@ async function superviseInteractive(directory, state, request) {
 }
 
 function redactRuntimeValue(value) {
-  const token = process.env.SHAPES_RUNTIME_TOKEN;
-  if (!token) return value;
-  if (typeof value === "string") return value.split(token).join("[redacted]");
-  return JSON.parse(JSON.stringify(value).split(token).join("[redacted]"));
+  const tokens = [process.env.SHAPES_RUNTIME_TOKEN, process.env.SHAPES_NATIVE_TOOL_TOKEN].filter(Boolean);
+  if (!tokens.length) return value;
+  const clean = text => tokens.reduce((result, token) => result.split(token).join("[redacted]"), text);
+  if (typeof value === "string") return clean(value);
+  return JSON.parse(clean(JSON.stringify(value)));
 }
 
 function appendJobEvent(directory, value) {
   const file = path.join(directory, "events.jsonl");
   if (fs.existsSync(file) && fs.statSync(file).size >= 8 * 1024 * 1024) return;
   let encoded = JSON.stringify(value);
-  const token = process.env.SHAPES_RUNTIME_TOKEN;
-  if (token) encoded = encoded.split(token).join("[redacted]");
+  encoded = redactRuntimeValue(encoded);
   if (Buffer.byteLength(encoded) > 32768) encoded = JSON.stringify({ type: value.type, truncated: true,
     item: value.item ? { id: value.item.id, type: value.item.type, status: value.item.status,
       text: String(value.item.text || "").slice(0, 4000) } : undefined });
-  if (token) encoded = encoded.split(token).join("[redacted]");
+  encoded = redactRuntimeValue(encoded);
   fs.appendFileSync(file, encoded + "\n", { mode: 0o600 });
 }
 

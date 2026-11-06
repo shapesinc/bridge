@@ -27,7 +27,7 @@ test("bundled personal discovery reads vendor status, sanitizes account metadata
 });
 
 test("personal environment keeps vendor profile separate from credits and inherited provider keys", () => {
-  const keys = ["OPENAI_API_KEY", "SHAPES_RUNTIME_TOKEN", "ANTHROPIC_API_KEY"], old = keys.map(key => process.env[key]);
+  const keys = ["OPENAI_API_KEY", "SHAPES_RUNTIME_TOKEN", "SHAPES_NATIVE_TOOL_TOKEN", "ANTHROPIC_API_KEY"], old = keys.map(key => process.env[key]);
   try {
     for (const key of keys) process.env[key] = "never-forward";
     const config = personalConfiguration("/private/personal-codex");
