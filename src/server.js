@@ -144,7 +144,7 @@ function openTarget(target) {
   return { opened: t };
 }
 
-function sysinfo() {
+async function sysinfo(readElevation = elevationStatus) {
   const home = os.homedir();
   let disk = null;
   try {
@@ -166,7 +166,7 @@ function sysinfo() {
     bridge_version: require("../package.json").version,
     command_protocol: 1,
     default_shell: process.platform === "win32" ? "powershell" : "sh",
-    ...elevationStatus(),
+    ...await readElevation(),
     cpu_count: os.cpus().length,
     mem_gb: Math.round((os.totalmem() / 1e9) * 10) / 10,
     home,
@@ -180,7 +180,7 @@ function sysinfo() {
  * @param {{port:number, token:string}} opts
  * @returns {Promise<import('node:http').Server>}
  */
-function startServer({ port, token, computerControl = createComputerControl(), platform = process.platform }) {
+function startServer({ port, token, computerControl = createComputerControl(), platform = process.platform, readElevation = elevationStatus }) {
   const authed = (req) => {
     const provided = req.headers["x-token"];
     if (!token || typeof provided !== "string") return false;
@@ -365,7 +365,7 @@ function startServer({ port, token, computerControl = createComputerControl(), p
 
       if (route === "/sysinfo" && method === "GET") {
         log("sysinfo requested");
-        return sendJson(res, 200, sysinfo());
+        return sendJson(res, 200, await sysinfo(readElevation));
       }
 
       if (route === "/run" && method === "POST") {

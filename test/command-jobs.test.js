@@ -28,7 +28,9 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
   const cmd = `${process.platform === "win32" ? "& " : ""}${quote(process.execPath)} ${quote(script)}`;
   try {
     await open();
-    assert.equal((await fetch(base + "/commands/start", { method: "POST" })).status, 401);
+    const unauthorized = await fetch(base + "/commands/start", { method: "POST" });
+    assert.equal(unauthorized.status, 401);
+    await unauthorized.text();
     assert.equal((await request("/sysinfo")).body.command_protocol, 1);
     assert.equal((await request("/commands/start", { cmd, timeout: 10, scope_id: scope, request_key: key })).body.error_type, "command_protocol_mismatch");
     const started = await request("/commands/start", { cmd, timeout: 10, scope, request_key: key });
