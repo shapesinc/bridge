@@ -32,6 +32,16 @@ let prompt='';process.stdin.on('data',b=>prompt+=b);process.stdin.on('end',()=>{
   const server = await startServer({ port: 0, token: TOKEN });
   const base = `http://127.0.0.1:${server.address().port}`;
   t.after(async () => {
+    // A cancel response is only an acknowledgement; wait for the detached
+    // supervisor's final receipt before deleting the files it still owns.
+    const listed = await request("/agents/jobs");
+    for (const job of listed.body.jobs) {
+      if (!["completed", "failed", "cancelled", "timed_out"].includes(job.state)) {
+        await request("/agents/cancel", { job_id: job.job_id });
+        const final = await request(`/agents/status?job_id=${job.job_id}`);
+        assert.ok(["completed", "failed", "cancelled", "timed_out"].includes(final.body.state));
+      }
+    }
     await new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); });
     for (const [key, value] of Object.entries({ SHAPES_CODEX_BINARY: previous.binary, SHAPES_CODEX_JOB_DIR: previous.root })) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
