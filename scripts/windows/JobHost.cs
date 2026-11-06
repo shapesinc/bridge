@@ -40,6 +40,7 @@ class JobHost {
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetStdHandle(int handle, IntPtr value);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetHandleInformation(IntPtr handle, out uint flags);
     [DllImport("kernel32.dll", SetLastError = true)] static extern uint GetFileType(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool ReadFile(IntPtr handle, [Out] byte[] buffer, uint count, out uint read, IntPtr overlapped);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateFile(string name, uint access, uint share, ref SecurityAttributes attributes, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CreateProcess(string applicationName, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory, ref StartupInfo startupInfo, out ProcessInformation processInformation);
@@ -69,16 +70,18 @@ class JobHost {
         // handle is non-inheritable. EOF, malformed input and owner death keep
         // the kill-on-close Job intact. Bound the only accepted message.
         Trace("await-release");
+        IntPtr input = GetStdHandle(-10);
         using (var received = new ManualResetEvent(false)) {
             int release = 0;
             var reader = new Thread(delegate() {
                 try {
-                    var input = Console.OpenStandardInput();
                     var bytes = new byte[8]; int count = 0;
+                    var part = new byte[8];
                     while (count < bytes.Length) {
-                        int read = input.Read(bytes, count, bytes.Length - count);
-                        if (read == 0) break;
-                        count += read;
+                        uint read;
+                        if (!ReadFile(input, part, (uint)(bytes.Length - count), out read, IntPtr.Zero) || read == 0) break;
+                        Buffer.BlockCopy(part, 0, bytes, count, (int)read);
+                        count += (int)read;
                     }
                     Trace("control-bytes=" + count);
                     if (count == bytes.Length && Encoding.ASCII.GetString(bytes) == "release\n") Interlocked.Exchange(ref release, 1);
@@ -167,6 +170,7 @@ class JobHost {
             uint completed = WaitForMultipleObjects((uint)handles.Length, handles, false, 0xffffffff);
             uint code = 1;
             if (completed == 0) GetExitCodeProcess(child.process, out code);
+            Trace("child=" + child.processId + " wait=" + completed + " exit=" + code);
             CloseHandle(child.process);
             if (releaseOnSuccess && completed == 0 && code == 0) {
                 // A successful shell can leave descendants holding its output
