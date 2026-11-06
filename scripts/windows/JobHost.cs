@@ -40,7 +40,6 @@ class JobHost {
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetStdHandle(int handle, IntPtr value);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetHandleInformation(IntPtr handle, out uint flags);
     [DllImport("kernel32.dll", SetLastError = true)] static extern uint GetFileType(IntPtr handle);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern void GetStartupInfo(out StartupInfo startup);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateFile(string name, uint access, uint share, ref SecurityAttributes attributes, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CreateProcess(string applicationName, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory, ref StartupInfo startupInfo, out ProcessInformation processInformation);
@@ -63,15 +62,6 @@ class JobHost {
     static void TraceOutputHandles() {
         if (String.IsNullOrEmpty(diagnosticPath)) return;
         Trace("output stdout=" + HandleDescription(GetStdHandle(-11)) + " stderr=" + HandleDescription(GetStdHandle(-12)));
-        // libuv supplies CRT descriptors as well as STARTF_USESTDHANDLES. Record
-        // only the three standard handle values to detect aliases on Windows.
-        StartupInfo startup; GetStartupInfo(out startup);
-        if (startup.reserved2 != IntPtr.Zero && startup.reserved2Count >= 4) {
-            int count = Marshal.ReadInt32(startup.reserved2);
-            if (count >= 3 && count <= 255 && 4 + count + count * IntPtr.Size <= startup.reserved2Count) {
-                for (int i = 0; i < 3; i++) Trace("crt-" + i + "=" + Marshal.ReadIntPtr(startup.reserved2, 4 + count + i * IntPtr.Size).ToInt64());
-            }
-        }
     }
 
     static bool AwaitRelease(IntPtr parent) {
