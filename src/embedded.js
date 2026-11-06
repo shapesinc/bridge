@@ -319,6 +319,12 @@ function createEmbeddedController({ read = readState, write = writeState, remove
     });
   }
   function dispose() { closed = true; account = null; invalidate(); return serial(suspend); }
+  function lifecycleStatus() {
+    // Wait behind startup and mutations. This contains no account identity,
+    // credential, permission grant or online claim; only the owning host uses
+    // it to decide whether its private process tree can retire.
+    return serial(() => ({ active: runtime.running() || Boolean(attempt && !attempt.cancelled) }));
+  }
   async function listPersonalAgents({ expectedUserId }) {
     if (!identifier(expectedUserId)) throw failure("invalid_request");
     authorized(expectedUserId);
@@ -338,7 +344,7 @@ function createEmbeddedController({ read = readState, write = writeState, remove
     return { opened: true };
   }
   return { status, beginConnect, completeConnect, cancelConnect, disconnect, detach, updateAccount, requestPermission,
-    resumeSavedConnection, backgroundActive: () => runtime.running(),
+    resumeSavedConnection, backgroundActive: () => runtime.running(), lifecycleStatus,
     listPersonalAgents, openAgentLogin, dispose };
 }
 
