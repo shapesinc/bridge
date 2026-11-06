@@ -21,6 +21,8 @@ class ConsoleLaunch {
     [DllImport("kernel32.dll")] static extern bool FreeConsole();
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool AttachConsole(uint pid);
     [DllImport("kernel32.dll")] static extern uint GetConsoleProcessList([Out] uint[] processes, uint count);
+    [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     static string Quote(string value) {
         var result = new StringBuilder("\""); int slashes = 0;
         foreach (char c in value) {
@@ -40,8 +42,11 @@ class ConsoleLaunch {
             bool attached = AttachConsole(uint.Parse(args[1]));
             int error = attached ? 0 : Marshal.GetLastWin32Error();
             uint count = attached ? GetConsoleProcessList(new uint[32], 32) : 0;
+            IntPtr window = attached ? GetConsoleWindow() : IntPtr.Zero;
+            bool visible = window != IntPtr.Zero && IsWindowVisible(window);
             if (attached) FreeConsole();
-            Receipt(args[2], "{\"attached\":" + (attached ? "true" : "false") + ",\"error\":" + error + ",\"processCount\":" + count + "}");
+            Receipt(args[2], "{\"attached\":" + (attached ? "true" : "false") + ",\"error\":" + error + ",\"processCount\":" + count
+                + ",\"windowPresent\":" + (window != IntPtr.Zero ? "true" : "false") + ",\"visible\":" + (visible ? "true" : "false") + "}");
             return 0;
         }
         if (args.Length < 4 || args[0] != "launch") return 64;

@@ -34,7 +34,7 @@ test("ordinary OS launch is headless; explicit provider console remains opt-in",
     ["background", process.env.SHAPES_TEST_JOB_HOST, false, false],
     ["provider-console", process.env.SHAPES_TEST_JOB_HOST, true, false],
   ]) {
-    await t.test(name, { timeout: 18000 }, async () => {
+    await t.test(name, { timeout: 18000 }, async t => {
       const wrapperReceipt = path.join(directory, name + "-wrapper.json"), childReceipt = path.join(directory, name + "-child.json");
       const release = path.join(directory, name + "-release");
       const source = "const fs=require('node:fs');if(process.argv[3]==='write'){process.stdout.write('stdout works');process.stderr.write('stderr works');}fs.writeFileSync(process.argv[1]+'.tmp',JSON.stringify({pid:process.pid}));fs.renameSync(process.argv[1]+'.tmp',process.argv[1]);const end=setTimeout(()=>process.exit(1),12000);const t=setInterval(()=>{if(fs.existsSync(process.argv[2])){clearInterval(t);clearTimeout(end);}},20);";
@@ -53,9 +53,18 @@ test("ordinary OS launch is headless; explicit provider console remains opt-in",
           const receipt = path.join(directory, name + "-" + kind + "-console.json");
           await execute(probe, ["inspect", String(pid), receipt], { windowsHide: true, timeout: 5000 });
           const result = JSON.parse(fs.readFileSync(receipt, "utf8"));
-          assert.equal(result.attached, expected, `${name} ${kind}: ${JSON.stringify(result)}`);
-          if (expected) assert.ok(result.processCount > 0);
-          else assert.equal(result.error, 6, "ERROR_INVALID_HANDLE proves target has no console");
+          t.diagnostic(`${name} ${kind}: ${JSON.stringify(result)}`);
+          if (kind === "wrapper" || expected) {
+            assert.equal(result.attached, expected);
+            if (expected) assert.ok(result.processCount > 0);
+            else assert.equal(result.error, 6, "ERROR_INVALID_HANDLE proves GUI supervisor has no console");
+          }
+          // CREATE_NO_WINDOW can retain a headless console object that an
+          // inspector can attach to. Assert visibility for the child, while
+          // the GUI supervisor above must have no attachment at all. Both
+          // positive controls must really be visible, preventing a vacuous
+          // no-window result from a runner that cannot observe its desktop.
+          assert.equal(result.visible, expected);
         }
         fs.writeFileSync(release, "release");
         await until(() => launcher.exitCode !== null);
