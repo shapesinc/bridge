@@ -21,6 +21,12 @@ const jobFile = (id) => {
 };
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
+function supervisorPid(record) {
+  if (record.supervisor_pid) return record.supervisor_pid;
+  try { return Number(fs.readFileSync(path.join(root(), `${record.job_id}.supervisor`), "utf8")); }
+  catch (cause) { if (cause.code !== "ENOENT") throw cause; }
+}
+
 function save(record) {
   const file = jobFile(record.job_id), temp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temp, JSON.stringify(record), { mode: 0o600 });
@@ -42,7 +48,8 @@ function status(id, scope) {
   if (typeof scope !== "string" || !HEX.test(scope)) throw error("A trusted command scope is required.", 403);
   let record = load(id);
   if (record.scope !== scope) throw error("Command job not found.", 404, "command_not_found");
-  if (!TERMINAL.has(record.state) && Date.now() - record.created_at > 10000 && !alive(record.supervisor_pid || record.launcher_pid)) {
+  const supervisor = supervisorPid(record);
+  if (!TERMINAL.has(record.state) && Date.now() - record.created_at > 10000 && (!supervisor || !alive(supervisor))) {
     record = { ...record, state: "interrupted", finished_at: Date.now(), result: {
       exit_code: -1, stdout: "", stderr: "The command supervisor stopped without a completion receipt. Its effects are unknown; inspect the computer before issuing another mutation.", outcome_unknown: true,
     } };
@@ -80,7 +87,7 @@ function prune() {
     if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
     const record = load(name.slice(0, -5));
     if (TERMINAL.has(record.state) && record.state !== "interrupted" && Date.now() - record.finished_at > RETENTION_MS) {
-      for (const suffix of [".json", ".claimed", ".cancel"]) fs.rmSync(path.join(root(), record.job_id + suffix), { force: true });
+      for (const suffix of [".json", ".claimed", ".cancel", ".supervisor"]) fs.rmSync(path.join(root(), record.job_id + suffix), { force: true });
     } else count++;
   }
   if (count >= 256) throw error("Command receipt storage is full. Wait for completed receipts to expire before starting more commands.", 409, "command_storage_full");
@@ -103,7 +110,7 @@ async function start(body) {
     return { ...status(id, body.scope), deduplicated: true };
   } catch (cause) { if (cause.errorType !== "command_not_found") throw cause; }
   claim(id, body.scope);
-  let record;
+  let record, launched = false;
   try {
     prune();
     record = { job_id: id, scope: body.scope, fingerprint, command_hash: digest(body.cmd),
@@ -113,11 +120,15 @@ async function start(body) {
       detached: true, windowsHide: true, stdio: "ignore", env: process.env,
     });
     await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
+    launched = true;
+    fs.writeFileSync(path.join(root(), `${id}.supervisor`), String(child.pid), { mode: 0o600 });
     child.unref();
     return receipt(record);
   } catch (cause) {
-    if (record) save({ ...record, state: "failed", finished_at: Date.now(), result: { exit_code: -1, stdout: "", stderr: "Command supervisor could not start." } });
-    release(id);
+    if (launched) throw error("Command supervisor started but its launch receipt could not be saved. Poll the existing job; do not repeat it.", 503, "command_start_unconfirmed");
+    try {
+      if (record) save({ ...record, state: "failed", finished_at: Date.now(), result: { exit_code: -1, stdout: "", stderr: "Command supervisor could not start." } });
+    } finally { release(id); }
     throw cause;
   }
 }
@@ -133,7 +144,8 @@ function acknowledgeInterrupted(id) {
   const record = load(id);
   status(id, record.scope);
   const latest = load(id);
-  if (latest.state !== "interrupted" || alive(latest.supervisor_pid || latest.launcher_pid)) {
+  const supervisor = supervisorPid(latest);
+  if (latest.state !== "interrupted" || (supervisor && alive(supervisor))) {
     throw error("Only an interrupted command with no live supervisor can be acknowledged locally.");
   }
   save({ ...latest, acknowledged_at: Date.now() });

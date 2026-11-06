@@ -72,7 +72,9 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
     });
     await t.test("missing supervisor is reported as uncertain and never replayed", async () => {
       const record = jobs.load(id);
-      jobs.save({ ...record, state: "running", created_at: Date.now() - 20000, supervisor_pid: 99999999 });
+      // The daemon is alive, but its worker died before persisting running state.
+      jobs.save({ ...record, state: "queued", created_at: Date.now() - 20000, supervisor_pid: undefined, launcher_pid: process.pid });
+      fs.writeFileSync(path.join(jobs.root(), `${id}.supervisor`), "99999999");
       const result = jobs.status(id, scope);
       assert.equal(result.state, "interrupted");
       assert.equal(result.outcome_unknown, true);
