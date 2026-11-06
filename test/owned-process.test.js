@@ -3,6 +3,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { spawnOwned, signalOwned, windowsArguments } = require("../src/owned-process");
 const { windowsCandidates } = require("../src/agents");
+const { bundledWindowsTunnel } = require("../src/cloudflared");
 
 test("Windows owned processes use a fixed Job wrapper and argument array without a shell", () => {
   let launch;
@@ -30,4 +31,11 @@ test("Windows provider discovery checks native installs and PATH executables", (
   assert.ok(candidates.includes("C:\\tools\\codex.exe"));
   assert.ok(candidates.some((value) => value.includes("x86_64-pc-windows-msvc\\codex\\codex.exe")));
   assert.ok(candidates.every((value) => value.endsWith(".exe")));
+});
+
+test("installed Windows host requires its pinned bundled tunnel without runtime downloads", () => {
+  const options = { platform: "win32", executable: "C:\\app\\computer-connection\\node.exe" };
+  assert.equal(bundledWindowsTunnel({ ...options, exists: () => true }), "C:\\app\\computer-connection\\cloudflared.exe");
+  assert.throws(() => bundledWindowsTunnel({ ...options, exists: (file) => file.endsWith("Job.exe") }), /tunnel helper is missing/);
+  assert.equal(bundledWindowsTunnel({ ...options, exists: () => false }), null);
 });
