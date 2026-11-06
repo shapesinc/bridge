@@ -14,7 +14,9 @@ async function fixture(t) {
   const node = path.join(directory, "node.exe");
   fs.copyFileSync(process.execPath, node);
   fs.copyFileSync(process.env.SHAPES_TEST_JOB_HOST, path.join(directory, "shapes.inc Bridge Job.exe"));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  // execFile has observed process/stdio closure before run() returns. Windows
+  // can retain the executable mapping briefly after that notification.
+  t.after(() => fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
   const run = async (cmd, options = {}) => {
     const source = "require(process.argv[1]).runCommand(JSON.parse(process.argv[2])).then(result=>process.stdout.write(JSON.stringify(result)),()=>process.exit(1))";
     const { stdout } = await execute(node, ["-e", source, path.resolve(__dirname, "../src/server.js"), JSON.stringify({ cmd, cwd: directory, ...options })],
