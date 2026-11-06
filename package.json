@@ -15,6 +15,7 @@
     "bin",
     "src",
     "assets",
+    "scripts/windows/JobHost.cs",
     "README.md",
     "LICENSE"
   ],

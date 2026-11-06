@@ -267,7 +267,9 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
   // recorded on it so a status or list call explains what happened.
   try {
     const child = spawnOwned(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
-      detached: true, stdio: "ignore", env: { ...localEnvironment(), SHAPES_CODEX_JOB_DIR: root(),
+      // Durable jobs outlive a short CLI start request. On Windows the native
+      // app's enclosing Job still owns the full runtime and every nested job.
+      parentPid: null, detached: true, stdio: "ignore", env: { ...localEnvironment(), SHAPES_CODEX_JOB_DIR: root(),
         ...(builtIn ? { SHAPES_RUNTIME_TOKEN: builtIn.token } : {}) },
     });
     await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });

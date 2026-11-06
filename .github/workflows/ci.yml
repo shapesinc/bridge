@@ -45,7 +45,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "SHAPES_TEST_JOB_HOST=$output" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Verify native process ownership and durable connection transport
-        run: node --test --test-concurrency=1 test/owned-process.test.js test/embedded-host.test.js test/windows-owned-native.test.js test/windows-command-native.test.js
+        run: node --test --test-concurrency=1 test/owned-process.test.js test/embedded-host.test.js test/windows-job.test.js test/windows-standalone-native.test.js test/windows-owned-native.test.js test/windows-command-native.test.js
       - name: Compile Windows computer helper and throwaway fixture
         shell: pwsh
         run: |
@@ -58,6 +58,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "SHAPES_TEST_COMPUTER_HELPER=$helper" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "SHAPES_TEST_COMPUTER_FIXTURE=$fixture" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $medium = Join-Path $env:RUNNER_TEMP 'MediumProcess.exe'
+          $source = Join-Path $PWD 'test\fixtures\windows\MediumProcess.cs'
+          & $compiler /nologo /target:exe /platform:x64 "/out:$medium" $source
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "SHAPES_TEST_MEDIUM_PROCESS=$medium" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Exercise native Windows observe and input on owned fixture
-        run: node --test --test-concurrency=1 test/computer.test.js test/windows-computer.test.js test/windows-computer-native.test.js
+        shell: pwsh
+        run: |
+          $node = (Get-Command node).Source
+          & $env:SHAPES_TEST_JOB_HOST --parent-pid $PID -- $env:SHAPES_TEST_MEDIUM_PROCESS -- $node --test --test-concurrency=1 test/computer.test.js test/windows-computer.test.js test/windows-computer-native.test.js
+          exit $LASTEXITCODE
 

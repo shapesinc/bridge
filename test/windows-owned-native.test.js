@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { once } = require("node:events");
+const { spawn } = require("node:child_process");
 const { spawnOwned } = require("../src/owned-process");
 const available = process.platform === "win32" && process.env.SHAPES_TEST_JOB_HOST;
 const owned = (args, options = {}) => spawnOwned(process.execPath, args, { stdio: ["pipe", "pipe", "pipe"], ...options }, { host: process.env.SHAPES_TEST_JOB_HOST });
@@ -53,4 +54,25 @@ test("Windows Job parent death ends the wrapper's entire process tree", { skip: 
     process.kill(pids.parent); await once(wrapper, "close");
     await waitFor(() => !alive(pids.wrapper));
   } finally { if (wrapper.exitCode === null && wrapper.signalCode === null) wrapper.kill(); fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("an explicitly durable Windows job survives its short launcher", { skip: !available, timeout: 15000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-durable-"));
+  const receipt = path.join(directory, "receipt.json"), marker = path.join(directory, "completed.txt");
+  const modulePath = path.resolve(__dirname, "../src/owned-process.js");
+  const work = "setTimeout(()=>require('node:fs').writeFileSync(process.argv[1],'completed'),500)";
+  const source = "const c=require(process.argv[1]).spawnOwned(process.execPath,['-e',process.argv[4],process.argv[5]],{parentPid:null,stdio:'ignore'},{host:process.argv[2]});c.once('spawn',()=>{require('node:fs').writeFileSync(process.argv[3],JSON.stringify({wrapper:c.pid}));c.unref()});";
+  const launcher = spawn(process.execPath, ["-e", source, modulePath, process.env.SHAPES_TEST_JOB_HOST, receipt, work, marker], { stdio: "ignore", windowsHide: true });
+  let wrapper;
+  try {
+    assert.equal((await once(launcher, "close"))[0], 0);
+    wrapper = JSON.parse(fs.readFileSync(receipt, "utf8")).wrapper;
+    await waitFor(() => fs.existsSync(marker));
+    assert.equal(fs.readFileSync(marker, "utf8"), "completed");
+    await waitFor(() => !alive(wrapper));
+  } finally {
+    if (launcher.exitCode === null && launcher.signalCode === null) launcher.kill();
+    if (wrapper && alive(wrapper)) process.kill(wrapper);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { spawnOwned, signalOwned, windowsArguments } = require("../src/owned-process");
+const { spawnOwned, signalOwned, windowsArguments, jobHostPath } = require("../src/owned-process");
 const { windowsCandidates } = require("../src/agents");
 const { bundledWindowsTunnel } = require("../src/cloudflared");
 
@@ -13,11 +13,19 @@ test("Windows owned processes use a fixed Job wrapper and argument array without
   assert.equal(result, child); assert.equal(launch[0], "C:\\app\\Job.exe");
   assert.deepEqual(launch[1].slice(-3), ["--", "C:\\Program Files\\Codex\\codex.exe", "arg\" & echo private"]);
   assert.equal(launch[2].shell, false); assert.equal(launch[2].detached, false);
+  assert.deepEqual(windowsArguments("C:\\node.exe", ["task"], { parentPid: null }), ["--", "C:\\node.exe", "task"]);
+  assert.throws(() => windowsArguments("C:\\node.exe", [], { parentPid: 0 }), /process owner/);
 });
 test("missing Job helper and command-script paths fail before spawning", () => {
-  assert.throws(() => spawnOwned("C:\\node.exe", [], {}, { platform: "win32", exists: () => false }), /supervisor is missing/);
+  assert.throws(() => spawnOwned("C:\\node.exe", [], {}, { platform: "win32", host: "C:\\missing\\Job.exe", exists: () => false }), /supervisor is missing/);
   assert.throws(() => windowsArguments("C:\\npm\\codex.cmd", []), /Windows executable/);
   assert.throws(() => windowsArguments("codex.exe", []), /Windows executable/);
+});
+test("signed app helper selection never compiles or falls back when its bundled helper is missing", () => {
+  const settings = { platform: "win32", executable: "C:\\app\\node.exe", sourceDirectory: "C:\\app\\bridge\\src" };
+  assert.equal(jobHostPath({ ...settings, exists: (file) => file === "C:\\app\\manifest.json", compile: () => assert.fail("must not compile signed app fallback") }),
+    "C:\\app\\shapes.inc Bridge Job.exe");
+  assert.equal(jobHostPath({ ...settings, exists: () => false, compile: () => "C:\\private\\compiled.exe" }), "C:\\private\\compiled.exe");
 });
 test("Windows cancellation targets the exact live wrapper and never a global PID name", () => {
   const signals = [];

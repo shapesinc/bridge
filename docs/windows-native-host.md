@@ -13,6 +13,8 @@ The installed native app registers an app-specific, least-privilege Task Schedul
 
 Package layout is `computer-connection/{manifest.json,node.exe,shapes.inc Bridge Job.exe,shapes.inc Bridge Computer.exe,cloudflared.exe,bridge/{bin,src,assets,package.json},codex/x64/**}`. `manifest.json.version` identifies the packaged app/helper revision. Windows binaries must be compiled from the pinned source and the complete pinned official Codex Windows package must be included; startup must not download executable code.
 
+The standalone npm/CLI distribution also includes `scripts/windows/JobHost.cs`. Its Windows installer compiles that source with the installed .NET Framework into the existing private state directory, keyed by the source SHA-256; foreground use can prepare the same cached helper. Updates keep old helper files intact while earlier jobs may still execute them. No network download or elevated process is needed for compilation. A signed desktop runtime with missing packaged resources fails closed and never uses this compilation fallback.
+
 ## Compositions
 
 1. Initial native setup: independent current-session verification → native Connect confirmation → begin pairing → existing authenticated web approval → refreshed verified device list → complete → status. Cancel, navigation and app quit end the exact unfinished attempt.

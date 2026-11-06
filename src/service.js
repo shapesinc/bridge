@@ -147,6 +147,11 @@ function copyFiles(source, runtime) {
   for (const file of ["package.json", "README.md", "LICENSE"]) {
     if (fs.existsSync(path.join(source, file))) fs.copyFileSync(path.join(source, file), path.join(runtime, file));
   }
+  const windowsSource = path.join(source, "scripts/windows/JobHost.cs");
+  if (fs.existsSync(windowsSource)) {
+    fs.mkdirSync(path.join(runtime, "scripts/windows"), { recursive: true });
+    fs.copyFileSync(windowsSource, path.join(runtime, "scripts/windows/JobHost.cs"));
+  }
 }
 
 function assembleMacApp(source, app, { nodeBinary = process.execPath, launcherBinary, controlsBinary, computerBinary, cloudflaredBinary, codexPackages } = {}) {
@@ -290,6 +295,9 @@ async function copyRuntime(source = path.resolve(__dirname, ".."), { localApp = 
     if (paths.legacyNode && path.resolve(paths.legacyNode) !== path.resolve(process.execPath)) fs.rmSync(paths.legacyNode, { force: true });
     const png = path.join(paths.runtime, "assets", "shapes-inc-bridge.png");
     if (paths.icon && fs.existsSync(png)) fs.copyFileSync(png, paths.icon);
+    if (process.platform === "win32") require("./windows-job").ensureWindowsJobHost({
+      source: path.join(paths.runtime, "scripts/windows/JobHost.cs"),
+    });
   }
   fs.writeFileSync(paths.launcher, launcherContent(), { mode: 0o700 });
   if (process.platform !== "win32") fs.chmodSync(paths.launcher, 0o700);
