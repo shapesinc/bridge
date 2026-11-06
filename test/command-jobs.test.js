@@ -77,6 +77,10 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
       assert.equal(result.state, "interrupted");
       assert.equal(result.outcome_unknown, true);
       assert.equal((await jobs.start({ cmd, timeout: 10, scope, request_key: key })).state, "interrupted");
+      fs.writeFileSync(path.join(jobs.root(), "mutation.lock"), JSON.stringify({ id, scope }));
+      jobs.acknowledgeInterrupted(id);
+      assert.equal(fs.existsSync(path.join(jobs.root(), "mutation.lock")), false);
+      assert.equal((await jobs.start({ cmd, timeout: 10, scope, request_key: key })).state, "interrupted");
     });
   } finally {
     if (server?.listening) await close();

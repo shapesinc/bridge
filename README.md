@@ -179,6 +179,10 @@ lost response. Receipts under the private `command-jobs` directory retain job
 identity, command hash, timing, exit status and bounded output for 24 hours
 (maximum 256 records). A missing supervisor is an unknown outcome, never an
 automatic replay. Inspect an interrupted command locally before resuming work.
+After inspecting it and stopping any remaining processes, the owner can run
+`shapes-bridge acknowledge-command <job_id>` locally to release its mutation
+lock. This keeps the uncertain receipt and never reruns the command. There is
+no remote acknowledgement endpoint.
 The public tunnel is reverified on every heartbeat; three endpoint failures
 replace the tunnel without pairing again or replaying commands. Windows CI
 tests actual Task Scheduler registration, script execution and cancellation.

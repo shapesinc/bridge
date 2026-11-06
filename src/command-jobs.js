@@ -129,6 +129,18 @@ function cancel(id, scope) {
   return { ...result, cancel_requested: true };
 }
 
+function acknowledgeInterrupted(id) {
+  const record = load(id);
+  status(id, record.scope);
+  const latest = load(id);
+  if (latest.state !== "interrupted" || alive(latest.supervisor_pid || latest.launcher_pid)) {
+    throw error("Only an interrupted command with no live supervisor can be acknowledged locally.");
+  }
+  save({ ...latest, acknowledged_at: Date.now() });
+  release(id);
+  return receipt(latest);
+}
+
 async function mutation(run) {
   // Legacy HTTP actions live in this server process. Do not create a durable
   // lock that could outlive them; command workers use the disk lock instead.
@@ -137,4 +149,4 @@ async function mutation(run) {
   try { return await run(); } finally { ephemeralMutation = false; }
 }
 
-module.exports = { start, status, cancel, mutation, root, load, save, release, TERMINAL };
+module.exports = { start, status, cancel, mutation, acknowledgeInterrupted, root, load, save, release, TERMINAL };

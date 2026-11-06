@@ -128,6 +128,12 @@ async function main() {
       process.exit(process.exitCode || 0);
     }
   }
+  if (command === "acknowledge-command") {
+    if (!argv[1]) throw new Error("After inspecting an interrupted command and stopping any remaining processes locally, use acknowledge-command <job_id>. This does not retry it or mark it successful.");
+    require("../src/command-jobs").acknowledgeInterrupted(argv[1]);
+    log("Interrupted command acknowledged locally. Its effects remain unverified; new computer operations are allowed. The command was not replayed.");
+    return;
+  }
   if (command === "logs") {
     const file = path.join(stateDir(), "service.log");
     if (fs.existsSync(file)) log(fs.readFileSync(file, "utf8").slice(-24000));
