@@ -40,7 +40,7 @@ const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { retu
 test("Windows runtime preserves multiline PowerShell, Unicode and failure receipts", { skip: !available, timeout: 30000 }, async (t) => {
   const f = await fixture(t);
   const result = await f.run("$value = 'hello 🌲'\nWrite-Output $value\nWrite-Output 'second line'");
-  assert.equal(result.exit_code, 0); assert.equal(result.shell, "powershell");
+  assert.equal(result.exit_code, 0);
   assert.match(result.stdout, /hello 🌲\r?\nsecond line/);
   const failure = await f.run("throw 'intentional failure'");
   assert.equal(failure.exit_code, 1); assert.match(failure.stderr, /intentional failure/);
@@ -55,7 +55,7 @@ test("Windows command timeout kills descendants before a delayed write", { skip:
   fs.writeFileSync(child, `Start-Sleep -Seconds 4\n[IO.File]::WriteAllText('${marker.replaceAll("'", "''")}', 'unexpected')`);
   const script = `Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile', '-File', '"${child.replaceAll("'", "''")}"') -WindowStyle Hidden\nStart-Sleep -Seconds 30`;
   const result = await f.run(script, { timeout: 1 });
-  assert.equal(result.exit_code, -1); assert.match(result.termination_reason, /timed out/);
+  assert.equal(result.exit_code, -1); assert.match(result.stderr, /timed out/);
   await new Promise((resolve) => setTimeout(resolve, 4500));
   assert.equal(fs.existsSync(marker), false);
 });

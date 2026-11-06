@@ -2,7 +2,6 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
 const { ensureStateDir, stateDir } = require("./state");
 
 const powershell = () => path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
@@ -33,14 +32,4 @@ function commandShell(cmd, shell = process.platform === "win32" ? "powershell" :
     shell, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
 
-function elevationStatus({ platform = process.platform, execute = spawnSync } = {}) {
-  if (platform !== "win32") return { elevated: typeof process.getuid === "function" ? process.getuid() === 0 : null };
-  const result = execute(powershell(), ["-NoProfile", "-NonInteractive", "-Command",
-    "[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)"],
-  { encoding: "utf8", timeout: 5000, windowsHide: true });
-  const value = result.stdout?.trim();
-  return { elevated: !result.error && result.status === 0 && /^(True|False)$/.test(value) ? value === "True" : null,
-    elevation_guidance: "Chat sharing does not grant Windows administrator rights. For an operation requiring elevation, the owner must review and run that specific operation in an Administrator terminal. The background Bridge stays at least privilege." };
-}
-
-module.exports = { commandShell, elevationStatus };
+module.exports = { commandShell };

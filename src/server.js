@@ -30,7 +30,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
-const { commandShell, elevationStatus } = require("./command-shell");
+const { commandShell } = require("./command-shell");
 const { spawnOwned, signalOwned } = require("./owned-process");
 const { URL } = require("node:url");
 const { startJob, publicStatus, listJobs, cancelJob, respondJob } = require("./codex");
@@ -190,9 +190,7 @@ function runCommand({ cmd, cwd, timeout, shell, signal }) {
       if (reason) stderr += (stderr ? "\n" : "") + reason;
       try { transport?.cleanup(); } catch { /* Windows can briefly retain a script handle. */ }
       resolve({ exit_code: stopped || error || code === null ? -1 : code,
-        stdout: tail(stdout), stderr: tail(stderr), shell: transport?.shell || shell,
-        output_truncated: stdout.length > MAX_OUTPUT || stderr.length > MAX_OUTPUT,
-        ...(stopped ? { termination_reason: stopped } : {}) });
+        stdout: tail(stdout), stderr: tail(stderr) });
     };
     const capture = (name, chunk) => {
       if (finished) return;
@@ -248,10 +246,6 @@ function sysinfo() {
     platform: process.platform,
     arch: process.arch,
     node: process.version,
-    bridge_version: require("../package.json").version,
-    command_protocol: 1,
-    default_shell: process.platform === "win32" ? "powershell" : "sh",
-    ...elevationStatus(),
     cpu_count: os.cpus().length,
     mem_gb: Math.round((os.totalmem() / 1e9) * 10) / 10,
     home,
@@ -420,11 +414,14 @@ function startServer({ port, token, computerControl = createComputerControl() })
       if (route === "/run" && method === "POST") {
         const body = await readBody(req);
         if (!body || typeof body.cmd !== "string" || !body.cmd.trim()
-            || (body.cwd !== undefined && typeof body.cwd !== "string")) {
+            || (body.cwd !== undefined && typeof body.cwd !== "string")
+            || (body.shell !== undefined && !["sh", "powershell", "cmd"].includes(body.shell))) {
           return sendJson(res, 400, { error: "Supply cmd text and optional cwd text." });
         }
         log(`RUN: ${body.cmd}   (cwd=${body.cwd || process.cwd()})`);
-        const result = await runCommand(body);
+        // Cancellation handles are an internal runtime primitive, never JSON
+        // supplied by a remote command. Preserve ignored legacy extra fields.
+        const result = await runCommand({ cmd: body.cmd, cwd: body.cwd, timeout: body.timeout, shell: body.shell });
         return sendJson(res, 200, result);
       }
 

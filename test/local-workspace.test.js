@@ -79,7 +79,7 @@ test("HTTP commands use installed local tools under the macOS app's minimal PATH
   const f = await fixture(t);
   const result = await f.request("/run", { cmd: "bridge-fixture-tool", cwd: "~" });
   assert.equal(result.status, 200);
-  assert.deepEqual(result.body, { exit_code: 0, stdout: "local-tool-ok", stderr: "", shell: "sh", output_truncated: false });
+  assert.deepEqual(result.body, { exit_code: 0, stdout: "local-tool-ok", stderr: "" });
   assert.equal(process.env.PATH, SYSTEM_PATH, "requests must not mutate the daemon environment");
   const defaultDirectory = await f.request("/run", { cmd: "pwd" });
   assert.equal(defaultDirectory.body.stdout.trim(), fs.realpathSync(process.cwd()), "CLI launch directory is preserved");
@@ -109,7 +109,10 @@ test("unauthorized commands and writes have no side effects; invalid paths expla
   assert.match((await f.request(`/read?path=${encodeURIComponent(file)}`)).body.error, /ENOENT/);
   for (const body of [null, {}, { cmd: 1 }, { cmd: "pwd", cwd: [] }]) assert.equal((await f.request("/run", body)).status, 400);
   const failed = await f.request("/run", { cmd: "printf intentional-error >&2; exit 7", cwd: f.directory });
-  assert.deepEqual(failed.body, { exit_code: 7, stdout: "", stderr: "intentional-error", shell: "sh", output_truncated: false });
+  assert.deepEqual(failed.body, { exit_code: 7, stdout: "", stderr: "intentional-error" });
+  const untrustedSignal = await f.request("/run", { cmd: "printf transport-ok", cwd: f.directory, signal: {} });
+  assert.deepEqual(untrustedSignal.body, { exit_code: 0, stdout: "transport-ok", stderr: "" });
+  assert.equal((await f.request("/run", { cmd: "printf must-not-run", shell: {} })).status, 400);
 });
 
 test("command timeout stops descendants before reporting, without late file writes", { skip: process.platform === "win32" }, async (t) => {
