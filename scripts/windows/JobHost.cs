@@ -2,6 +2,7 @@
 // job before CreateProcess, so there is no suspended/unowned-child race. Job
 // handles are not inherited and breakaway is never enabled.
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -32,6 +33,25 @@ class JobHost {
     }
     [StructLayout(LayoutKind.Sequential)] struct ProcessInformation { public IntPtr process, thread; public uint processId, threadId; }
     [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public int length; public IntPtr descriptor; public bool inherit; }
+    // Numeric/blittable layout from processsnapshot.h. No output string is
+    // marshalled or freed; the diagnostic reads only Handle. Thread is the
+    // largest union member and Section preserves its native 8-byte alignment.
+    [StructLayout(LayoutKind.Sequential)] struct PssFileTime { public uint low, high; }
+    [StructLayout(LayoutKind.Sequential)] struct PssThreadInfo {
+        public uint exitStatus; public IntPtr teb; public uint processId, threadId;
+        public UIntPtr affinity; public int priority, basePriority; public IntPtr startAddress;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct PssSectionInfo { public IntPtr address; public uint attributes; public long maximumSize; }
+    [StructLayout(LayoutKind.Explicit)] struct PssTypeInfo {
+        [FieldOffset(0)] public PssThreadInfo thread;
+        [FieldOffset(0)] public PssSectionInfo section;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct PssHandleEntry {
+        public IntPtr handle; public uint flags, objectType; public PssFileTime captureTime;
+        public uint attributes, grantedAccess, handleCount, pointerCount, pagedPoolCharge, nonPagedPoolCharge;
+        public PssFileTime creationTime; public ushort typeNameLength; public IntPtr typeName;
+        public ushort objectNameLength; public IntPtr objectName; public PssTypeInfo specific;
+    }
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref ExtendedLimits info, int size);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
@@ -48,6 +68,12 @@ class JobHost {
     [DllImport("kernel32.dll")] static extern uint WaitForMultipleObjects(uint count, IntPtr[] handles, bool waitAll, uint milliseconds);
     [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process, out uint code);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll")] static extern uint PssCaptureSnapshot(IntPtr process, uint flags, uint contextFlags, out IntPtr snapshot);
+    [DllImport("kernel32.dll")] static extern uint PssWalkMarkerCreate(IntPtr allocator, out IntPtr marker);
+    [DllImport("kernel32.dll")] static extern uint PssWalkSnapshot(IntPtr snapshot, int informationClass, IntPtr marker, out PssHandleEntry entry, uint bufferLength);
+    [DllImport("kernel32.dll")] static extern uint PssWalkMarkerFree(IntPtr marker);
+    [DllImport("kernel32.dll")] static extern uint PssFreeSnapshot(IntPtr process, IntPtr snapshot);
+    [DllImport("kernelbase.dll")] static extern bool CompareObjectHandles(IntPtr first, IntPtr second);
 
     static void Trace(string message) {
         if (String.IsNullOrEmpty(diagnosticPath)) return;
@@ -60,9 +86,43 @@ class JobHost {
         return handle.ToInt64() + ":valid=" + valid + ":flags=" + flags + ":type=" + GetFileType(handle) + ":error=" + error;
     }
 
-    static void TraceOutputHandles() {
-        if (String.IsNullOrEmpty(diagnosticPath)) return;
-        Trace("output stdout=" + HandleDescription(GetStdHandle(-11)) + " stderr=" + HandleDescription(GetStdHandle(-12)));
+    static IntPtr[] TraceOutputHandles() {
+        if (String.IsNullOrEmpty(diagnosticPath)) return new IntPtr[0];
+        IntPtr output = GetStdHandle(-11), error = GetStdHandle(-12);
+        Trace("output stdout=" + HandleDescription(output) + " stderr=" + HandleDescription(error));
+        var aliases = new List<IntPtr>(); var evidence = new StringBuilder();
+        IntPtr snapshot = IntPtr.Zero, marker = IntPtr.Zero;
+        try {
+            // PSS_CAPTURE_HANDLES only: no names, memory clone or thread data.
+            uint status = PssCaptureSnapshot(GetCurrentProcess(), 4, 0, out snapshot);
+            evidence.Append(" capture=").Append(status);
+            if (status == 0) {
+                status = PssWalkMarkerCreate(IntPtr.Zero, out marker);
+                evidence.Append(" marker=").Append(status);
+                if (status == 0) {
+                    uint size = (uint)Marshal.SizeOf(typeof(PssHandleEntry)); int count = 0;
+                    while (count < 4096) {
+                        PssHandleEntry entry;
+                        status = PssWalkSnapshot(snapshot, 2, marker, out entry, size); // PSS_WALK_HANDLES
+                        if (status != 0) break;
+                        count++;
+                        bool sameOutput = CompareObjectHandles(entry.handle, output), sameError = CompareObjectHandles(entry.handle, error);
+                        if (sameOutput || sameError) {
+                            aliases.Add(entry.handle);
+                            evidence.Append(" match=").Append(entry.handle.ToInt64()).Append(":stdout=").Append(sameOutput).Append(":stderr=").Append(sameError);
+                        }
+                    }
+                    evidence.Append(" walked=").Append(count).Append(" status=").Append(status).Append(" entry-size=").Append(size);
+                }
+            }
+        } catch (Exception exception) { evidence.Append(" exception=").Append(exception.GetType().Name); }
+        finally {
+            if (marker != IntPtr.Zero) evidence.Append(" marker-free=").Append(PssWalkMarkerFree(marker));
+            if (snapshot != IntPtr.Zero) evidence.Append(" snapshot-free=").Append(PssFreeSnapshot(GetCurrentProcess(), snapshot));
+        }
+        // No snapshot or duplicate pipe reference remains during output close.
+        Trace("output-aliases" + evidence);
+        return aliases.ToArray();
     }
 
     static bool AwaitRelease(IntPtr parent) {
@@ -98,7 +158,7 @@ class JobHost {
         }
     }
 
-    static bool CloseOutputHandles() {
+    static bool CloseOutputHandles(IntPtr[] diagnosticAliases) {
         // The wrapper has no buffered output here (--ready is flushed at its
         // write site). Do not initialize Console writers while relinquishing
         // the inherited pipe handles. Remove stale standard-handle table entries
@@ -111,6 +171,7 @@ class JobHost {
         bool errorClosed = error == output || error == IntPtr.Zero || error == new IntPtr(-1) || CloseHandle(error);
         int errorError = errorClosed ? 0 : Marshal.GetLastWin32Error();
         string state = String.IsNullOrEmpty(diagnosticPath) ? "" : " after-stdout=" + HandleDescription(output) + " after-stderr=" + HandleDescription(error);
+        foreach (IntPtr alias in diagnosticAliases) state += " after-alias=" + HandleDescription(alias);
         Trace("close-output reset=" + outputReset + "," + errorReset + " closed=" + outputClosed + "," + errorClosed + " error=" + outputError + "," + errorError + state);
         return outputReset && errorReset && outputClosed && errorClosed;
     }
@@ -176,8 +237,8 @@ class JobHost {
                 // A successful shell can leave descendants holding its output
                 // pipes. Remain cancellable until the owner observes both EOFs
                 // and explicitly commits successful background ownership handoff.
-                TraceOutputHandles();
-                if (!CloseOutputHandles()) return 70;
+                IntPtr[] diagnosticAliases = TraceOutputHandles();
+                if (!CloseOutputHandles(diagnosticAliases)) return 70;
                 if (!AwaitRelease(parent)) return 70;
                 limits.BasicLimitInformation.LimitFlags = 0;
                 if (!SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf(typeof(ExtendedLimits)))) return 70;
