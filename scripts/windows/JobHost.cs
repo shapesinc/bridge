@@ -31,6 +31,13 @@ class JobHost {
         public uint x, y, xSize, ySize, xCountChars, yCountChars, fillAttribute, flags;
         public short showWindow, reserved2Count; public IntPtr reserved2, stdin, stdout, stderr;
     }
+    // GetStartupInfo returns borrowed Windows pointers. Keep them as IntPtr;
+    // an output struct containing strings would ask the marshaller to free them.
+    [StructLayout(LayoutKind.Sequential)] struct StartupInfoPointers {
+        public uint cb; public IntPtr reserved, desktop, title;
+        public uint x, y, xSize, ySize, xCountChars, yCountChars, fillAttribute, flags;
+        public ushort showWindow, reserved2Count; public IntPtr reserved2, stdin, stdout, stderr;
+    }
     [StructLayout(LayoutKind.Sequential)] struct ProcessInformation { public IntPtr process, thread; public uint processId, threadId; }
     [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public int length; public IntPtr descriptor; public bool inherit; }
     // Numeric/blittable layout from processsnapshot.h. No output string is
@@ -57,6 +64,7 @@ class JobHost {
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
     [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
     [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int handle);
+    [DllImport("kernel32.dll", EntryPoint = "GetStartupInfoW", ExactSpelling = true)] static extern void GetStartupInfoPointers(out StartupInfoPointers info);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetStdHandle(int handle, IntPtr value);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetHandleInformation(IntPtr handle, out uint flags);
     [DllImport("kernel32.dll", SetLastError = true)] static extern uint GetFileType(IntPtr handle);
@@ -86,6 +94,27 @@ class JobHost {
         return handle.ToInt64() + ":valid=" + valid + ":flags=" + flags + ":type=" + GetFileType(handle) + ":error=" + error;
     }
 
+    static void TraceStartupHandles() {
+        if (String.IsNullOrEmpty(diagnosticPath)) return;
+        StartupInfoPointers info; GetStartupInfoPointers(out info);
+        var evidence = new StringBuilder("startup size=").Append(Marshal.SizeOf(typeof(StartupInfoPointers))).Append(" flags=").Append(info.flags)
+            .Append(" stdin=").Append(HandleDescription(info.stdin)).Append(" stdout=").Append(HandleDescription(info.stdout)).Append(" stderr=").Append(HandleDescription(info.stderr));
+        // libuv's verified inherited CRT layout: uint count, count byte flags,
+        // then count pointer-sized handles. Read at most fd0/1/2, only within the
+        // provided buffer; no undocumented CRT function is loaded or invoked.
+        if (info.reserved2 != IntPtr.Zero && info.reserved2Count >= 4) {
+            int count = Marshal.ReadInt32(info.reserved2);
+            evidence.Append(" crt-bytes=").Append(info.reserved2Count).Append(" crt-count=").Append(count);
+            if (count >= 0 && count <= 256 && 4 + count * (1 + IntPtr.Size) <= info.reserved2Count) {
+                for (int fd = 0; fd < Math.Min(3, count); fd++) {
+                    IntPtr handle = Marshal.ReadIntPtr(info.reserved2, 4 + count + IntPtr.Size * fd);
+                    evidence.Append(" fd").Append(fd).Append('=').Append(HandleDescription(handle)).Append(":crt-flags=").Append(Marshal.ReadByte(info.reserved2, 4 + fd));
+                }
+            }
+        }
+        Trace(evidence.ToString());
+    }
+
     static IntPtr[] TraceOutputHandles(string phase) {
         if (String.IsNullOrEmpty(diagnosticPath)) return new IntPtr[0];
         IntPtr input = GetStdHandle(-10), output = GetStdHandle(-11), error = GetStdHandle(-12);
@@ -106,10 +135,10 @@ class JobHost {
                         status = PssWalkSnapshot(snapshot, 2, marker, out entry, size); // PSS_WALK_HANDLES
                         if (status != 0) break;
                         count++;
-                        bool sameOutput = CompareObjectHandles(entry.handle, output), sameError = CompareObjectHandles(entry.handle, error);
-                        if (sameOutput || sameError) {
+                        bool sameInput = CompareObjectHandles(entry.handle, input), sameOutput = CompareObjectHandles(entry.handle, output), sameError = CompareObjectHandles(entry.handle, error);
+                        if (sameInput || sameOutput || sameError) {
                             aliases.Add(entry.handle);
-                            evidence.Append(" match=").Append(entry.handle.ToInt64()).Append(":stdout=").Append(sameOutput).Append(":stderr=").Append(sameError).Append(":stdin=").Append(CompareObjectHandles(entry.handle, input));
+                            evidence.Append(" match=").Append(entry.handle.ToInt64()).Append(":stdout=").Append(sameOutput).Append(":stderr=").Append(sameError).Append(":stdin=").Append(sameInput);
                         }
                     }
                     evidence.Append(" walked=").Append(count).Append(" status=").Append(status).Append(" entry-size=").Append(size);
@@ -190,6 +219,7 @@ class JobHost {
     static int Main(string[] args) {
         IntPtr parent = IntPtr.Zero, childInput = IntPtr.Zero;
         try {
+            TraceStartupHandles();
             TraceOutputHandles("entry");
             int index = 0; bool console = false, ready = false, commandString = false, releaseOnSuccess = false;
             if (args.Length > 1 && args[0] == "--parent-pid") {
