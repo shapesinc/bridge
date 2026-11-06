@@ -4,12 +4,13 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawnSync } = require("node:child_process");
 const { StringDecoder } = require("node:string_decoder");
 const { selectAgent, argumentsFor, verifyInteractiveCodex } = require("./agents");
 const { normalizeRequest, nativeResponse } = require("./approvals");
 const { localEnvironment } = require("./local-workspace");
 const { bundledRuntime, launchConfiguration } = require("./bundled-runtime");
+const { spawnOwned, signalOwned } = require("./owned-process");
 
 const MAX_OUTPUT = 64 * 1024;
 const MAX_PROMPT = 64 * 1024;
@@ -211,7 +212,6 @@ function publicStatus(id, expectedAgent) {
 }
 
 async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex", interactive = false, requestKey, builtIn, resumeThreadId, usageBaseline }) {
-  if (process.platform === "win32") throw new Error("The local agent launcher currently requires macOS or Linux.");
   if (!["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
   cwd = validateCwd(cwd, sandbox);
   const timeout = Number(timeoutSeconds);
@@ -266,7 +266,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
   // The job is durably queued and listable from here on; a launch failure is
   // recorded on it so a status or list call explains what happened.
   try {
-    const child = spawn(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
+    const child = spawnOwned(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
       detached: true, stdio: "ignore", env: { ...localEnvironment(), SHAPES_CODEX_JOB_DIR: root(),
         ...(builtIn ? { SHAPES_RUNTIME_TOKEN: builtIn.token } : {}) },
     });
@@ -620,7 +620,7 @@ async function supervise(id) {
   const logs = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
   const killGroup = (signal) => {
     if (child && child.pid) {
-      try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== "ESRCH") throw error; }
+      signalOwned(child, signal);
     }
   };
   const stop = (status) => {
@@ -696,7 +696,7 @@ async function supervise(id) {
     Object.assign(state, { supervisorPid: process.pid, status: "running", startedAt: new Date().toISOString() });
     saveState(directory, state);
     if (fs.existsSync(path.join(directory, "cancel"))) { finish("cancelled"); return; }
-    child = spawn(request.executable, argumentsFor(agent, request),
+    child = spawnOwned(request.executable, argumentsFor(agent, request),
       { cwd: request.cwd, env: localEnvironment(), detached: true, stdio: ["pipe", "pipe", "pipe"] });
     child.stdin.on("error", () => {}); // Early CLI exits can close stdin before the prompt is consumed.
     child.stdin.end(request.prompt);

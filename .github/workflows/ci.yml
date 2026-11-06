@@ -27,3 +27,35 @@ jobs:
       - run: npm test
       - run: npm pack --dry-run
 
+  windows-runtime:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Compile Windows process owner
+        shell: pwsh
+        run: |
+          $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+          $output = Join-Path $env:RUNNER_TEMP 'shapes.inc Bridge Job.exe'
+          & $compiler /nologo /target:exe /platform:x64 "/out:$output" scripts/windows/JobHost.cs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "SHAPES_TEST_JOB_HOST=$output" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Verify native process ownership and durable connection transport
+        run: node --test --test-concurrency=1 test/owned-process.test.js test/embedded-host.test.js test/windows-owned-native.test.js test/windows-command-native.test.js
+      - name: Compile Windows computer helper and throwaway fixture
+        shell: pwsh
+        run: |
+          $helper = Join-Path $env:RUNNER_TEMP 'shapes.inc Bridge Computer.exe'
+          ./scripts/windows/build-computer.ps1 -OutputPath $helper
+          $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+          $fixture = Join-Path $env:RUNNER_TEMP 'ComputerFixture.exe'
+          & $compiler /nologo /target:exe /platform:x64 /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll "/out:$fixture" scripts/windows/ComputerFixture.cs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "SHAPES_TEST_COMPUTER_HELPER=$helper" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SHAPES_TEST_COMPUTER_FIXTURE=$fixture" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Exercise native Windows observe and input on owned fixture
+        run: node --test --test-concurrency=1 test/computer.test.js test/windows-computer.test.js test/windows-computer-native.test.js
+

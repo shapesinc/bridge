@@ -1,0 +1,33 @@
+"use strict";
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const { spawnOwned, signalOwned, windowsArguments } = require("../src/owned-process");
+const { windowsCandidates } = require("../src/agents");
+
+test("Windows owned processes use a fixed Job wrapper and argument array without a shell", () => {
+  let launch;
+  const child = {};
+  const result = spawnOwned("C:\\Program Files\\Codex\\codex.exe", ["arg\" & echo private"], { stdio: ["pipe", "pipe", "pipe"], shell: true },
+    { platform: "win32", host: "C:\\app\\Job.exe", exists: () => true, spawnProcess: (...args) => { launch = args; return child; } });
+  assert.equal(result, child); assert.equal(launch[0], "C:\\app\\Job.exe");
+  assert.deepEqual(launch[1].slice(-3), ["--", "C:\\Program Files\\Codex\\codex.exe", "arg\" & echo private"]);
+  assert.equal(launch[2].shell, false); assert.equal(launch[2].detached, false);
+});
+test("missing Job helper and command-script paths fail before spawning", () => {
+  assert.throws(() => spawnOwned("C:\\node.exe", [], {}, { platform: "win32", exists: () => false }), /supervisor is missing/);
+  assert.throws(() => windowsArguments("C:\\npm\\codex.cmd", []), /Windows executable/);
+  assert.throws(() => windowsArguments("codex.exe", []), /Windows executable/);
+});
+test("Windows cancellation targets the exact live wrapper and never a global PID name", () => {
+  const signals = [];
+  const child = { pid: 123, exitCode: null, signalCode: null, kill: (signal) => signals.push(signal) };
+  signalOwned(child, "SIGKILL", { platform: "win32", kill: () => assert.fail("must not signal POSIX group") });
+  child.exitCode = 0; signalOwned(child, "SIGKILL", { platform: "win32" });
+  assert.deepEqual(signals, ["SIGKILL"]);
+});
+test("Windows provider discovery checks native installs and PATH executables", () => {
+  const candidates = windowsCandidates("codex", { home: "C:\\Users\\Me", env: { APPDATA: "C:\\Users\\Me\\AppData\\Roaming", Path: "C:\\tools;D:\\more tools" }, arch: "x64" });
+  assert.ok(candidates.includes("C:\\tools\\codex.exe"));
+  assert.ok(candidates.some((value) => value.includes("x86_64-pc-windows-msvc\\codex\\codex.exe")));
+  assert.ok(candidates.every((value) => value.endsWith(".exe")));
+});

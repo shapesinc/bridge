@@ -1,9 +1,9 @@
 "use strict";
 
-const { spawn } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
 const { StringDecoder } = require("node:string_decoder");
 const { localEnvironment } = require("./local-workspace");
+const { spawnOwned, signalOwned } = require("./owned-process");
 
 function deferred() {
   let resolve, reject;
@@ -62,7 +62,7 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
   }
   function killGroup(signal) {
     if (!child?.pid) return;
-    try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    signalOwned(child, signal);
   }
   function fail(error) {
     if (fatalError || terminal) return;
@@ -253,7 +253,7 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
     if (typeof prompt !== "string" || !prompt.trim()) throw new Error("A nonempty prompt is required.");
     started = true;
     enterPhase("initialize");
-    child = spawn(executable, launchArgs || ["app-server", "--listen", "stdio://", "-c", "sandbox_workspace_write.writable_roots=[]"],
+    child = spawnOwned(executable, launchArgs || ["app-server", "--listen", "stdio://", "-c", "sandbox_workspace_write.writable_roots=[]"],
       { cwd, env: environment || localEnvironment(), detached: true, stdio: ["pipe", "pipe", "pipe"] });
     child.stdin.on("error", fail);
     child.stdout.on("data", (chunk) => { try { consume(chunk); } catch (error) { fail(error); } });

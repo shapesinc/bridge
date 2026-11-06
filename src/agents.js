@@ -3,8 +3,8 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
 const { localEnvironment } = require("./local-workspace");
+const { spawnOwned, signalOwned } = require("./owned-process");
 
 const IDS = ["codex", "claude"];
 const PROBE_TIMEOUT = 5000;
@@ -29,6 +29,7 @@ function candidates(agent) {
   const override = process.env[agent === "codex" ? "SHAPES_CODEX_BINARY" : "SHAPES_CLAUDE_BINARY"];
   if (override) return [override];
   const home = os.homedir();
+  if (process.platform === "win32") return windowsCandidates(agent, { home, env: process.env });
   const defaults = agent === "codex" ? [
     "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
     "/Applications/Codex.app/Contents/Resources/codex",
@@ -40,6 +41,18 @@ function candidates(agent) {
   ];
   return [...new Set([...defaults, ...(localEnvironment().PATH || "").split(path.delimiter)
     .filter(Boolean).map((dir) => path.join(dir, agent))])];
+}
+
+function windowsCandidates(agent, { home, env, arch = process.arch }) {
+  const target = arch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc";
+  const npm = path.win32.join(env.APPDATA || path.win32.join(home, "AppData", "Roaming"), "npm", "node_modules");
+  const defaults = agent === "codex" ? [
+    path.win32.join(npm, "@openai", "codex", "vendor", target, "codex", "codex.exe"),
+    path.win32.join(npm, "@openai", `codex-win32-${arch}`, "vendor", target, "codex", "codex.exe"),
+    path.win32.join(home, ".local", "bin", "codex.exe"),
+  ] : [path.win32.join(home, ".local", "bin", "claude.exe"), path.win32.join(home, ".claude", "local", "claude.exe")];
+  const search = Object.entries(env).find(([key]) => key.toUpperCase() === "PATH")?.[1] || "";
+  return [...new Set([...defaults, ...search.split(";").filter(Boolean).map((directory) => path.win32.join(directory, `${agent}.exe`))])];
 }
 
 // Probes never send a prompt. Capture all output privately: login status can
@@ -54,11 +67,11 @@ function probe(executable, args, cwd) {
       resolve({ code, output, error, failed });
     }
     function stop() {
-      try { process.kill(-child.pid, "SIGKILL"); } catch {}
+      try { signalOwned(child, "SIGKILL"); } catch {}
       finish(null, true);
     }
     try {
-      child = spawn(executable, args, { cwd, env: localEnvironment(), detached: true, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawnOwned(executable, args, { cwd, env: localEnvironment(), stdio: ["ignore", "pipe", "pipe"] });
       child.stdout.on("data", (part) => { output += part; if (output.length > 65536) stop(); });
       child.stderr.on("data", (part) => { error += part; if (error.length > 65536) stop(); });
       child.once("error", () => finish(null, true));
@@ -179,4 +192,4 @@ function argumentsFor(agent, request) {
   return args;
 }
 
-module.exports = { listAgents, selectAgent, inspectAgent, publicAgent, argumentsFor, desktopClaudeCandidates, verifyInteractiveCodex };
+module.exports = { listAgents, selectAgent, inspectAgent, publicAgent, argumentsFor, desktopClaudeCandidates, windowsCandidates, verifyInteractiveCodex };

@@ -70,7 +70,7 @@ even though this package also contains the separate `shapes-codex` command.
 
 ## Controls and computer permissions
 
-The signed macOS bundle exposes authenticated `POST /computer` when
+The signed desktop bundle exposes authenticated `POST /computer` when
 `GET /capabilities` reports `features.computer_control`. The server accepts
 `{scope, control}`; `scope` is a server-derived actor/chat/connection digest,
 never a model-provided identity. `control.operation` is `observe`, `click`,
@@ -86,7 +86,12 @@ never by replaying input. The receipt says `dispatched`, not that the task worke
 The bundled `shapes.inc Bridge Computer` executable captures with ScreenCaptureKit
 and posts CoreGraphics events; it checks consent in that process and never changes
 the clipboard or prompts for permission from a remote action. Installation without
-that signed native executable advertises the capability as unavailable. Existing
+that signed native executable advertises the capability as unavailable. The
+Windows bundle uses `shapes.inc Bridge Computer.exe` with desktop capture and
+Windows input APIs. It validates the foreground window, display geometry,
+interactive desktop and protected-input state before dispatch. See
+[Windows computer control](scripts/windows/COMPUTER_CONTROL.md) for platform
+semantics and required signed-candidate acceptance. Existing
 shell/file actions retain their contracts. Screenshots and typed text are not logged.
 
 The installer creates a local command that works without npm or network access.
@@ -325,6 +330,13 @@ files. `SHAPES_CODEX_BINARY` and `SHAPES_CLAUDE_BINARY` can select explicit
 executables. Claude needs the current headless permission controls, including
 `--permission-prompts none` (added in Claude Code 2.1.259).
 
+The app-owned Windows host checks native `.exe` installs on PATH, the user's
+local bin directory and official npm Codex platform packages. Its bundled Job
+helper owns discovery and execution subprocesses. Installed native hosts ignore
+shell overrides of their runtime binaries. [Windows host contracts and release
+gates](docs/windows-native-host.md) describe foreground quit, task lifetime and
+the same pairing, account and budget boundaries used by macOS.
+
 All agent endpoints require the same `X-Token` header as other machine actions:
 
 - `GET /agents` returns `agents` with `id`, `installed`, `authenticated`,
@@ -483,7 +495,9 @@ bounded logs remain under `~/.shapes-bridge/codex-jobs/` with private permission
 (directories 0700, files 0600); the historical directory name also holds Claude
 jobs. Remove a finished job's directory to delete its local records.
 `SHAPES_CODEX_JOB_DIR` overrides that storage location. The launcher currently
-supports macOS and Linux.
+supports macOS and Linux; the app-owned Windows distribution adds the native
+Job helper needed to enforce the same task cancellation boundary. Foreground
+Windows app quit detaches from its durable host and preserves established work.
 
 Discovery adds **$0/day in inference cost**. Delegated tasks use the selected
 agent's account plan or configured provider; the launcher adds no classifier,
