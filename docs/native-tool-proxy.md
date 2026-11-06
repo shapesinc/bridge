@@ -2,6 +2,8 @@
 
 This is a default-off transport for the embedded runtime to discover and use capabilities authorized by shapes.inc. It does not import the person's Codex credentials or enable every Codex desktop capability. The backend must explicitly enable its feature flag and issue a separate, current tool-audience grant. Bridge advertises support only on macOS/Linux with an available bundled executable; Windows remains unsupported and receives no extra runtime configuration.
 
+The release candidate is Bridge **0.2.10**, carrying the reviewed `4bb147fd658541761a10577134b7a491fd267348` runtime with a version-only package update. The separate 0.2.9 Windows parity candidate is not included. Release metadata preparation adds **$0/day**; the runtime costs and acceptance limitations below still apply. Candidate source, native publication, standalone publication and feature activation are separate steps under the [release sequence](../README.md#releasing-the-macos-app).
+
 ## Composable contracts
 
 - `shapes_discover({query?, cursor?, limit?})` finds currently authorized capabilities. Discovery does not grant permission to act.
