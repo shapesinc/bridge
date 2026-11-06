@@ -8,6 +8,8 @@ async function supervise(id) {
   // Even an accidental second supervisor invocation cannot replay a command.
   fs.closeSync(fs.openSync(path.join(jobs.root(), `${id}.claimed`), "wx", 0o600));
   const record = jobs.load(id), abort = new AbortController();
+  // A delayed spawn cannot resurrect a job already declared interrupted.
+  if (record.state !== "queued") return;
   const cancel = () => abort.abort();
   process.on("SIGTERM", cancel);
   process.on("SIGINT", cancel);

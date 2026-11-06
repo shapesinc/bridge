@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const { startServer } = require("../src/server");
 const jobs = require("../src/command-jobs");
 
@@ -70,6 +71,16 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
       assert.equal(final.body.state, "cancelled", JSON.stringify(final));
       assert.equal(final.body.exit_code, -1);
     });
+    await t.test("completion racing a liveness check keeps the completed receipt", async (t) => {
+      const complete = jobs.load(id);
+      jobs.save({ ...complete, state: "running", created_at: Date.now() - 20000, supervisor_pid: 99999999 });
+      t.mock.method(process, "kill", () => {
+        jobs.save(complete);
+        throw Object.assign(new Error("exited"), { code: "ESRCH" });
+      });
+      assert.equal(jobs.status(id, scope).state, "completed");
+      assert.equal(jobs.load(id).state, "completed");
+    });
     await t.test("missing supervisor is reported as uncertain and never replayed", async () => {
       const record = jobs.load(id);
       // The daemon is alive, but its worker died before persisting running state.
@@ -83,6 +94,16 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
       jobs.acknowledgeInterrupted(id);
       assert.equal(fs.existsSync(path.join(jobs.root(), "mutation.lock")), false);
       assert.equal((await jobs.start({ cmd, timeout: 10, scope, request_key: key })).state, "interrupted");
+    });
+    await t.test("a delayed supervisor cannot execute an interrupted job", async () => {
+      const lateId = "e".repeat(64);
+      jobs.save({ ...jobs.load(id), job_id: lateId });
+      fs.writeFileSync(script, `require('fs').appendFileSync(${JSON.stringify(marker)},'replayed')`);
+      const child = spawnSync(process.execPath, [path.join(__dirname, "../src/command-worker.js"), lateId],
+        { timeout: 5000, windowsHide: true, encoding: "utf8" });
+      assert.equal(child.status, 0, child.stderr);
+      assert.equal(jobs.load(lateId).state, "interrupted");
+      assert.equal(fs.readFileSync(marker, "utf8"), "1");
     });
   } finally {
     if (server?.listening) await close();

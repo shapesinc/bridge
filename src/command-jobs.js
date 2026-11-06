@@ -50,6 +50,10 @@ function status(id, scope) {
   if (record.scope !== scope) throw error("Command job not found.", 404, "command_not_found");
   const supervisor = supervisorPid(record);
   if (!TERMINAL.has(record.state) && Date.now() - record.created_at > 10000 && (!supervisor || !alive(supervisor))) {
+    // The worker can finish between our first read and the liveness check.
+    // Once it is dead its final save is complete; never overwrite that receipt.
+    record = load(id);
+    if (TERMINAL.has(record.state)) return receipt(record);
     record = { ...record, state: "interrupted", finished_at: Date.now(), result: {
       exit_code: -1, stdout: "", stderr: "The command supervisor stopped without a completion receipt. Its effects are unknown; inspect the computer before issuing another mutation.", outcome_unknown: true,
     } };
