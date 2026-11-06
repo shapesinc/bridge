@@ -34,7 +34,8 @@ test("a real Linux service restart preserves its independently supervised comman
   };
   fs.writeFileSync(serverScript, `
     require(${JSON.stringify(path.join(__dirname, "../src/server"))}).startServer({port: 0, token: 'test-token'}).then(server => {
-      require('node:fs').writeFileSync(${JSON.stringify(ready)}, JSON.stringify({pid: process.pid, port: server.address().port}));
+      require('node:fs').writeFileSync(${JSON.stringify(ready + '.tmp')}, JSON.stringify({pid: process.pid, port: server.address().port}));
+      require('node:fs').renameSync(${JSON.stringify(ready + '.tmp')}, ${JSON.stringify(ready)});
     });
   `);
   fs.writeFileSync(taskScript, `
