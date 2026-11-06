@@ -77,12 +77,16 @@ identities, one-use observations and password-field refusal, and terminates the
 fixture before removing its temporary files. It does not interact with a real
 user's windows intentionally and aborts if its fixture is not foreground.
 
-At source base `460c7bd` plus this patch, the 10 portable controller/HTTP tests
-pass on macOS. They verify shared actor scope, expiry, consumed receipts,
-platform executable discovery and Windows identity binding with simulated
-native replies. Both Windows-native tests skip explicitly on macOS.
+At code revision `9857350`, [Windows CI](https://github.com/shapesinc/bridge/actions/runs/42138458879)
+compiled both helpers and passed the 12 controller/computer tests, including
+actual owned-window capture, input and refusal fixtures. The CI-only
+`test/fixtures/windows/MediumProcess.cs` lowers the elevated runner's test process
+to verified medium integrity inside the existing owned Job; production guards
+are unchanged. The portable tests use simulated native replies and verify actor
+scope, expiry, consumed receipts, executable discovery and Windows identity
+binding. Windows-native tests still skip explicitly when run on macOS/Linux.
 
-**NO-GO until native compile and Windows runtime acceptance pass.** Additional
+**NO-GO until signed installed Windows acceptance passes.** Additional
 required acceptance includes multiple monitors and mixed DPI, actual locked and
 disconnected desktops, protected/UAC/elevated targets, normal browser/native app
 editing, background connection and packaged update behavior. A skipped Windows

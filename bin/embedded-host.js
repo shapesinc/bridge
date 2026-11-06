@@ -23,7 +23,8 @@ async function main() {
   const directory = ensureStateDir();
   const version = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../../manifest.json"), "utf8")).version;
   if (typeof version !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(version)) throw new Error("Invalid host version");
-  const host = createEmbeddedHost({ controller: createEmbeddedController({ api }), ...hostConfiguration(directory), version });
+  const host = createEmbeddedHost({ controller: createEmbeddedController({ api }), ...hostConfiguration(directory), version,
+    onIdle: (error) => process.exit(error ? 1 : 0) });
   for (const signal of ["SIGTERM", "SIGINT"]) process.on(signal, () => { void host.dispose().then(() => process.exit(0), () => process.exit(1)); });
   try { await host.start(); } catch (error) { if (error.code === "EADDRINUSE") process.exit(0); throw error; }
 }

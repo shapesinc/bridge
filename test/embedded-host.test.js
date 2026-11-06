@@ -61,3 +61,39 @@ test("durable private host authenticates, detaches established access, and prese
     await host.dispose(); assert.equal(disposed, 1); assert.equal(state, "paused");
   } finally { for (const socket of sockets) socket.destroy(); await host.dispose(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("idle host retires disconnected or paused controllers only after the foreground detaches", { timeout: 10000 }, async () => {
+  for (const state of ["disconnected", "paused", "connected"]) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-idle-"));
+    const endpoint = process.platform === "win32" ? `\\\\.\\pipe\\bridge-idle-${crypto.randomUUID()}` : path.join(dir, "idle.sock");
+    const token = crypto.randomBytes(32).toString("hex");
+    let disposed = 0, idle = 0, error;
+    const host = createEmbeddedHost({ token, version: "test-1", endpoint, idleTimeoutMs: 100,
+      onIdle: (failure) => { idle++; error = failure; }, controller: {
+        status: async () => ({ state }), detach: async () => ({ state }), dispose: async () => { disposed++; },
+      } });
+    let peer;
+    try {
+      await host.start(); peer = client(endpoint); assert.equal((await authenticate(peer, token)).ready, true);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(idle, 0, "an attached controller remains available");
+      peer.socket.end(); await once(peer.socket, "close");
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.equal(idle, state === "connected" ? 0 : 1); assert.equal(error, undefined);
+      assert.equal(disposed, state === "connected" ? 0 : 1);
+    } finally { peer?.socket.destroy(); await host.dispose(); fs.rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test("a never-attached idle host exits without starting computer access", { timeout: 5000 }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-unused-"));
+  const endpoint = process.platform === "win32" ? `\\\\.\\pipe\\bridge-unused-${crypto.randomUUID()}` : path.join(dir, "unused.sock");
+  let stopped = 0, finish;
+  const retired = new Promise((resolve) => { finish = resolve; });
+  const host = createEmbeddedHost({ token: crypto.randomBytes(32).toString("hex"), version: "test-1", endpoint,
+    idleTimeoutMs: 5, onIdle: finish, controller: {
+      status: () => ({ state: "disconnected" }), dispose: async () => { stopped++; },
+    } });
+  try { await host.start(); assert.equal(await retired, undefined); assert.equal(stopped, 1); assert.equal(host.server.listening, false); }
+  finally { await host.dispose(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
