@@ -47,6 +47,8 @@ jobs:
       - name: Verify native process ownership and durable connection transport
         run: node --test --test-concurrency=1 test/owned-process.test.js test/embedded-host.test.js test/windows-job.test.js test/windows-standalone-native.test.js test/windows-owned-native.test.js test/windows-command-native.test.js
       - name: Compile Windows computer helper and throwaway fixture
+        id: computer
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $helper = Join-Path $env:RUNNER_TEMP 'shapes.inc Bridge Computer.exe'
@@ -64,6 +66,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "SHAPES_TEST_MEDIUM_PROCESS=$medium" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Exercise native Windows observe and input on owned fixture
+        if: ${{ !cancelled() && steps.computer.outcome == 'success' }}
         shell: pwsh
         run: |
           $node = (Get-Command node).Source

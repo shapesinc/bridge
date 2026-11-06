@@ -204,7 +204,7 @@ function runCommand({ cmd, cwd, timeout, shell, signal }) {
     try {
       if (signal?.aborted) { stopped = "command cancelled"; finish(null); return; }
       transport = commandShell(cmd, shell);
-      child = spawnOwned(transport.executable, transport.args, { cwd: workdir, env: localEnvironment(), windowsCommand: transport.windowsCommand || false,
+      child = spawnOwned(transport.executable, transport.args, { cwd: workdir, env: localEnvironment(), windowsCommand: transport.windowsCommand || false, releaseOnSuccess: true,
         detached: process.platform !== "win32", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
       child.stdout.on("data", (chunk) => capture("stdout", chunk));
       child.stderr.on("data", (chunk) => capture("stderr", chunk));

@@ -53,7 +53,7 @@ class JobHost {
     static int Main(string[] args) {
         IntPtr parent = IntPtr.Zero;
         try {
-            int index = 0; bool console = false, ready = false, commandString = false;
+            int index = 0; bool console = false, ready = false, commandString = false, releaseOnSuccess = false;
             if (args.Length > 1 && args[0] == "--parent-pid") {
                 uint parentId; if (!uint.TryParse(args[1], out parentId) || parentId == 0) return 64;
                 parent = OpenProcess(0x00100000, false, parentId); if (parent == IntPtr.Zero) return 70;
@@ -61,6 +61,7 @@ class JobHost {
             }
             if (index < args.Length && args[index] == "--ready") { ready = true; index++; }
             if (index < args.Length && args[index] == "--console") { console = true; index++; }
+            if (index < args.Length && args[index] == "--release-on-success") { releaseOnSuccess = true; index++; }
             if (index < args.Length && args[index] == "--command-string") { commandString = true; index++; }
             if (index >= args.Length || args[index++] != "--" || index >= args.Length || !Path.IsPathRooted(args[index])) return 64;
             string executable = Path.GetFullPath(args[index]);
@@ -85,6 +86,15 @@ class JobHost {
             uint code = 1;
             if (completed == 0) GetExitCodeProcess(child.process, out code);
             CloseHandle(child.process);
+            if (releaseOnSuccess && completed == 0 && code == 0) {
+                // An ordinary shell command may intentionally start background
+                // work. Only successful command completion releases this local
+                // cancellation boundary; the enclosing native runtime Job still
+                // owns every descendant. Killing a pending wrapper never reaches
+                // this path and closes its kill-on-close Job normally.
+                limits.BasicLimitInformation.LimitFlags = 0;
+                if (!SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf(typeof(ExtendedLimits)))) return 70;
+            }
             GC.KeepAlive(job);
             return (int)code;
         } catch { return 70; }
