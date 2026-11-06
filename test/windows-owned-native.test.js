@@ -65,6 +65,21 @@ test("Windows handoff control input is hidden from the command and EOF fails clo
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("Windows handoff rejects a missing or invalid explicit output pipe before launching work", { skip: !available, timeout: 15000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-handoff-invalid-")), receipt = path.join(directory, "unexpected.txt");
+  try {
+    for (const extra of [[], ["--stdout-fd", "0"], ["--stdout-fd", "3"], ["--stdout-fd", "256"]]) {
+      const child = spawn(process.env.SHAPES_TEST_JOB_HOST, ["--parent-pid", String(process.pid), "--release-on-success", ...extra,
+        "--", process.execPath, "-e", "require('node:fs').writeFileSync(process.argv[1],'must not run')", receipt], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+      const closed = once(child, "close"); child.stdout.resume(); child.stderr.resume();
+      try {
+        assert.equal((await closed)[0], 64);
+        assert.equal(fs.existsSync(receipt), false);
+      } finally { if (child.exitCode === null && child.signalCode === null) { child.kill(); await closed; } }
+    }
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("Windows handoff closes empty and independently written output streams", { skip: !available, timeout: 30000 }, async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-handoff-streams-"));
   try {

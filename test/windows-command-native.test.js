@@ -71,7 +71,7 @@ test("successful Windows background launch survives its command and ends with th
   const script = path.join(f.directory, "background.ps1");
   fs.writeFileSync(script, `[IO.File]::WriteAllText('${marker.replaceAll("'", "''")}', 'started')\nStart-Sleep -Seconds 30`);
   const cmd = `$child = Start-Process -FilePath powershell.exe -ArgumentList @('-NoProfile', '-File', '"${script.replaceAll("'", "''")}"') -WindowStyle Hidden -PassThru\nWrite-Output $child.Id`;
-  const source = "require(process.argv[1]).runCommand(JSON.parse(process.argv[2])).then(result=>{require('node:fs').writeFileSync(process.argv[3],JSON.stringify(result));setInterval(()=>{},1000)},()=>process.exit(1))";
+  const source = "require(process.argv[1]).runCommand(JSON.parse(process.argv[2])).then(result=>{const fs=require('node:fs'),file=process.argv[3];fs.writeFileSync(file+'.tmp',JSON.stringify(result));fs.renameSync(file+'.tmp',file);setInterval(()=>{},1000)},()=>process.exit(1))";
   const runtime = f.own(spawn(path.join(f.directory, "shapes.inc Bridge Job.exe"), ["--parent-pid", String(process.pid), "--", path.join(f.directory, "node.exe"), "-e", source,
     path.resolve(__dirname, "../src/server.js"), JSON.stringify({ cmd, cwd: f.directory }), receipt],
     { stdio: "ignore", windowsHide: true, env: { ...process.env, SHAPES_BRIDGE_HOME: path.join(f.directory, "state") } }));

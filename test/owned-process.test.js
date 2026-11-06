@@ -24,8 +24,22 @@ test("missing Job helper and command-script paths fail before spawning", () => {
 test("successful ownership handoff requires a live parent and an isolated input pipe", () => {
   assert.throws(() => windowsArguments("C:\\node.exe", [], { parentPid: null, releaseOnSuccess: true }), /private control input/);
   assert.throws(() => windowsArguments("C:\\node.exe", [], { console: true, releaseOnSuccess: true }), /private control input/);
-  assert.throws(() => spawnOwned("C:\\node.exe", [], { releaseOnSuccess: true, stdio: ["ignore", "pipe", "pipe"] },
-    { platform: "win32", host: "C:\\app\\Job.exe", exists: () => true, spawnProcess: () => assert.fail("must fail before spawn") }), /piped control input/);
+  for (const stdio of [["ignore", "pipe", "pipe"], ["pipe", "inherit", "pipe"], ["pipe", "pipe", "ignore"], ["pipe", "pipe", "pipe", "pipe"], "pipe"]) {
+    assert.throws(() => spawnOwned("C:\\node.exe", [], { releaseOnSuccess: true, stdio },
+      { platform: "win32", host: "C:\\app\\Job.exe", exists: () => true, spawnProcess: () => assert.fail("must fail before spawn") }), /piped control input/);
+  }
+});
+test("handoff captures stdout through an explicit extra pipe and preserves the child stdout API", () => {
+  const input = {}, output = {}, error = {}, child = { stdin: input, stdout: null, stderr: error, stdio: [input, null, error, output] };
+  const options = { releaseOnSuccess: true, ready: true, stdio: ["pipe", "pipe", "pipe"] };
+  let launch;
+  const result = spawnOwned("C:\\node.exe", ["task"], options,
+    { platform: "win32", host: "C:\\app\\Job.exe", exists: () => true, spawnProcess: (...args) => { launch = args; return child; } });
+  assert.equal(result, child); assert.equal(result.stdout, output); assert.equal(result.stdin, input); assert.equal(result.stderr, error);
+  assert.deepEqual(launch[2].stdio, ["pipe", "ignore", "pipe", "pipe"]);
+  assert.deepEqual(launch[1].slice(2), ["--ready", "--release-on-success", "--stdout-fd", "3", "--", "C:\\node.exe", "task"]);
+  assert.deepEqual(options.stdio, ["pipe", "pipe", "pipe"], "caller options remain reusable");
+  assert.equal(child.stdio[1], null, "do not duplicate the extra stream in the ChildProcess stdio lifecycle array");
 });
 test("signed app helper selection never compiles or falls back when its bundled helper is missing", () => {
   const settings = { platform: "win32", executable: "C:\\app\\node.exe", sourceDirectory: "C:\\app\\bridge\\src" };

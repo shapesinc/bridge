@@ -2,7 +2,6 @@
 // job before CreateProcess, so there is no suspended/unowned-child race. Job
 // handles are not inherited and breakaway is never enabled.
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -40,25 +39,6 @@ class JobHost {
     }
     [StructLayout(LayoutKind.Sequential)] struct ProcessInformation { public IntPtr process, thread; public uint processId, threadId; }
     [StructLayout(LayoutKind.Sequential)] struct SecurityAttributes { public int length; public IntPtr descriptor; public bool inherit; }
-    // Numeric/blittable layout from processsnapshot.h. No output string is
-    // marshalled or freed; the diagnostic reads only Handle. Thread is the
-    // largest union member and Section preserves its native 8-byte alignment.
-    [StructLayout(LayoutKind.Sequential)] struct PssFileTime { public uint low, high; }
-    [StructLayout(LayoutKind.Sequential)] struct PssThreadInfo {
-        public uint exitStatus; public IntPtr teb; public uint processId, threadId;
-        public UIntPtr affinity; public int priority, basePriority; public IntPtr startAddress;
-    }
-    [StructLayout(LayoutKind.Sequential)] struct PssSectionInfo { public IntPtr address; public uint attributes; public long maximumSize; }
-    [StructLayout(LayoutKind.Explicit)] struct PssTypeInfo {
-        [FieldOffset(0)] public PssThreadInfo thread;
-        [FieldOffset(0)] public PssSectionInfo section;
-    }
-    [StructLayout(LayoutKind.Sequential)] struct PssHandleEntry {
-        public IntPtr handle; public uint flags, objectType; public PssFileTime captureTime;
-        public uint attributes, grantedAccess, handleCount, pointerCount, pagedPoolCharge, nonPagedPoolCharge;
-        public PssFileTime creationTime; public ushort typeNameLength; public IntPtr typeName;
-        public ushort objectNameLength; public IntPtr objectName; public PssTypeInfo specific;
-    }
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref ExtendedLimits info, int size);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
@@ -69,6 +49,7 @@ class JobHost {
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetHandleInformation(IntPtr handle, out uint flags);
     [DllImport("kernel32.dll", SetLastError = true)] static extern uint GetFileType(IntPtr handle);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool ReadFile(IntPtr handle, [Out] byte[] buffer, uint count, out uint read, IntPtr overlapped);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool WriteFile(IntPtr handle, byte[] buffer, uint count, out uint written, IntPtr overlapped);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateFile(string name, uint access, uint share, ref SecurityAttributes attributes, uint disposition, uint flags, IntPtr template);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CreateProcess(string applicationName, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory, ref StartupInfo startupInfo, out ProcessInformation processInformation);
@@ -76,12 +57,6 @@ class JobHost {
     [DllImport("kernel32.dll")] static extern uint WaitForMultipleObjects(uint count, IntPtr[] handles, bool waitAll, uint milliseconds);
     [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process, out uint code);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr handle);
-    [DllImport("kernel32.dll")] static extern uint PssCaptureSnapshot(IntPtr process, uint flags, uint contextFlags, out IntPtr snapshot);
-    [DllImport("kernel32.dll")] static extern uint PssWalkMarkerCreate(IntPtr allocator, out IntPtr marker);
-    [DllImport("kernel32.dll")] static extern uint PssWalkSnapshot(IntPtr snapshot, int informationClass, IntPtr marker, out PssHandleEntry entry, uint bufferLength);
-    [DllImport("kernel32.dll")] static extern uint PssWalkMarkerFree(IntPtr marker);
-    [DllImport("kernel32.dll")] static extern uint PssFreeSnapshot(IntPtr process, IntPtr snapshot);
-    [DllImport("kernelbase.dll")] static extern bool CompareObjectHandles(IntPtr first, IntPtr second);
 
     static void Trace(string message) {
         if (String.IsNullOrEmpty(diagnosticPath)) return;
@@ -89,69 +64,26 @@ class JobHost {
         try { lock (diagnosticLock) File.AppendAllText(diagnosticPath, DateTime.UtcNow.ToString("O") + " " + message + Environment.NewLine); } catch {}
     }
 
-    static string HandleDescription(IntPtr handle) {
-        uint flags; bool valid = GetHandleInformation(handle, out flags); int error = valid ? 0 : Marshal.GetLastWin32Error();
-        return handle.ToInt64() + ":valid=" + valid + ":flags=" + flags + ":type=" + GetFileType(handle) + ":error=" + error;
-    }
-
-    static void TraceStartupHandles() {
-        if (String.IsNullOrEmpty(diagnosticPath)) return;
+    static bool InheritedOutputPipe(int fd, out IntPtr handle) {
+        handle = IntPtr.Zero;
         StartupInfoPointers info; GetStartupInfoPointers(out info);
-        var evidence = new StringBuilder("startup size=").Append(Marshal.SizeOf(typeof(StartupInfoPointers))).Append(" flags=").Append(info.flags)
-            .Append(" stdin=").Append(HandleDescription(info.stdin)).Append(" stdout=").Append(HandleDescription(info.stdout)).Append(" stderr=").Append(HandleDescription(info.stderr));
-        // libuv's verified inherited CRT layout: uint count, count byte flags,
-        // then count pointer-sized handles. Read at most fd0/1/2, only within the
-        // provided buffer; no undocumented CRT function is loaded or invoked.
-        if (info.reserved2 != IntPtr.Zero && info.reserved2Count >= 4) {
-            int count = Marshal.ReadInt32(info.reserved2);
-            evidence.Append(" crt-bytes=").Append(info.reserved2Count).Append(" crt-count=").Append(count);
-            if (count >= 0 && count <= 256 && 4 + count * (1 + IntPtr.Size) <= info.reserved2Count) {
-                for (int fd = 0; fd < Math.Min(3, count); fd++) {
-                    IntPtr handle = Marshal.ReadIntPtr(info.reserved2, 4 + count + IntPtr.Size * fd);
-                    evidence.Append(" fd").Append(fd).Append('=').Append(HandleDescription(handle)).Append(":crt-flags=").Append(Marshal.ReadByte(info.reserved2, 4 + fd));
-                }
-            }
-        }
-        Trace(evidence.ToString());
+        // libuv's inherited CRT layout is uint count, count byte flags, then
+        // count pointer-sized handles (deps/uv/src/win/process-stdio.c). This
+        // reads only the explicitly requested extra descriptor, within bounds.
+        if (fd < 3 || fd > 255 || info.reserved2 == IntPtr.Zero || info.reserved2Count < 4) return false;
+        int count = Marshal.ReadInt32(info.reserved2);
+        if (count <= fd || count > 256 || 4 + count * (1 + IntPtr.Size) > info.reserved2Count) return false;
+        if ((Marshal.ReadByte(info.reserved2, 4 + fd) & 9) != 9) return false; // FOPEN | FPIPE
+        IntPtr candidate = Marshal.ReadIntPtr(info.reserved2, 4 + count + IntPtr.Size * fd);
+        uint flags;
+        if (candidate == IntPtr.Zero || candidate == new IntPtr(-1) || candidate == GetStdHandle(-10) || candidate == GetStdHandle(-11) || candidate == GetStdHandle(-12)
+            || !GetHandleInformation(candidate, out flags) || (flags & 1) == 0 || GetFileType(candidate) != 3) return false;
+        handle = candidate; return true;
     }
 
-    static IntPtr[] TraceOutputHandles(string phase) {
-        if (String.IsNullOrEmpty(diagnosticPath)) return new IntPtr[0];
-        IntPtr input = GetStdHandle(-10), output = GetStdHandle(-11), error = GetStdHandle(-12);
-        Trace("output phase=" + phase + " stdin=" + HandleDescription(input) + " stdout=" + HandleDescription(output) + " stderr=" + HandleDescription(error));
-        var aliases = new List<IntPtr>(); var evidence = new StringBuilder();
-        IntPtr snapshot = IntPtr.Zero, marker = IntPtr.Zero;
-        try {
-            // PSS_CAPTURE_HANDLES only: no names, memory clone or thread data.
-            uint status = PssCaptureSnapshot(GetCurrentProcess(), 4, 0, out snapshot);
-            evidence.Append(" capture=").Append(status);
-            if (status == 0) {
-                status = PssWalkMarkerCreate(IntPtr.Zero, out marker);
-                evidence.Append(" marker=").Append(status);
-                if (status == 0) {
-                    uint size = (uint)Marshal.SizeOf(typeof(PssHandleEntry)); int count = 0;
-                    while (count < 4096) {
-                        PssHandleEntry entry;
-                        status = PssWalkSnapshot(snapshot, 2, marker, out entry, size); // PSS_WALK_HANDLES
-                        if (status != 0) break;
-                        count++;
-                        bool sameInput = CompareObjectHandles(entry.handle, input), sameOutput = CompareObjectHandles(entry.handle, output), sameError = CompareObjectHandles(entry.handle, error);
-                        if (sameInput || sameOutput || sameError) {
-                            aliases.Add(entry.handle);
-                            evidence.Append(" match=").Append(entry.handle.ToInt64()).Append(":stdout=").Append(sameOutput).Append(":stderr=").Append(sameError).Append(":stdin=").Append(sameInput);
-                        }
-                    }
-                    evidence.Append(" walked=").Append(count).Append(" status=").Append(status).Append(" entry-size=").Append(size);
-                }
-            }
-        } catch (Exception exception) { evidence.Append(" exception=").Append(exception.GetType().Name); }
-        finally {
-            if (marker != IntPtr.Zero) evidence.Append(" marker-free=").Append(PssWalkMarkerFree(marker));
-            if (snapshot != IntPtr.Zero) evidence.Append(" snapshot-free=").Append(PssFreeSnapshot(GetCurrentProcess(), snapshot));
-        }
-        // No snapshot or duplicate pipe reference remains during output close.
-        Trace("output-aliases phase=" + phase + evidence);
-        return aliases.ToArray();
+    static bool WriteReady(IntPtr output) {
+        byte[] bytes = Encoding.ASCII.GetBytes("{\"started\":true}\n"); uint written;
+        return WriteFile(output, bytes, (uint)bytes.Length, out written, IntPtr.Zero) && written == bytes.Length;
     }
 
     static bool AwaitRelease(IntPtr parent) {
@@ -187,22 +119,16 @@ class JobHost {
         }
     }
 
-    static bool CloseOutputHandles(IntPtr[] diagnosticAliases) {
-        // The wrapper has no buffered output here (--ready is flushed at its
-        // write site). Do not initialize Console writers while relinquishing
-        // the inherited pipe handles. Remove stale standard-handle table entries
-        // before closing the exact handles; a failed close must not release Job
-        // ownership or wait indefinitely for an EOF that the owner cannot see.
-        IntPtr output = GetStdHandle(-11), error = GetStdHandle(-12);
-        bool outputReset = SetStdHandle(-11, IntPtr.Zero), errorReset = SetStdHandle(-12, IntPtr.Zero);
-        bool outputClosed = output == IntPtr.Zero || output == new IntPtr(-1) || CloseHandle(output);
-        int outputError = outputClosed ? 0 : Marshal.GetLastWin32Error();
+    static bool CloseOutputHandles(IntPtr output, IntPtr error) {
+        // output is the explicit extra pipe, never the managed runtime's startup
+        // stdout slot. Only these owned handles are closed; no runtime aliases
+        // are enumerated. The helper's standard stdout stays on NUL until exit.
+        bool errorReset = SetStdHandle(-12, IntPtr.Zero);
+        bool outputClosed = CloseHandle(output); int outputError = outputClosed ? 0 : Marshal.GetLastWin32Error();
         bool errorClosed = error == output || error == IntPtr.Zero || error == new IntPtr(-1) || CloseHandle(error);
         int errorError = errorClosed ? 0 : Marshal.GetLastWin32Error();
-        string state = String.IsNullOrEmpty(diagnosticPath) ? "" : " after-stdout=" + HandleDescription(output) + " after-stderr=" + HandleDescription(error);
-        foreach (IntPtr alias in diagnosticAliases) state += " after-alias=" + HandleDescription(alias);
-        Trace("close-output reset=" + outputReset + "," + errorReset + " closed=" + outputClosed + "," + errorClosed + " error=" + outputError + "," + errorError + state);
-        return outputReset && errorReset && outputClosed && errorClosed;
+        Trace("close-output reset=" + errorReset + " closed=" + outputClosed + "," + errorClosed + " error=" + outputError + "," + errorError);
+        return errorReset && outputClosed && errorClosed;
     }
 
     static string Quote(string value) {
@@ -219,9 +145,7 @@ class JobHost {
     static int Main(string[] args) {
         IntPtr parent = IntPtr.Zero, childInput = IntPtr.Zero;
         try {
-            TraceStartupHandles();
-            TraceOutputHandles("entry");
-            int index = 0; bool console = false, ready = false, commandString = false, releaseOnSuccess = false;
+            int index = 0, outputFd = -1; bool console = false, ready = false, commandString = false, releaseOnSuccess = false;
             if (args.Length > 1 && args[0] == "--parent-pid") {
                 uint parentId; if (!uint.TryParse(args[1], out parentId) || parentId == 0) return 64;
                 parent = OpenProcess(0x00100000, false, parentId); if (parent == IntPtr.Zero) return 70;
@@ -230,8 +154,15 @@ class JobHost {
             if (index < args.Length && args[index] == "--ready") { ready = true; index++; }
             if (index < args.Length && args[index] == "--console") { console = true; index++; }
             if (index < args.Length && args[index] == "--release-on-success") { releaseOnSuccess = true; index++; }
+            if (index < args.Length && args[index] == "--stdout-fd") {
+                if (index + 1 >= args.Length || !int.TryParse(args[index + 1], out outputFd) || outputFd < 3 || outputFd > 255) return 64;
+                index += 2;
+            }
             if (index < args.Length && args[index] == "--command-string") { commandString = true; index++; }
-            if (releaseOnSuccess && (parent == IntPtr.Zero || console)) return 64;
+            if (releaseOnSuccess && (parent == IntPtr.Zero || console || outputFd < 3)) return 64;
+            if (!releaseOnSuccess && outputFd != -1) return 64;
+            IntPtr captureOutput = IntPtr.Zero;
+            if (releaseOnSuccess && !InheritedOutputPipe(outputFd, out captureOutput)) return 64;
             if (index >= args.Length || args[index++] != "--" || index >= args.Length || !Path.IsPathRooted(args[index])) return 64;
             string executable = Path.GetFullPath(args[index]);
             if (!File.Exists(executable) || !executable.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return 66;
@@ -247,6 +178,7 @@ class JobHost {
             var startup = new StartupInfo(); startup.cb = Marshal.SizeOf(typeof(StartupInfo));
             if (!console) { startup.flags = 0x100; startup.stdin = GetStdHandle(-10); startup.stdout = GetStdHandle(-11); startup.stderr = GetStdHandle(-12); }
             if (releaseOnSuccess) {
+                startup.stdout = captureOutput;
                 if (!SetHandleInformation(startup.stdin, 1, 0)) return 70; // HANDLE_FLAG_INHERIT
                 var attributes = new SecurityAttributes { length = Marshal.SizeOf(typeof(SecurityAttributes)), inherit = true };
                 childInput = CreateFile("NUL", 0x80000000, 3, ref attributes, 3, 0, IntPtr.Zero);
@@ -256,7 +188,10 @@ class JobHost {
             ProcessInformation child;
             if (!CreateProcess(executable, command, IntPtr.Zero, IntPtr.Zero, true, console ? 0x10u : 0x08000000u, IntPtr.Zero, Environment.CurrentDirectory, ref startup, out child)) return 71;
             if (childInput != IntPtr.Zero) { CloseHandle(childInput); childInput = IntPtr.Zero; }
-            if (ready) { Console.Out.WriteLine("{\"started\":true}"); Console.Out.Flush(); }
+            if (ready) {
+                if (releaseOnSuccess) { if (!WriteReady(captureOutput)) return 70; }
+                else { Console.Out.WriteLine("{\"started\":true}"); Console.Out.Flush(); }
+            }
             CloseHandle(child.thread);
             var handles = parent == IntPtr.Zero ? new[] { child.process } : new[] { child.process, parent };
             uint completed = WaitForMultipleObjects((uint)handles.Length, handles, false, 0xffffffff);
@@ -268,8 +203,7 @@ class JobHost {
                 // A successful shell can leave descendants holding its output
                 // pipes. Remain cancellable until the owner observes both EOFs
                 // and explicitly commits successful background ownership handoff.
-                IntPtr[] diagnosticAliases = TraceOutputHandles("handoff");
-                if (!CloseOutputHandles(diagnosticAliases)) return 70;
+                if (!CloseOutputHandles(captureOutput, startup.stderr)) return 70;
                 if (!AwaitRelease(parent)) return 70;
                 limits.BasicLimitInformation.LimitFlags = 0;
                 if (!SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf(typeof(ExtendedLimits)))) return 70;
