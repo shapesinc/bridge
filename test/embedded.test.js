@@ -70,6 +70,18 @@ test("alternative composition: explicit paused device resumes without pairing or
   assert.equal(f.state.get("config").paused, true); assert.equal(f.calls.includes("cancel"), false);
 });
 
+test("failed startup suspension persistence still invalidates and stops current access", async () => {
+  const f = fixture(); f.state.set("config", saved()); await f.account();
+  assert.equal(f.state.get("config").resume_on_startup, true);
+  const failure = new Error("disk unavailable");
+  const controller = createEmbeddedController({ runtime: f.runtime, read: (key) => f.state.get(key) || null,
+    write: () => { throw failure; }, remove: (key) => f.state.delete(key) });
+  await assert.rejects(controller.updateAccount({ userId: null, deviceIds: [], verified: false }), failure);
+  assert.equal(f.runtime.running(), false);
+  await rejectsCode(controller.listPersonalAgents({ expectedUserId: "owner-a" }), "account_unverified");
+  await controller.dispose();
+});
+
 test("account switch cancels pending approval, hides prior device, and stops its runtime", async () => {
   const f = fixture(); await f.account(); await f.begin();
   await f.account("owner-b", ["device-b"]);

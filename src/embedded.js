@@ -101,6 +101,23 @@ function createEmbeddedController({ read = readState, write = writeState, remove
     remove("status"); remove("permission-request");
     await runtime.start();
   }
+  function resumeSavedConnection() {
+    // Host lifecycle only, never an RPC or a substitute for a verified web
+    // account. The daemon publishes its fresh endpoint only after the server
+    // authenticates the existing device credential on heartbeat. An older
+    // config without this marker needs one verified foreground attachment.
+    return serial(async () => {
+      if (closed || account || read("embedded-pairing")) return;
+      const saved = config();
+      if (!saved || saved.resume_on_startup !== true || saved.paused || saved.revoked || saved.api !== api ||
+          !identifier(saved.owner_user_id) || !identifier(saved.device_id) || typeof saved.device_token !== "string" || !deviceCredential.test(saved.device_token) ||
+          !saved.device_token.startsWith(`sbd_${saved.device_id}.`)) return;
+      if (!runtime.running()) {
+        remove("status"); remove("permission-request");
+        await runtime.start();
+      }
+    });
+  }
   function beginConnect({ attemptId, expectedUserId }) {
     if (!identifier(attemptId) || !identifier(expectedUserId)) return Promise.reject(failure("invalid_request"));
     const startedGeneration = generation;
@@ -198,7 +215,9 @@ function createEmbeddedController({ read = readState, write = writeState, remove
         throw failure(code);
       }
       completed = { id: attemptId, deviceId: saved.device_id, pairing: read("embedded-pairing"), wasEnabled: value.wasEnabled === true };
-      remove("embedded-pairing"); attempt = null; lastError = null;
+      remove("embedded-pairing");
+      write("config", { ...config(), resume_on_startup: true });
+      attempt = null; lastError = null;
       return status();
     });
   }
@@ -256,19 +275,32 @@ function createEmbeddedController({ read = readState, write = writeState, remove
     const next = verified && userId ? { userId, deviceIds: new Set(deviceIds) } : null;
     const changed = account?.userId !== next?.userId;
     account = next;
+    // Logout, failed verification, switching accounts and device removal stop
+    // automatic restart durably without changing the existing explicit reopen
+    // consent. Only a later verified owner can enable startup again.
+    let persistenceError;
+    try {
+      const savedAccount = config();
+      if (savedAccount?.resume_on_startup && !usable(savedAccount)) write("config", { ...savedAccount, resume_on_startup: false });
+    } catch (error) { persistenceError = error; }
     const attemptDevice = attempt?.public?.deviceId || attempt?.deviceId;
     const removedDuringAttempt = Boolean(account && attemptDevice && !account.deviceIds.has(attemptDevice));
     if (removedDuringAttempt) {
       const saved = config();
       if (saved?.device_id === attemptDevice) write("config", { ...saved, paused: true });
     }
-    if (changed || !account || removedDuringAttempt) invalidate();
+    if (changed || !account || removedDuringAttempt || persistenceError) invalidate();
     return serial(async () => {
       if (closed) throw failure("account_unverified");
+      if (persistenceError) { await suspend(); throw persistenceError; }
       if (changed || !account || attempt?.cancelled || !attempt && read("embedded-pairing")) await suspend();
       const saved = config();
       if (!usable(saved)) { await runtime.stop(); return status(); }
       if (!saved.paused && !attempt && !runtime.running()) await startSaved(saved);
+      const latest = config();
+      if (!closed && !attempt && usable(latest) && !latest.paused && runtime.running() && !latest.resume_on_startup) {
+        write("config", { ...latest, resume_on_startup: true });
+      }
       if (lastError !== "cancel_failed") lastError = null;
       return status();
     });
@@ -300,6 +332,7 @@ function createEmbeddedController({ read = readState, write = writeState, remove
     return { opened: true };
   }
   return { status, beginConnect, completeConnect, cancelConnect, disconnect, detach, updateAccount, requestPermission,
+    resumeSavedConnection, backgroundActive: () => runtime.running(),
     listPersonalAgents, openAgentLogin, dispose };
 }
 

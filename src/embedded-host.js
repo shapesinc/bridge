@@ -29,6 +29,11 @@ function createEmbeddedHost({ controller, token, version, endpoint, createServer
     idleTimer = setTimeout(async () => {
       idleTimer = null;
       if (closing || active || sockets.size) return;
+      // A startup-resumed daemon has device authority, but deliberately no
+      // foreground account. Its public status remains private/disconnected.
+      // Recheck after daemon exit so revoked credentials do not leave an idle
+      // host behind. This timer never restarts a stopped runtime.
+      if (controller.backgroundActive?.()) { scheduleIdle(); return; }
       let status;
       try { status = await controller.status(); } catch { return; }
       if (closing || active || sockets.size || !["disconnected", "paused"].includes(status?.state)) return;
@@ -85,6 +90,7 @@ function createEmbeddedHost({ controller, token, version, endpoint, createServer
     await new Promise((resolve, reject) => {
       server.once("error", reject); server.listen(endpoint, () => { server.removeListener("error", reject); resolve(); });
     });
+    await controller.resumeSavedConnection?.();
     scheduleIdle();
   }
   function dispose() {
