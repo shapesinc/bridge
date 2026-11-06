@@ -122,11 +122,14 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
     });
     await t.test("protocol1 Stop ends the owned process tree before a delayed side effect", { skip: process.platform === "win32" }, async () => {
       const escaped = path.join(dir, "late-after-stop.txt"), identity = path.join(dir, "child-pids.json");
-      fs.writeFileSync(script, `const fs=require('fs'),{spawn}=require('child_process');const c=spawn(process.execPath,['-e',${JSON.stringify("setTimeout(()=>require('fs').writeFileSync(" + JSON.stringify(escaped) + ",'bad'),1500);setInterval(()=>{},1000)")}],{detached:true,stdio:'ignore'});fs.writeFileSync(${JSON.stringify(identity)},JSON.stringify([process.pid,c.pid]));setInterval(()=>{},1000)`);
+      // Existence is the readiness signal: publish only after the JSON write
+      // finishes, so a concurrent reader cannot observe a newly opened empty file.
+      fs.writeFileSync(script, `const fs=require('fs'),{spawn}=require('child_process');const c=spawn(process.execPath,['-e',${JSON.stringify("setTimeout(()=>require('fs').writeFileSync(" + JSON.stringify(escaped) + ",'bad'),1500);setInterval(()=>{},1000)")}],{detached:true,stdio:'ignore'});fs.writeFileSync(${JSON.stringify(identity + ".tmp")},JSON.stringify([process.pid,c.pid]));fs.renameSync(${JSON.stringify(identity + ".tmp")},${JSON.stringify(identity)});setInterval(()=>{},1000)`);
       const started = await request("/commands/start", { cmd, timeout: 30, scope, request_key: "3".repeat(64) });
       const id = started.body.job_id;
       const deadline = Date.now() + 3000;
       while (!fs.existsSync(identity) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 15));
+      assert.ok(fs.existsSync(identity), "fixture did not publish its process identities before the readiness deadline");
       const pids = JSON.parse(fs.readFileSync(identity));
       assert.equal((await request("/commands/cancel", { job_id: id, scope })).body.cancel_requested, true);
       const final = (await request(`/commands/status?job_id=${id}&scope=${scope}`)).body;
