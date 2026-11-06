@@ -33,11 +33,14 @@ test("finite installed writer records durable intent without reading/changing cr
 test("racing writers publish whole bounded receipts; consuming an older clear cannot acknowledge the newer one", async (t) => {
   const dir = directory(t), store = createAccountRevocation();
   const runs = Array.from({ length: 4 }, () => {
-    const child = spawn(process.execPath, [entry, "record-revocation"], { env: { ...process.env, SHAPES_BRIDGE_HOME: dir }, stdio: ["ignore", "pipe", "pipe"] });
-    let output = ""; child.stdout.on("data", chunk => { output += chunk; }); child.stderr.resume();
-    return once(child, "close").then(([code]) => { assert.equal(code, 0); return JSON.parse(output); });
+    const child = spawn(process.execPath, [entry, "record-revocation"], { env: { ...process.env, SHAPES_BRIDGE_HOME: dir, SHAPES_BRIDGE_STATE_DIAGNOSTICS: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+    let output = "", error = ""; child.stdout.on("data", chunk => { output += chunk; }); child.stderr.on("data", chunk => { error += chunk; });
+    return once(child, "close").then(([code]) => ({ code, output, error }));
   });
-  const records = await Promise.all(runs), latest = store.read();
+  // Drain every finite writer before an assertion can trigger fixture cleanup.
+  const results = await Promise.all(runs);
+  for (const result of results) assert.equal(result.code, 0, result.error);
+  const records = results.map(result => JSON.parse(result.output)), latest = store.read();
   assert.equal(new Set(records.map(r => r.revocationToken)).size, 4);
   assert.ok(records.some(r => r.revocationToken === latest.revocationToken));
   let newer;

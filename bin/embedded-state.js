@@ -12,7 +12,11 @@ try {
   const result = command === "read-revocation" ? store.read() : command === "record-revocation" ? store.record() : null;
   if (!result) throw new Error();
   process.stdout.write(JSON.stringify({ version: 1, revocationToken: result.revocationToken }) + "\n");
-} catch {
+} catch (error) {
   process.stderr.write("Account revocation state is unavailable.\n");
+  if (process.env.SHAPES_BRIDGE_STATE_DIAGNOSTICS === "1") {
+    const code = typeof error?.code === "string" && /^[A-Z_]{1,40}$/.test(error.code) ? error.code : "UNKNOWN";
+    process.stderr.write(`Private state failure: ${code}\n`);
+  }
   process.exitCode = 1;
 }

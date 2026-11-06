@@ -17,9 +17,9 @@ function ensureStateDir() {
   else if (!securedWindowsDirectories.has(dir)) {
     // POSIX modes do not restrict Windows ACLs, particularly for a custom path.
     const identity = spawnSync("whoami.exe", [], { encoding: "utf8", windowsHide: true, timeout: 1500, maxBuffer: 65536 });
-    if (identity.status !== 0 || !identity.stdout?.trim()) throw new Error("Could not identify the Windows account to protect computer credentials.");
+    if (identity.status !== 0 || !identity.stdout?.trim()) throw Object.assign(new Error("Could not identify the Windows account to protect computer credentials."), { code: "STATE_IDENTITY_UNAVAILABLE" });
     const secured = spawnSync("icacls.exe", [dir, "/inheritance:r", "/grant:r", `${identity.stdout.trim()}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F"], { encoding: "utf8", windowsHide: true, timeout: 1500, maxBuffer: 65536 });
-    if (secured.status !== 0) throw new Error("Could not make the shapes.inc Bridge directory private. Choose a directory owned by your Windows account.");
+    if (secured.status !== 0) throw Object.assign(new Error("Could not make the shapes.inc Bridge directory private. Choose a directory owned by your Windows account."), { code: "STATE_PERMISSIONS_UNAVAILABLE" });
     securedWindowsDirectories.add(dir);
   }
   return dir;
