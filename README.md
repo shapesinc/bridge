@@ -181,8 +181,9 @@ identity, command hash, timing, exit status and bounded output for 24 hours
 automatic replay. Inspect an interrupted command locally before resuming work.
 After inspecting it and stopping any remaining processes, the owner can run
 `shapes-bridge acknowledge-command <job_id>` locally to release its mutation
-lock. This keeps the uncertain receipt and never reruns the command. There is
-no remote acknowledgement endpoint.
+lock. This also recovers a lock stranded by a crash after a final receipt was
+saved. A live supervisor prevents acknowledgement. The existing receipt stays
+unchanged and the command never reruns. There is no remote acknowledgement endpoint.
 The public tunnel is reverified on every heartbeat; three endpoint failures
 replace the tunnel without pairing again or replaying commands. Windows CI
 tests actual Task Scheduler registration, script execution and cancellation.

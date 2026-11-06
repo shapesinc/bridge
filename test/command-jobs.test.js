@@ -81,6 +81,29 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
       assert.equal(jobs.status(id, scope).state, "completed");
       assert.equal(jobs.load(id).state, "completed");
     });
+    await t.test("local acknowledgement recovers a terminal receipt with a stranded lock", async () => {
+      const complete = jobs.load(id);
+      for (const state of ["completed", "failed", "cancelled", "timed_out"]) {
+        const record = { ...complete, state, supervisor_pid: process.pid,
+          result: { ...complete.result, exit_code: state === "completed" ? 0 : -1 } };
+        jobs.save(record);
+        fs.writeFileSync(path.join(jobs.root(), "mutation.lock"), JSON.stringify({ id, scope }));
+        assert.throws(() => jobs.acknowledgeInterrupted(id), /live supervisor/);
+        jobs.save({ ...record, supervisor_pid: 99999999 });
+        // Persisted completion plus a crash before release survives restart.
+        await close();
+        await open();
+        assert.equal((await request("/write", { path: path.join(dir, "recovered.txt"), content: state })).status, 409);
+        const before = jobs.status(id, scope);
+        assert.equal(before.state, state);
+        jobs.acknowledgeInterrupted(id);
+        assert.deepEqual(jobs.status(id, scope), before);
+        assert.equal(fs.existsSync(path.join(jobs.root(), "mutation.lock")), false);
+        assert.equal((await request("/write", { path: path.join(dir, "recovered.txt"), content: state })).status, 200);
+        assert.equal((await jobs.start({ cmd, timeout: 10, scope, request_key: key })).state, state);
+        assert.equal(fs.readFileSync(marker, "utf8"), "1");
+      }
+    });
     await t.test("missing supervisor is reported as uncertain and never replayed", async () => {
       const record = jobs.load(id);
       // The daemon is alive, but its worker died before persisting running state.

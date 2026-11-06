@@ -149,8 +149,8 @@ function acknowledgeInterrupted(id) {
   status(id, record.scope);
   const latest = load(id);
   const supervisor = supervisorPid(latest);
-  if (latest.state !== "interrupted" || (supervisor && alive(supervisor))) {
-    throw error("Only an interrupted command with no live supervisor can be acknowledged locally.");
+  if (!TERMINAL.has(latest.state) || (supervisor && alive(supervisor))) {
+    throw error("Only a finished or interrupted command with no live supervisor can be acknowledged locally.");
   }
   save({ ...latest, acknowledged_at: Date.now() });
   release(id);
