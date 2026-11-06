@@ -40,6 +40,15 @@ async function until(predicate) {
   throw new Error("Expected protocol event was not received.");
 }
 
+test("bundled personal auth is rechecked before any thread or inference with no provider fallback", async t => {
+  for (const account of [null, { type: "apiKey" }]) {
+    const f = fixture(t, `if(m.method==='account/read')reply(m,{account:${JSON.stringify(account)}});`, { requiredAccountType: "chatgpt" });
+    await assert.rejects(f.session.start("Never sent to a provider"), /no longer signed in/);
+    assert.deepEqual(f.input().map(item => item.method), ["initialize", "initialized", "account/read"]);
+    assert.throws(() => process.kill(f.session.child.pid, 0), { code: "ESRCH" });
+  }
+});
+
 test("RPC cancellation settles despite escaped inherited pipes and preserves unrelated processes", async (t) => {
   const unrelated = spawn(process.execPath, ["-e", "setTimeout(()=>{},12000)"], { detached: true, stdio: "ignore" });
   let escaped;

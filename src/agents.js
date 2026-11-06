@@ -117,15 +117,20 @@ async function inspectAgent(id, cwd = process.cwd()) {
       if (!paths.includes(real)) paths.push(real);
     } catch {}
   }
-  if (!paths.length) return { id, installed: false, authenticated: false, available: false,
-    status: "not_installed", reason: `Install ${id === "claude" ? "Claude Code" : "Codex"} on this computer.` };
   // Bound discovery latency even when a stale executable hangs. Candidate order
   // chooses the preferred compatible install; a ready alternate install wins.
   const results = await Promise.all(paths.slice(0, 12).map((file) => inspectCandidate(id, file, cwd)));
-  return results.find((item) => item.available) || results.find((item) => item.status === "auth_required") || results[0];
+  const compatible = results.find((item) => item.available) || results.find((item) => item.status === "auth_required");
+  if (compatible) return compatible;
+  if (id === "codex") {
+    const fallback = await require("./personal-codex").inspectBundledPersonal();
+    if (fallback) return fallback;
+  }
+  return results[0] || { id, installed: false, authenticated: false, available: false,
+    status: "not_installed", reason: `Install ${id === "claude" ? "Claude Code" : "Codex"} on this computer.` };
 }
 
-function publicAgent({ executable, ...agent }) { return agent; }
+function publicAgent({ executable, transport, profile, ...agent }) { return agent; }
 
 async function listAgents(cwd) {
   const agents = await Promise.all(IDS.map((id) => inspectAgent(id, cwd)));
@@ -145,6 +150,7 @@ async function selectAgent(id, cwd) {
 }
 
 async function verifyInteractiveCodex(selected, cwd) {
+  if (selected.transport === "bundled_personal") return;
   const version = selected.version?.split(".").map(Number);
   const help = await probe(selected.executable, ["app-server", "--help"], cwd);
   if (help.failed || help.code !== 0 || !help.output.includes("--listen")

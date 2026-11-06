@@ -23,7 +23,7 @@ function normalizedItem(item) {
 // The caller owns user authentication, presentation and response validation.
 // This transport never converts model text into approvals or answers a request.
 function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent = () => {},
-  resumeThreadId, launchArgs, environment, model, modelProvider, usageBaseline,
+  resumeThreadId, launchArgs, environment, model, modelProvider, usageBaseline, requiredAccountType,
   onServerRequest, onRequestResolved = () => {}, onDiagnostic = () => {}, onLifecycle = () => {},
   startupTimeoutMs = 30000, requestTimeoutMs = 30000, shutdownTimeoutMs = 1500,
   maxLineBytes = 1024 * 1024 } = {}) {
@@ -266,6 +266,10 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
       await rpc("initialize", { clientInfo: { name: "shapes_bridge", title: "shapes.inc", version: "0.1.0" },
         capabilities: { experimentalApi: true, extensions: { "openai/form": {} } } });
       write({ method: "initialized", params: {} });
+      if (requiredAccountType) {
+        const account = await rpc("account/read", { refreshToken: false });
+        if (account?.account?.type !== requiredAccountType) throw new Error("The selected personal account is no longer signed in.");
+      }
       enterPhase("thread_start");
       // Granting a chat this computer is the consent: no per-command approval
       // prompts. Writes run with full access; read-only stays sandboxed.

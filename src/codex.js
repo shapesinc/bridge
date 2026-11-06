@@ -250,16 +250,18 @@ async function startJob({ promptFile, prompt: suppliedPrompt, cwd, sandbox = "re
     selected = { ...runtime, id: "codex" };
   } else selected = await selectAgent(agent, cwd);
   agent = selected.id;
-  interactive = interactive && agent === "codex";
+  interactive = (interactive || selected.transport === "bundled_personal") && agent === "codex";
   if (interactive && !builtIn) await verifyInteractiveCodex(selected, cwd);
   const executable = selected.executable;
   const id = crypto.randomUUID();
   const directory = privateDir(path.join(root(), id));
   const state = { id, status: "queued", cwd, sandbox, agent, interactive, createdAt: new Date().toISOString(),
+    ...(selected.transport === "bundled_personal" ? { funding: "personal", runtimeVersion: selected.version, personalTransport: selected.transport } : {}),
     ...(builtIn ? { sessionId: builtIn.sessionId, scopeId: builtIn.scopeId, funding: "shapes_credits", runtimeVersion: selected.version,
       ...(usageBaseline ? { runtimeUsageTotal: usageBaseline } : {}) } : {}),
     promptPreview: prompt.trim().replace(/\s+/g, " ").slice(0, 160) };
   writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable, agent, interactive,
+    ...(selected.transport === "bundled_personal" ? { personalProfile: selected.profile } : {}),
     ...(builtIn ? { gateway: builtIn.gateway, resumeThreadId, usageBaseline } : {}) }));
   saveState(directory, state);
   if (requestKey) {
@@ -455,6 +457,7 @@ async function superviseInteractive(directory, state, request) {
     if (fs.existsSync(path.join(directory, "cancel"))) { stopped = "cancelled"; return; }
     session = createCodexRpcSession({
       executable: request.executable, cwd: request.cwd, sandbox: request.sandbox,
+      ...(request.personalProfile ? require("./personal-codex").personalConfiguration(request.personalProfile) : {}),
       ...(request.gateway ? { ...launchConfiguration(request.gateway), resumeThreadId: request.resumeThreadId, usageBaseline: request.usageBaseline } : {}),
       startupRetries: request.gateway ? 1 : 0,
       onLifecycle(value) {
