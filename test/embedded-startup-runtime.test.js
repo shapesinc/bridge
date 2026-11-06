@@ -126,10 +126,14 @@ test("fresh host resumes established access with device authority and leaves for
   await until(() => f.accepted.length > count);
   assert.notEqual(second.runtime.pid(), oldPid); assert.notEqual(f.accepted.at(-1).token, oldEndpoint.token);
   assert.equal(second.controller.status().deviceId, undefined);
+  const resumedPid = second.runtime.pid(), resumedEndpoint = f.accepted.at(-1), offlineBeforeAdoption = f.offline.length;
   const verified = await second.controller.updateAccount({ userId: "owner-a", deviceIds: [DEVICE], verified: true });
   if (second.runtime.pid()) f.pids.add(second.runtime.pid());
   await until(() => second.controller.status().online);
   assert.equal(verified.deviceId, DEVICE); assert.equal(readState("config").device_token, TOKEN);
+  assert.equal(second.runtime.pid(), resumedPid, "same verified owner must adopt without terminating background work");
+  assert.equal(f.offline.length, offlineBeforeAdoption);
+  assert.equal(f.accepted.at(-1).token, resumedEndpoint.token);
 });
 
 test("startup credential rejection and later revocation persist and cannot republish on next host", { skip: !available, timeout: 20000 }, async (t) => {

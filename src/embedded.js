@@ -274,13 +274,19 @@ function createEmbeddedController({ read = readState, write = writeState, remove
     if (typeof verified !== "boolean" || !(userId === null || identifier(userId)) || !Array.isArray(deviceIds) || deviceIds.length > 500 || !deviceIds.every(identifier)) return Promise.reject(failure("invalid_request"));
     const next = verified && userId ? { userId, deviceIds: new Set(deviceIds) } : null;
     const changed = account?.userId !== next?.userId;
+    const firstAccount = account === null;
     account = next;
     // Logout, failed verification, switching accounts and device removal stop
     // automatic restart durably without changing the existing explicit reopen
     // consent. Only a later verified owner can enable startup again.
-    let persistenceError;
+    let persistenceError, adoptExisting = false;
     try {
       const savedAccount = config();
+      // Startup can own a daemon without foreground account authority. A new
+      // independently verified owner may adopt that exact approved connection;
+      // switching an already known account still cancels its runtime and jobs.
+      adoptExisting = firstAccount && !attempt && runtime.running() && savedAccount?.resume_on_startup === true &&
+        !savedAccount.paused && usable(savedAccount);
       if (savedAccount?.resume_on_startup && !usable(savedAccount)) write("config", { ...savedAccount, resume_on_startup: false });
     } catch (error) { persistenceError = error; }
     const attemptDevice = attempt?.public?.deviceId || attempt?.deviceId;
@@ -293,7 +299,7 @@ function createEmbeddedController({ read = readState, write = writeState, remove
     return serial(async () => {
       if (closed) throw failure("account_unverified");
       if (persistenceError) { await suspend(); throw persistenceError; }
-      if (changed || !account || attempt?.cancelled || !attempt && read("embedded-pairing")) await suspend();
+      if ((changed && !adoptExisting) || !account || attempt?.cancelled || !attempt && read("embedded-pairing")) await suspend();
       const saved = config();
       if (!usable(saved)) { await runtime.stop(); return status(); }
       if (!saved.paused && !attempt && !runtime.running()) await startSaved(saved);
