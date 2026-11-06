@@ -51,7 +51,9 @@ The later fresh CSV composition passed through native build 106 (`2b56f4c`), Bri
 
 The following plain cart-fix request on frontend `d22377b43` / backend `f441721fa` completed through the bundled runtime at 22:43:17 UTC. Actual View Reload retained the same active job/thread, the implementation was corrected, all four unchanged tests passed independently, and the workers exited. The earlier human-Stop run fenced inference before native cancel arrived: native recorded the real gateway403 failure, UI persisted Stopped, and the later cancel did not rewrite that terminal history. A new HTTP regression covers this late-cancel ordering and a completed-run control, including continued use of the same thread.
 
-**Remaining NO-GO scope:** the subsequent direct-shell Stop test failed: its Node script wrote after Stop. The new [command primitives](commands.md) require a signed-helper UI repeat, together with final new-private-chat default integration. The successful native106 CSV/cart and active lifecycle checks above are complete, not substitutes for that new candidate replay. Intel execution, personal CLI execution and user-operated Claude OAuth completion, direct `file://` opening/storage, and remaining permission/funding failure paths are unverified. No production rollout is claimed.
+The later signed native108 Home task verified new-private-chat defaults and the [command primitives](commands.md): a plain request inherited the selected folder and credits, wrote its relative script there, and ran it in the foreground. Actual UI Stop cancelled the command, its process group exited, the delayed marker remained absent beyond its original deadline, and Stopped persisted after Reload. This closes the earlier direct-shell Stop failure; the failed original marker is retained as evidence.
+
+**Remaining NO-GO scope:** a completed real repository replay on the final candidate and actual native109 transient-verification outage/recovery remain required. The successful earlier CSV/cart and lifecycle checks are not substitutes for that replay. Intel execution, personal CLI execution and user-operated Claude OAuth completion, direct `file://` opening/storage, and remaining permission/funding failure paths are unverified. No production rollout is claimed.
 
 Replay with `SHAPES_BUNDLED_CODEX_BINARY=<pinned-app-server> node scripts/replay-bundled-sessions.js`. To exercise a signed helper's exact JavaScript and default runtime discovery, set `SHAPES_BRIDGE_SOURCE=<helper>/Contents/Resources/runtime` instead. `SHAPES_CANARY_REPORT=<file>` optionally writes fixture receipts; it never invokes a real provider. Cleanup waits for owned jobs before removing the fixture workspace.
 
@@ -64,3 +66,44 @@ The cancellation settlement fix adds no AI, classifier or tool calls and has **$
 The funding-aware recovery advice replaces existing text with shorter guidance; it adds no calls or context fields. Its incremental operating-cost increase is **$0/day**, including later receipt history. Its HTTP regression fixtures and simulated-provider replay also cost $0.
 
 At the backend's current configured GPT-6 Astra policy, use $10/$50 per million input/output tokens (prices checked November 2, 2026), **200,000 input + 20,000 output tokens across all task calls**, then 20% retry overhead. The allowance includes orchestration, repeated history, tool continuations, compaction and any auxiliary calls; this implementation adds no classifier or summarizer. With no cache discount, the projection is **$3.60/task: $360/day at 100 tasks, $3,600/day at 1,000, $36,000/day at 10,000**. Half/double workload gives **$1,800–$7,200/day at 1,000 tasks**. No paid hosted tools, embeddings or infrastructure fees are included; enabling those needs a separate measured addition. Provider spend is distinct from user credits/revenue. [Pricing source](https://developers.openai.com/api/docs/pricing).
+
+### Early compaction and request envelopes, November 6
+
+The runtime compacts early at 32,000 tokens. This is calibrated to the billed
+gateway's **262,144-byte serialized request limit**, not Astra's advertised
+1,050,000-token context. The gateway retains its 16,384-output-token and $8
+per-request policy limits. A request over the byte limit still receives the
+Responses SSE `context_length_exceeded` error before any provider reservation.
+The pinned runtime reports that error as terminal; it does not automatically
+compact or replay the failed turn. Token-to-byte ratios vary,
+so the early token threshold never overrides that authoritative byte check.
+
+The prior 24,000-token threshold left only 4,568 tokens above a measured
+19,432-token repository/runtime baseline. Five ordinary inspections triggered
+three approximately 39-second compactions, consuming 79,150 input tokens
+(65,903 cached) and 5,853 output tokens. The task was later cancelled by a local
+verification outage and did not complete; this is diagnosis, not a successful
+coding replay or a savings claim.
+
+Before committing the change, the gross incremental retained-history cost was
+projected with explicit scenarios: up to 8,000 extra input tokens on 5–20
+continuations, 20% retry overhead, $10/million fresh input and $1/million cached
+input, with 0–75% cache coverage. That is **$0.156–1.92/task**, or
+**+$15.60–192/day at 100 tasks, +$156–1,920/day at 1,000 tasks, and
++$1,560–19,200/day at 10,000 tasks**. Adoption is unknown. These are gross input
+increases; fewer compactions may offset them, but no net savings are assumed.
+There is no new classifier or mandatory inference call, and task history remains
+inside the existing session. Actual output, orchestration, compaction and retry
+changes still require measured end-to-end comparison. Personal-provider usage
+and user credits are separate from these provider-spend scenarios.
+
+No-inference gateway fixtures with 32k tokens plus a 26,000-character tool result
+serialize to 198,240 bytes (repository ASCII), 227,468 bytes (UTF-8 CSV), and
+196,833 bytes (HTML), all below the unchanged byte/reservation limits. A larger
+low-token-density output is rejected. The pinned-runtime replay injects that
+exact SSE rejection and verifies one terminal failure without a hidden provider
+retry or new job. Ordinary proactive compaction remains supported. The gateway's
+separate ASGI tests verify that a smaller follow-up can use the same lease; that
+does not establish automatic native recovery. This is simulated transport, not live
+provider/payment verification. Actual coding acceptance on the new package
+remains required.
