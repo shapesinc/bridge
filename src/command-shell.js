@@ -13,7 +13,9 @@ function commandShell(cmd, shell = process.platform === "win32" ? "powershell" :
   }
   if (shell === "cmd" && process.platform === "win32") {
     if (/[\r\n]/.test(cmd)) throw new Error("Use shell=powershell for multiline Windows scripts; cmd accepts one line.");
-    return { executable: cmd, args: [], shell, spawnShell: true, cleanup() {} };
+    return { executable: path.join(process.env.SystemRoot || "C:\\Windows", "System32", "cmd.exe"),
+      args: [cmd], shell, windowsCommand: true, cleanup() {} };
+
   }
   if (shell !== "powershell" || process.platform !== "win32") throw new Error(`Shell ${shell} is not supported on ${process.platform}.`);
   // -File preserves newlines, quotes, $env variables and non-ASCII text without

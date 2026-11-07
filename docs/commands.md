@@ -36,13 +36,38 @@ keeps the mutation fence until the owner reconciles the command locally. Saved
 PIDs alone never authorize a new reader to signal a process. Already orphaned
 daemons are outside the ancestry boundary; earlier writes cannot be undone.
 
-Windows keeps upstream PowerShell/cmd execution and `taskkill /T /F` termination.
-This implementation does not independently verify every Windows descendant exit,
-so a started command's cancellation cannot claim `cleanup_confirmed:true` there.
-It returns an interrupted, uncertain receipt and retains the mutation fence.
-The owner can inspect and use the existing local `acknowledge-command` operation;
-there is no remote acknowledgement endpoint. Windows-native CI exercises the
-real shell/taskkill path; tests on macOS do not count as Windows execution.
+Windows retains PowerShell/cmd execution through the owned Job helper. Command,
+provider and account processes opt into a private cancellation/receipt channel;
+their ordinary stdin/stdout contracts remain separate. `CreateProcess` atomically
+assigns the child to its kill-on-close Job using `PROC_THREAD_ATTRIBUTE_JOB_LIST`
+(Windows10+), while `HANDLE_LIST` inherits only the child's three standard handles.
+The observer remains outside that private Job but inside any enclosing runtime
+Job. Breakaway is never enabled. The older outer-host CLI mode is unchanged.
+
+On Stop, timeout or bounded provider close, the native observer terminates its
+private Job and queries its accounting until `ActiveProcesses == 0`, for at most
+750ms. Only that observation emits the exact private `job-empty` receipt. The JS
+owner allows at least1s before hard fallback, requires the complete receipt and
+EOF, and otherwise reports interrupted/unknown and retains the mutation fence.
+Missing/malformed receipts, query failures, observer death and hard fallback are
+not cleanup confirmation. A nonzero observer exit without proof is also unknown
+when no explicit Stop was requested: protocol1 persists `interrupted` and keeps
+its mutation fence, while historical protocol0 receipt lookup preserves its
+`failed` plus `outcome_unknown` shape. An ordinary nonzero command exit with
+native proof remains `failed`; successful intentional background handoff remains
+`completed`. A late cancellation cannot rewrite either accepted outcome. Private pipes are disposed at final bounded settlement;
+late data cannot upgrade an unknown receipt. The local `acknowledge-command`
+operation remains the owner's reconciliation path; no remote acknowledgement is
+added. These adapters add no AI call, retry or authorization.
+
+Successful command stdout/stderr EOF still commits the existing explicit
+background handoff. An atomic native terminal decision orders cancellation
+against that handoff: cancellation that wins kills the Job, whereas completed
+handoff intentionally preserves background children in the enclosing runtime.
+A released Job does not issue an empty-Job receipt. Earlier side effects are not
+rolled back. Windows-native CI must exercise exact compiled helper bytes,
+including inherited output, provider stdin, owner/observer death, failed creation
+and successful background lifetime; portable mocks do not establish those facts.
 
 Existing environment handling, 4 MiB capture cap per stream, 20,000-character
 returned tails and 600-second maximum remain. Private records are 0600 in the
@@ -78,7 +103,15 @@ effects. `test/commands.test.js` preserves legacy receipt/primitive checks and
 injects signal denial without changing real permissions. Missing-supervisor and
 storage-failure cases are explicit simulations. No test uses a paid provider.
 
-Version negotiation, status and cancellation add no AI calls or prompt tokens:
-**$0/day incremental provider spend** at unchanged task volume. Upstream model
-actions and the separately reviewed coding-harness context projection retain
-their own cost accounting; this transport integration adds neither.
+Version negotiation, status and cancellation add no inference calls. Native
+cleanup proof and private revocation tokens never enter model context. Durable
+command receipt fields may enter existing tool continuations, so the integrated
+protocol is not assumed to have zero context cost. Adoption and serialized
+receipt sizes are unmeasured: an explicit upper scenario of 200 extra input
+tokens/result, read 1–5 times, with 20% retry overhead and $1–10/million input
+(fully cached to fully fresh) is **+$0.024–1.20/day at 100 results,
++$0.24–12/day at 1,000, or +$2.40–120/day at 10,000**. This covers receipt history
+and retries, with no added classifier/embedding/output calls. It is provider
+spend, not user credits, and is separate from the 24k→32k retained-history
+projection in `docs/bundled-sessions.md`. No savings or measured adoption are
+assumed. Regression fixtures themselves spend $0.

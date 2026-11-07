@@ -1,6 +1,7 @@
 "use strict";
 
 const { createHash } = require("node:crypto");
+const { supportsPrivateChannel } = require("./private-channel");
 
 const MAX_ARGUMENT_BYTES = 16 * 1024;
 const MAX_RESULT_BYTES = 32 * 1024;
@@ -9,7 +10,7 @@ const MAX_OPERATIONS = 64;
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
-const supportsToolProxy = (platform = process.platform) => ["darwin", "linux"].includes(platform);
+const supportsToolProxy = (platform = process.platform) => supportsPrivateChannel(platform);
 const expires = value => typeof value === "number" ? value * 1000 : Date.parse(value);
 const schema = (properties, required = []) => ({ type: "object", properties, required, additionalProperties: false });
 const capability = { type: "string", minLength: 1, maxLength: 160 };

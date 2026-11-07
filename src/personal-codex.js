@@ -2,7 +2,8 @@
 
 const os = require("node:os");
 const path = require("node:path");
-const { spawn, execFile } = require("node:child_process");
+const { execFile } = require("node:child_process");
+const { spawnOwned } = require("./owned-process");
 const { StringDecoder } = require("node:string_decoder");
 const { localEnvironment } = require("./local-workspace");
 const { bundledRuntime } = require("./bundled-runtime");
@@ -23,10 +24,10 @@ function personalConfiguration(profile = process.env.CODEX_HOME || path.join(os.
 
 // A bounded account-only transport. It cannot start threads, turns, tools or
 // inference. Account identities, provider errors and tokens never leave it.
-function createAccountClient({ executable, profile, timeoutMs = 8000, spawnProcess = spawn, onLogin = () => {} }) {
+function createAccountClient({ executable, profile, timeoutMs = 8000, spawnProcess = spawnOwned, onLogin = () => {} }) {
   const config = personalConfiguration(profile);
   const child = spawnProcess(executable, config.launchArgs, { cwd: os.homedir(), env: config.environment,
-    detached: true, stdio: ["pipe", "pipe", "pipe"] });
+    detached: true, cleanupReceipt: true, stdio: ["pipe", "pipe", "pipe"] });
   const calls = new Map(), decoder = new StringDecoder("utf8");
   let next = 0, buffer = "", closing, failed = false;
   function fail() {
@@ -101,8 +102,18 @@ function validLoginURL(value) {
   try { const url = new URL(value); return value.length < 16384 && url.protocol === "https:" && !url.username && !url.password
     && ["auth.openai.com", "auth0.openai.com", "chatgpt.com"].includes(url.hostname); } catch { return false; }
 }
-function openBrowser(url) {
-  return new Promise((resolve, reject) => execFile("/usr/bin/open", [url], { timeout: 10000, maxBuffer: 16384 },
+function openBrowser(url, { platform = process.platform, execute = execFile } = {}) {
+  if (!validLoginURL(url)) return Promise.reject(new Error("Invalid provider sign-in URL."));
+  let executable, args;
+  if (platform === "darwin") { executable = "/usr/bin/open"; args = [url]; }
+  else if (platform === "win32") {
+    executable = path.win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+    // Treat the URL as one literal value, never a cmd.exe command string. The
+    // OS owns the opened browser; the short handoff process is bounded below.
+    const command = "Start-Process -FilePath '" + url.replaceAll("'", "''") + "'";
+    args = ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")];
+  } else { executable = "xdg-open"; args = [url]; }
+  return new Promise((resolve, reject) => execute(executable, args, { timeout: 10000, maxBuffer: 16384, windowsHide: true, env: localEnvironment() },
     (error) => error ? reject(new Error("Could not open provider sign-in.")) : resolve()));
 }
 
@@ -153,4 +164,4 @@ function createPersonalLoginManager({ createClient = createAccountClient, open =
   return { start, cancel, status: () => ({ pending: Boolean(pending) }) };
 }
 
-module.exports = { personalConfiguration, createAccountClient, inspectBundledPersonal, createPersonalLoginManager, validLoginURL };
+module.exports = { personalConfiguration, createAccountClient, inspectBundledPersonal, createPersonalLoginManager, validLoginURL, openBrowser };

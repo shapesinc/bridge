@@ -41,7 +41,11 @@ They include actual child RPC and process-exit checks, with a simulated vendor
 transport. An actual pinned-runtime account/read recognized the authorized
 existing ChatGPT login without inference. Final packaged personal execution and
 browser login/cancel remain separate live acceptance gates; OAuth completion is
-user-operated and is not inferred from an opened browser.
+user-operated and is not inferred from an opened browser. Windows account RPC
+uses the same owned Job/cleanup receipt primitive as commands and agent tasks.
+Its browser handoff passes the allowlisted URL as one literal PowerShell value;
+macOS uses LaunchServices and Linux uses its standard URL opener. Browser
+handoff never grants command/provider native authority.
 
 This adds **$0/day mandatory AI-provider spend**: no classifier, prompt-context
 or inference call is added by account discovery or login. At100/1,000/10,000

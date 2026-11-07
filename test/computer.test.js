@@ -10,7 +10,7 @@ const screen = () => ({ success: true, result: { width: 1200, height: 800, displ
   image_base64: "fixture", image_content_type: "image/jpeg" } });
 function fixture(options = {}) {
   const calls = [];
-  const control = createComputerControl({ available: () => true,
+  const control = createComputerControl({ platform: "darwin", available: () => true,
     invoke: async (request) => { calls.push(request); return request.operation === "observe" ? screen()
       : { success: true, result: { dispatched: true, delivery_verified: false } }; }, ...options });
   const run = (value, scope = SCOPE) => control.execute({ scope, control: value });

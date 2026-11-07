@@ -74,7 +74,8 @@ that boundary and produce later side effects; this is not rollback or general
 process containment. Intentional background commands and the existing legacy
 HTTP-disconnect behavior are unchanged. [Scoped command start/status/cancel](commands.md)
 provide explicit cancellation instead of relying on closing an HTTP request.
-Windows retains its existing process termination scope.
+Windows uses the owned Job and independently confirmed cleanup receipt described
+in the command contract; uncertain termination retains its mutation fence.
 
 No AI calls or prompt context were added. Incremental recurring provider cost is
 **$0/day** at every traffic level; the local replay fixtures also incur no

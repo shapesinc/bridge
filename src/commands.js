@@ -91,7 +91,7 @@ function startCommand(body) {
   const execution = runCommand({ cmd: body.cmd, cwd, timeout });
   active.set(file, { row, process: execution });
   execution.result.then((result) => {
-    const uncertain = result.stopped && !result.cleanup_confirmed;
+    const uncertain = result.outcome_unknown === true || result.stopped && !result.cleanup_confirmed;
     const state = uncertain ? "failed" : result.stopped === "cancelled" ? "cancelled" : result.stopped?.startsWith("timed out") ? "timed_out"
       : result.exit_code === 0 ? "completed" : "failed";
     Object.assign(row, { state, stdout: result.stdout, stderr: result.stderr, exit_code: result.exit_code,

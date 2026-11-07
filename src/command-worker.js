@@ -20,9 +20,9 @@ async function supervise(id) {
     Object.assign(record, { state: "running", supervisor_pid: process.pid, started_at: Date.now() });
     jobs.save(record);
     const result = await runCommand({ ...record.command, signal: abort.signal });
-    const uncertain = !!result.stopped && result.cleanup_confirmed !== true;
+    const uncertain = result.outcome_unknown === true || !!result.stopped && result.cleanup_confirmed !== true;
     if (uncertain) Object.assign(result, { outcome_unknown: true, error_type: "command_exit_unconfirmed" });
-    Object.assign(record, { state: uncertain ? "interrupted" : abort.signal.aborted ? "cancelled" : result.termination_reason?.startsWith("timed out") ? "timed_out" : result.exit_code === 0 ? "completed" : "failed",
+    Object.assign(record, { state: uncertain ? "interrupted" : result.stopped === "cancelled" ? "cancelled" : result.termination_reason?.startsWith("timed out") ? "timed_out" : result.exit_code === 0 ? "completed" : "failed",
       finished_at: Date.now(), result });
     jobs.save(record);
     // Unconfirmed termination keeps the mutation fence until local owner

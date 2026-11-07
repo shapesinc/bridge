@@ -12,5 +12,11 @@
       "asset": "codex-app-server-package-x86_64-apple-darwin.tar.gz",
       "sha256": "c474377b4ea73451b06367911157ff84d07917be7268658e23636933b3129ab7"
     }
+  },
+  "platformPackages": {
+    "win32-x64": {
+      "asset": "codex-app-server-package-x86_64-pc-windows-msvc.tar.gz",
+      "sha256": "2476ec968c64e9ae47f449446320e47a54d16f5436ce6eb95eec758584f12eb6"
+    }
   }
 }

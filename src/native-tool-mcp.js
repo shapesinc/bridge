@@ -1,12 +1,14 @@
 "use strict";
 
-const net = require("node:net");
+const { connectPrivateChannel } = require("./private-channel");
 const { DEFINITIONS, operationId } = require("./native-tool-proxy");
 
 // A stdio MCP frontend has no provider or capability credentials. The private
 // supervisor broker owns authorization, the active native turn and HTTP IO.
-function serveMcp({ socketPath, runId, input = process.stdin, output = process.stdout } = {}) {
-  const socket = net.createConnection(socketPath), pending = new Map();
+async function serveMcp({ socketPath, runId, credentialFile, input = process.stdin, output = process.stdout } = {}) {
+  // Required MCP startup cannot succeed before the private broker authenticates.
+  input.pause();
+  const socket = await connectPrivateChannel({ endpoint: socketPath, credentialFile, scope: runId }), pending = new Map();
   let inputBuffer = "", brokerBuffer = "", closed = false;
   const send = value => { if (!closed) output.write(JSON.stringify({ jsonrpc: "2.0", ...value }) + "\n"); };
   const respondError = (id, message) => send({ id, error: { code: -32602, message } });
@@ -68,8 +70,10 @@ function serveMcp({ socketPath, runId, input = process.stdin, output = process.s
     if (Buffer.byteLength(inputBuffer) > 64 * 1024) close();
   });
   input.on("end", close);
+  socket.resume(); input.resume();
   return { close };
 }
 
-if (require.main === module) serveMcp({ socketPath: process.argv[2], runId: process.argv[3] });
+if (require.main === module) void serveMcp({ socketPath: process.argv[2], runId: process.argv[3], credentialFile: process.argv[4] })
+  .catch(() => { process.stderr.write("The private capability transport could not start.\n"); process.exitCode = 1; });
 module.exports = { serveMcp };

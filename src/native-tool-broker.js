@@ -1,17 +1,14 @@
 "use strict";
 
-const fs = require("node:fs"), path = require("node:path"), net = require("node:net");
+const path = require("node:path");
+const { listenPrivateChannel } = require("./private-channel");
 const { randomUUID } = require("node:crypto");
 const { DEFINITIONS, supportsToolProxy } = require("./native-tool-proxy");
 
 async function createToolBroker(proxy) {
-  if (!supportsToolProxy()) throw new Error("The native capability broker requires macOS or Linux.");
-  // Keep the Unix path below macOS's sockaddr limit. mkdtemp is atomic and the
-  // account-only directory prevents another account from connecting.
-  const directory = fs.mkdtempSync("/tmp/shapes-native-tools-"); fs.chmodSync(directory, 0o700);
-  const socketPath = path.join(directory, "broker.sock"), sockets = new Set();
-  const server = net.createServer(socket => {
-    if (sockets.size >= 4) { socket.destroy(); return; }
+  if (!supportsToolProxy()) throw new Error("The native capability broker is unavailable on this platform.");
+  const sockets = new Set();
+  const channel = await listenPrivateChannel({ scope: proxy.runId, onConnection(socket) {
     sockets.add(socket);
     const connectionId = randomUUID(), pending = new Set();
     let buffer = "";
@@ -36,16 +33,12 @@ async function createToolBroker(proxy) {
       }
       if (Buffer.byteLength(buffer) > 64 * 1024) socket.destroy();
     });
-  });
-  try {
-    await new Promise((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-    fs.chmodSync(socketPath, 0o600);
-  } catch (error) { server.close(); fs.rmSync(directory, { recursive: true, force: true }); throw error; }
+  } });
   let closing;
   return {
-    directory,
+    directory: channel.directory,
     launchArgs: ["-c", `mcp_servers.shapes.command=${JSON.stringify(process.execPath)}`,
-      "-c", `mcp_servers.shapes.args=${JSON.stringify([path.join(__dirname, "native-tool-mcp.js"), socketPath, proxy.runId])}`,
+      "-c", `mcp_servers.shapes.args=${JSON.stringify([path.join(__dirname, "native-tool-mcp.js"), channel.endpoint, proxy.runId, channel.credentialFile])}`,
       // Only this grant-backed proxy owns these tools. The backend performs
       // current authorization; no other MCP server or native approval changes.
       "-c", `mcp_servers.shapes.enabled_tools=${JSON.stringify(DEFINITIONS.map(tool => tool.name))}`,
@@ -54,10 +47,8 @@ async function createToolBroker(proxy) {
       "-c", "mcp_servers.shapes.startup_timeout_sec=5", "-c", "mcp_servers.shapes.tool_timeout_sec=20"],
     close() {
       if (!closing) closing = (async () => {
-        await proxy.close();
-        for (const socket of sockets) socket.destroy();
-        await new Promise(resolve => server.close(resolve));
-        fs.rmSync(directory, { recursive: true, force: true });
+        try { await proxy.close(); }
+        finally { for (const socket of sockets) socket.destroy(); await channel.close(); }
       })();
       return closing;
     },

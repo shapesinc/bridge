@@ -71,6 +71,8 @@ async function ensureCloudflared(log = () => {}) {
     if (!fs.existsSync(bundled)) throw new Error("The built-in tunnel helper is missing. Reinstall shapes.inc Bridge.");
     return bundled;
   }
+  const windowsBundled = bundledWindowsTunnel();
+  if (windowsBundled) return windowsBundled;
   const { pkg, archive, bin } = assetFor(process.platform, process.arch);
   const binPath = path.join(CACHE_DIR, bin);
   if (fs.existsSync(binPath)) return binPath;
@@ -95,4 +97,13 @@ async function ensureCloudflared(log = () => {}) {
   return binPath;
 }
 
-module.exports = { ensureCloudflared, CACHE_DIR };
+function bundledWindowsTunnel({ platform = process.platform, executable = process.execPath, exists = fs.existsSync } = {}) {
+  if (platform !== "win32") return null;
+  const directory = path.win32.dirname(executable);
+  if (!exists(path.win32.join(directory, "shapes.inc Bridge Job.exe"))) return null;
+  const binary = path.win32.join(directory, "cloudflared.exe");
+  if (!exists(binary)) throw new Error("The built-in tunnel helper is missing. Reinstall shapes.inc.");
+  return binary;
+}
+
+module.exports = { ensureCloudflared, CACHE_DIR, bundledWindowsTunnel };

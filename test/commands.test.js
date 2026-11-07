@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const commandSource = process.env.SHAPES_BRIDGE_SOURCE || path.resolve(__dirname, "..");
 const { startServer } = require(path.join(commandSource, "src/server"));
 const { runCommand } = require(path.join(commandSource, "src/command-process"));
@@ -189,7 +189,8 @@ test("denied termination signals settle bounded uncertainty without crashing or 
 test("Windows command jobs remain available while unverified tree termination never claims cleanup", async (t) => {
   const f = await fixture(t, { platform: "win32" });
   assert.equal((await f.request("/capabilities")).body.features.command_jobs, true);
-  const execution = runCommand({ cmd: `${quote(process.execPath)} -e 'require("node:fs").writeFileSync("pid",String(process.pid));console.log("ready");setInterval(()=>{},1000)'`, cwd: f.dir }, { platform: "win32" });
+  const execution = runCommand({ cmd: `${quote(process.execPath)} -e 'require("node:fs").writeFileSync("pid",String(process.pid));console.log("ready");setInterval(()=>{},1000)'`, cwd: f.dir }, { platform: "win32", spawnProcess: spawn,
+    signalProcess: (owned, name) => owned.kill(name) });
   let child;
   try {
     const deadline = Date.now() + 3000;

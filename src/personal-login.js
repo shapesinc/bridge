@@ -6,6 +6,7 @@ const { ensureStateDir } = require("./state");
 const path = require("node:path");
 const fs = require("node:fs");
 const crypto = require("node:crypto");
+const { spawnOwned } = require("./owned-process");
 const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 
 // Used only by the signed native host after its human confirmation. Never an
@@ -17,7 +18,8 @@ function loginCommand(agent, executable) {
   return `exec ${quoted} ${agent === "codex" ? "login" : "auth login"}`;
 }
 
-function openPersonalLogin({ id, executable }, { run = execFile, platform = process.platform, directory = path.join(ensureStateDir(), "personal-login") } = {}) {
+function openPersonalLogin({ id, executable }, { run = execFile, platform = process.platform, directory = path.join(ensureStateDir(), "personal-login"), spawnProcess = spawnOwned } = {}) {
+  if (platform === "win32") return openWindowsLogin({ id, executable }, { spawnProcess });
   if (platform !== "darwin") return Promise.reject(new Error("Native account sign-in requires macOS."));
   const command = loginCommand(id, executable);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -41,4 +43,30 @@ function openPersonalLogin({ id, executable }, { run = execFile, platform = proc
   });
 }
 
-module.exports = { loginCommand, openPersonalLogin };
+function openWindowsLogin({ id, executable }, { spawnProcess = spawnOwned } = {}) {
+  if (!["codex", "claude"].includes(id) || typeof executable !== "string" || !path.win32.isAbsolute(executable)
+      || !/\.exe$/i.test(executable) || /[\x00-\x1f\x7f]/.test(executable)) return Promise.reject(new Error("Unsupported personal agent login."));
+  return new Promise((resolve, reject) => {
+    let child, timer, text = "", finished = false;
+    const finish = (error) => {
+      if (finished) return; finished = true; clearTimeout(timer);
+      if (error) { child?.kill(); reject(new Error("Could not open the vendor sign-in in Windows Terminal.")); }
+      else { child.unref(); child.stdout.unref?.(); resolve({ opened: true }); }
+    };
+    try {
+      child = spawnProcess(executable, id === "codex" ? ["login"] : ["auth", "login"],
+        { env: localEnvironment(), console: true, ready: true, stdio: ["ignore", "pipe", "ignore"] });
+      child.once("error", () => finish(true)); child.once("exit", () => { if (!finished) finish(true); });
+      child.stdout.on("data", (chunk) => {
+        text += chunk;
+        if (text.length > 128) { finish(true); return; }
+        if (text.includes("\n")) {
+          try { finish(JSON.parse(text.trim()).started !== true); } catch { finish(true); }
+        }
+      });
+      timer = setTimeout(() => finish(true), 10000);
+    } catch { finish(true); }
+  });
+}
+
+module.exports = { loginCommand, openPersonalLogin, openWindowsLogin };

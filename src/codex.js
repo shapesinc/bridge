@@ -4,12 +4,13 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawnSync } = require("node:child_process");
 const { StringDecoder } = require("node:string_decoder");
 const { selectAgent, argumentsFor, verifyInteractiveCodex } = require("./agents");
 const { normalizeRequest, nativeResponse } = require("./approvals");
 const { localEnvironment } = require("./local-workspace");
 const { bundledRuntime, launchConfiguration } = require("./bundled-runtime");
+const { spawnOwned, signalOwned } = require("./owned-process");
 const { createNativeToolProxy } = require("./native-tool-proxy");
 const { createToolBroker } = require("./native-tool-broker");
 const { closeProcessGroup } = require("./process-close");
@@ -222,7 +223,6 @@ function publicStatus(id, expectedAgent) {
 }
 
 async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInput, deliveredInputContext, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex", interactive = false, requestKey, builtIn, resumeThreadId, usageBaseline }) {
-  if (process.platform === "win32") throw new Error("The local agent launcher currently requires macOS or Linux.");
   if (!["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
   cwd = validateCwd(cwd, sandbox);
   const timeout = Number(timeoutSeconds);
@@ -286,8 +286,10 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
   // The job is durably queued and listable from here on; a launch failure is
   // recorded on it so a status or list call explains what happened.
   try {
-    const child = spawn(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
-      detached: true, stdio: "ignore", env: { ...localEnvironment(), SHAPES_CODEX_JOB_DIR: root(),
+    const child = spawnOwned(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
+      // Durable jobs outlive a short CLI start request. On Windows the native
+      // app's enclosing Job still owns the full runtime and every nested job.
+      parentPid: null, detached: true, stdio: "ignore", env: { ...localEnvironment(), SHAPES_CODEX_JOB_DIR: root(),
         ...(builtIn ? { SHAPES_RUNTIME_TOKEN: builtIn.token, SHAPES_NATIVE_TOOL_TOKEN: builtIn.toolToken || "" } : {}) },
     });
     await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
@@ -438,7 +440,7 @@ function cancelJob(id, expectedAgent) {
 async function superviseInteractive(directory, state, request) {
   const { createCodexRpcSession } = require("./codex-rpc");
   const pending = new Map();
-  let stopped, failed = false, timer, poll, session, toolProxy, toolBroker;
+  let stopped, failed = false, timer, poll, session, toolProxy, toolBroker, resourceClosure;
   const logs = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
   const persist = () => {
     state.pendingRequests = [...pending.values()].map((value) => value.display);
@@ -454,12 +456,19 @@ async function superviseInteractive(directory, state, request) {
     }
     persist();
   };
+  const closeResources = () => {
+    // Run both independent closures even if private-file cleanup or a transport
+    // rejects. A rejected close must not skip the owned runtime's cancellation.
+    if (!resourceClosure) resourceClosure = Promise.allSettled([
+      Promise.resolve().then(() => toolBroker ? toolBroker.close() : toolProxy?.close()),
+      Promise.resolve().then(() => session?.close()),
+    ]);
+    return resourceClosure;
+  };
   const stop = (status) => {
     if (stopped) return;
     stopped = status;
-    void (toolBroker ? toolBroker.close() : toolProxy?.close());
-    // Closing owns only this job's app-server process group, including workers.
-    void session?.close();
+    void closeResources();
   };
   const onSignal = () => stop("cancelled");
   Object.assign(state, { supervisorPid: process.pid, status: "running", startedAt: new Date().toISOString() });
@@ -584,9 +593,13 @@ async function superviseInteractive(directory, state, request) {
   } finally {
     clearInterval(poll); clearTimeout(timer);
     process.removeListener("SIGTERM", onSignal); process.removeListener("SIGINT", onSignal);
-    await (toolBroker ? toolBroker.close() : toolProxy?.close());
-    const cleanup = await session?.close();
-    if (cleanup?.processExited === false) {
+    const [transportClosure, processClosure] = await closeResources();
+    if (transportClosure.status === "rejected") {
+      stopped = "failed";
+      state.errorType = "tool_transport_cleanup_unconfirmed";
+      state.error = "The local capability transport could not finish cleanup. Check this computer and read operation receipts before retrying an action.";
+    }
+    if (processClosure.status === "rejected" || processClosure.value?.processExited === false) {
       stopped = "failed";
       state.errorType = "process_exit_unconfirmed";
       state.error = "The local agent was asked to stop, but its exit could not be confirmed. Check this computer before starting another task.";
@@ -665,7 +678,7 @@ async function supervise(id) {
   const logs = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
   const killGroup = (signal) => {
     if (child && child.pid) {
-      try { process.kill(-child.pid, signal); } catch (error) { if (error.code !== "ESRCH") throw error; }
+      signalOwned(child, signal);
     }
   };
   const stop = (status) => {
@@ -740,8 +753,8 @@ async function supervise(id) {
     Object.assign(state, { supervisorPid: process.pid, status: "running", startedAt: new Date().toISOString() });
     saveState(directory, state);
     if (fs.existsSync(path.join(directory, "cancel"))) { finish("cancelled"); return; }
-    child = spawn(request.executable, argumentsFor(agent, request),
-      { cwd: request.cwd, env: localEnvironment(), detached: true, stdio: ["pipe", "pipe", "pipe"] });
+    child = spawnOwned(request.executable, argumentsFor(agent, request),
+      { cwd: request.cwd, env: localEnvironment(), detached: true, cleanupReceipt: true, stdio: ["pipe", "pipe", "pipe"] });
     child.stdin.on("error", () => {}); // Early CLI exits can close stdin before the prompt is consumed.
     child.stdin.end(request.prompt);
     child.stdout.on("data", (chunk) => {

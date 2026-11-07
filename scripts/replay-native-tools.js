@@ -12,6 +12,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "shapes-native-tools-replay-"
 Object.assign(process.env, { SHAPES_BRIDGE_HOME: path.join(root, "state"), SHAPES_CODEX_JOB_DIR: path.join(root, "jobs") });
 const { startServer } = require("../src/server");
 const { getStatus, cancelJob } = require("../src/codex");
+const { cleanupReplay } = require("./replay-cleanup");
 const plans = new Map(), calls = [], requests = [], jobs = [], results = [], operations = new Map(), crashCleanup = [];
 let bridge, origin;
 const service = http.createServer(async (req, res) => {
@@ -87,7 +88,10 @@ async function start(name, session, { code, input, disabled = false, hang = fals
     if (crash) {
       const owned = JSON.parse(fs.readFileSync(path.join(root, "jobs", plan.job.job_id, "state.json"), "utf8"));
       assert.equal(owned.id, plan.job.job_id); assert(owned.agentPid && owned.supervisorPid);
-      const processTree = execFileSync("ps", ["-axo", "pid=,ppid="], { encoding: "utf8" }).trim().split("\n").map(line => line.trim().split(/\s+/).map(Number));
+      const inventory = process.platform === "win32"
+        ? execFileSync(process.env.SHAPES_TEST_PROCESS_SNAPSHOT, [], { encoding: "utf8", timeout: 5000, windowsHide: true })
+        : execFileSync("ps", ["-axo", "pid=,ppid="], { encoding: "utf8", timeout: 5000 });
+      const processTree = inventory.trim().split(/\r?\n/).map(line => line.trim().split(/\s+/).map(Number));
       const descendants = new Set([owned.agentPid]);
       for (let changed = true; changed;) {
         changed = false;
@@ -99,13 +103,17 @@ async function start(name, session, { code, input, disabled = false, hang = fals
       try { await waitUntil(() => [owned.supervisorPid, ...descendants].every(exited), 2000); }
       catch {
         automaticExit = false;
-        try { process.kill(-owned.agentPid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+        try { process.kill(process.platform === "win32" ? owned.agentPid : -owned.agentPid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") throw error; }
         await waitUntil(() => [owned.supervisorPid, ...descendants].every(exited));
       }
-      assert(owned.toolBrokerDirectory.startsWith("/tmp/shapes-native-tools-"));
-      assert.equal(fs.statSync(owned.toolBrokerDirectory).uid, process.getuid());
+      if (process.platform === "win32") assert(owned.toolBrokerDirectory.startsWith(path.join(root, "state", "private-channel-")));
+      else {
+        assert(owned.toolBrokerDirectory.startsWith("/tmp/shapes-native-tools-"));
+        assert.equal(fs.statSync(owned.toolBrokerDirectory).uid, process.getuid());
+      }
       fs.rmSync(owned.toolBrokerDirectory, { recursive: true, force: true });
       crashCleanup.push({ native_descendants: descendants.size, exited_after_supervisor_only_loss: automaticExit, broker_directory_removed_by_fixture: true });
+      if (process.platform === "win32") assert.equal(automaticExit, true, "Windows Job descendants must exit without fixture termination after supervisor loss");
     } else await api("/agents/cancel", { job_id: plan.job.job_id });
   }
   let state;
@@ -190,9 +198,8 @@ function images(value) {
       diagnostics: jobs.map(id => ({ id, stderr: fs.existsSync(path.join(root, "jobs", id, "stderr.log")) ? fs.readFileSync(path.join(root, "jobs", id, "stderr.log"), "utf8") : "" })) }, null, 2), { mode: 0o600 });
     throw error;
   } finally {
-    for (const id of jobs) { try { cancelJob(id); } catch {} }
-    if (bridge) { bridge.closeAllConnections(); await new Promise(resolve => bridge.close(resolve)); }
-    service.closeAllConnections(); await new Promise(resolve => service.close(resolve));
-    fs.rmSync(root, { recursive: true, force: true });
+    await cleanupReplay({ jobs, cancelJob, servers: [bridge, service], root, getState(id) {
+      return { ...JSON.parse(fs.readFileSync(path.join(root, "jobs", id, "state.json"), "utf8")), status: getStatus(id).state };
+    } });
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });

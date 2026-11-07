@@ -6,21 +6,23 @@ const METHODS = Object.freeze({ status: [], beginConnect: ["attemptId", "expecte
   listPersonalAgents: ["expectedUserId"], openAgentLogin: ["expectedUserId", "agent"], cancelAgentLogin: ["expectedUserId", "agent"] });
 const MAX_REQUEST_BYTES = 16 * 1024;
 
-function parseRequest(line) {
+function parseRequest(line, { allowLifecycle = false } = {}) {
   if (Buffer.byteLength(line) > MAX_REQUEST_BYTES) throw failure("invalid_request");
   let request;
   try { request = JSON.parse(line); } catch { throw failure("invalid_request"); }
   if (!request || Array.isArray(request) || request.version !== 1 || typeof request.id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(request.id) ||
-    Object.keys(request).some((key) => !["version", "id", "operation", "params"].includes(key)) || !Object.hasOwn(METHODS, request.operation)) throw failure("invalid_request");
+    Object.keys(request).some((key) => !["version", "id", "operation", "params"].includes(key)) ||
+    !(Object.hasOwn(METHODS, request.operation) || allowLifecycle && request.operation === "lifecycleStatus")) throw failure("invalid_request");
   const params = request.params ?? {};
-  const keys = METHODS[request.operation];
-  if (!params || typeof params !== "object" || Array.isArray(params) || Object.keys(params).length !== keys.length || keys.some((key) => !Object.hasOwn(params, key))) throw failure("invalid_request");
+  const keys = request.operation === "lifecycleStatus" ? [] : METHODS[request.operation];
+  const optional = request.operation === "updateAccount" ? ["revocationToken"] : [];
+  if (!params || typeof params !== "object" || Array.isArray(params) || Object.keys(params).some((key) => !keys.includes(key) && !optional.includes(key)) || keys.some((key) => !Object.hasOwn(params, key))) throw failure("invalid_request");
   return { ...request, params };
 }
 
 // A bounded stream (including partial lines) rather than readline's unbounded
 // accumulation. stdout contains only sanitized replies to the private host.
-function serveEmbeddedProtocol({ input, output, controller, onClose = () => {} }) {
+function serveEmbeddedProtocol({ input, output, controller, onClose = () => {}, allowLifecycle = false }) {
   let buffer = Buffer.alloc(0), closing = false, pending = new Set();
   const activeIds = new Set();
   const respond = (value) => { const line = JSON.stringify(value); if (Buffer.byteLength(line) <= 64 * 1024) output.write(line + "\n"); };
@@ -35,7 +37,7 @@ function serveEmbeddedProtocol({ input, output, controller, onClose = () => {} }
   }
   function line(bytes) {
     let request;
-    try { request = parseRequest(bytes.toString("utf8")); }
+    try { request = parseRequest(bytes.toString("utf8"), { allowLifecycle }); }
     catch (error) { reject(null, error); return; }
     if (activeIds.has(request.id) || activeIds.size >= 32) { reject(request.id, failure("invalid_request")); return; }
     activeIds.add(request.id);

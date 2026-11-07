@@ -48,12 +48,12 @@ test("default off and expired grants deny stale callbacks without transport or e
   assert.equal(requests, 0);
 });
 
-test("unsupported platforms cannot advertise or activate the Unix transport; flag-off remains unchanged", async () => {
-  assert.equal(supportsToolProxy("win32"), false); assert.equal(supportsToolProxy("darwin"), true); assert.equal(supportsToolProxy("linux"), true);
+test("unsupported platforms cannot advertise or activate the private transport; flag-off remains unchanged", async () => {
+  assert.equal(supportsToolProxy("freebsd"), false); assert.equal(supportsToolProxy("darwin"), true); assert.equal(supportsToolProxy("linux"), true);
   const gateway = grant();
-  assert.throws(() => validateToolProxy(gateway, { platform: "win32" }), /platform/);
+  assert.throws(() => validateToolProxy(gateway, { platform: "freebsd" }), /platform/);
   assert.deepEqual(validateToolProxy({ ...gateway, tool_proxy: undefined }, { platform: "win32" }), {});
-  const proxy = createNativeToolProxy({ gateway, token: "tools-secret", platform: "win32", getContext: context, fetchImpl: () => assert.fail("No unsupported transport") });
+  const proxy = createNativeToolProxy({ gateway, token: "tools-secret", platform: "freebsd", getContext: context, fetchImpl: () => assert.fail("No unsupported transport") });
   assert.deepEqual(proxy.definitions, []);
   assert.equal(result(await proxy.handle(native("shapes_discover"))).error_type, "tool_proxy_unavailable");
   await proxy.close();
@@ -68,7 +68,7 @@ test("HTTP capability advertisement reflects the supported platform and executab
   const supported = async () => (await (await fetch(`http://127.0.0.1:${server.address().port}/capabilities`)).json()).features.native_tool_proxy;
   process.env.SHAPES_BUNDLED_CODEX_BINARY = process.execPath;
   Object.defineProperty(process, "platform", { ...descriptor, value: "darwin" }); assert.equal(await supported(), true);
-  Object.defineProperty(process, "platform", { ...descriptor, value: "win32" }); assert.equal(await supported(), false);
+  Object.defineProperty(process, "platform", { ...descriptor, value: "win32" }); assert.equal(await supported(), true);
   Object.defineProperty(process, "platform", { ...descriptor, value: "linux" });
   process.env.SHAPES_BUNDLED_CODEX_BINARY = "/missing/synthetic/codex-app-server"; assert.equal(await supported(), false);
 });
