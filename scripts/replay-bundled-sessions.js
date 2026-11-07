@@ -74,7 +74,8 @@ async function create(name, write = true) {
 async function run(session, name, code, options = {}) {
   const requestKey = randomUUID(), token = `fixture-${randomUUID()}`;
   const plan = { name, code, calls: 0, ...options }; plans.set(token, plan);
-  const body = { session_id: session.session_id, scope_id: session.scope_id, prompt: name, request_key: requestKey,
+  const body = { session_id: session.session_id, scope_id: session.scope_id,
+    ...(options.input ? { input: options.input } : { prompt: name }), request_key: requestKey,
     gateway: { token, session_id: session.session_id, scope_id: session.scope_id, request_key: requestKey,
       base_url: `http://127.0.0.1:${modelServer.address().port}/v1`, model: "gpt-6-astra", run_id: randomUUID(), expires_at: new Date(Date.now() + 120000).toISOString() } };
   const started = await api("/agents/start", body); assert.equal(started.status, 202, JSON.stringify(started));
@@ -91,6 +92,11 @@ async function run(session, name, code, options = {}) {
 }
 function patch(file, content) { return `text(await tools.apply_patch(${JSON.stringify(`*** Begin Patch\n*** Add File: ${file}\n${content.split("\n").map(line => "+" + line).join("\n")}\n*** End Patch`)}));`; }
 function command(cmd) { return `text(await tools.exec_command(${JSON.stringify({ cmd, login: false, max_output_tokens: 500 })}));`; }
+function inputImages(value) {
+  if (Array.isArray(value)) return value.flatMap(inputImages);
+  if (!value || typeof value !== "object") return [];
+  return value.type === "input_image" ? [value] : Object.values(value).flatMap(inputImages);
+}
 (async () => {
   try {
     await new Promise(resolve => modelServer.listen(0, "127.0.0.1", resolve)); await startBridge();
@@ -105,6 +111,57 @@ function command(cmd) { return `text(await tools.exec_command(${JSON.stringify({
     const resumed = await run(html, "Follow-up after Bridge restart", command("node -e \"const fs=require('node:fs');const p='packing.html';fs.appendFileSync(p,'<label><input type=checkbox>Passport</label>')\""));
     assert.equal(resumed.thread_id, first.thread_id);
     assert.match(fs.readFileSync(path.join(html.cwd, "packing.html"), "utf8"), /Passport/);
+    const screenshots = await create("original-screenshot");
+    const originalText = "Fix the flicker shown here.\nKeep this exact original request.";
+    const originalURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGP4z8CAFWEXHbQSACj/P8Fu7N9hAAAAAElFTkSuQmCC";
+    const originalInput = [{ type: "text", text: originalText, context_key: "source-original:0" },
+      { type: "image", url: originalURL, context_key: "source-original:1" },
+      { type: "text", text: "Use the current project and verify the outcome." }];
+    const screenshot = await run(screenshots, "Original screenshot input", patch("verified-input.txt", "original input reached pinned runtime"), { input: originalInput });
+    assert.equal(fs.readFileSync(path.join(screenshots.cwd, "verified-input.txt"), "utf8"), "original input reached pinned runtime\n");
+    const originalRequest = requests.find((request) => request.scenario === "Original screenshot input").body;
+    assert.ok(JSON.stringify(originalRequest.input).includes(JSON.stringify(originalText).slice(1, -1)));
+    const images = inputImages(originalRequest.input);
+    assert.equal(images.length, 1);
+    assert.equal(images[0].image_url, originalURL);
+    receipts.at(-1).input_images = images;
+    await stopBridge(); await startBridge();
+    const followupURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEElEQVR4nGNgYPiPAw0pCQCpcD/BFMrqcwAAAABJRU5ErkJggg==";
+    const screenshotFollowup = await run(screenshots, "Screenshot follow-up", null, {
+      input: [{ type: "text", text: "Compare this follow-up with my original screenshot." }, { type: "image", url: followupURL }],
+    });
+    assert.equal(screenshotFollowup.thread_id, screenshot.thread_id);
+    const followupImages = inputImages(requests.find((request) => request.scenario === "Screenshot follow-up").body.input);
+    assert.deepEqual(followupImages.map((image) => image.image_url), [originalURL, followupURL]);
+    receipts.at(-1).input_images = followupImages;
+    for (let index = 0; index < 5; index++) {
+      if (index === 2) { await stopBridge(); await startBridge(); }
+      const name = `Repeated screenshot context follow-up ${index + 1}`;
+      const result = await run(screenshots, name, null, { input: [
+        ...originalInput.slice(0, 2), { type: "text", text: `Continue verification step ${index + 1}.` },
+      ] });
+      assert.equal(result.thread_id, screenshot.thread_id);
+      const request = requests.find((request) => request.scenario === name).body;
+      const retainedImages = inputImages(request.input);
+      assert.deepEqual(retainedImages.map((image) => image.image_url), [originalURL, followupURL]);
+      assert.equal(JSON.stringify(request.input).split(JSON.stringify(originalText).slice(1, -1)).length - 1, 1);
+      assert.equal(JSON.stringify(request).includes("context_key"), false);
+      receipts.at(-1).input_images = retainedImages;
+    }
+    const delivered = await api(`/sessions/read?${new URLSearchParams({ session_id: screenshots.session_id, scope_id: screenshots.scope_id })}`);
+    assert.equal(delivered.value.context_thread_id, screenshot.thread_id);
+    assert.deepEqual(delivered.value.delivered_context_keys.sort(), ["source-original:0", "source-original:1"]);
+    const localImages = await create("local-image-view");
+    const localImage = path.join(localImages.cwd, "fixture.png");
+    fs.writeFileSync(localImage, Buffer.from(originalURL.split(",")[1], "base64"));
+    await run(localImages, "Local image verification", `image((await tools.view_image({path:${JSON.stringify(localImage)}})).image_url);`);
+    const viewedImages = inputImages(requests.filter((request) => request.scenario === "Local image verification").at(-1).body.input);
+    assert.equal(viewedImages.length, 1);
+    receipts.at(-1).input_images = viewedImages;
+    receipts.at(-1).image_locations = requests.filter((request) => request.scenario === "Local image verification").at(-1).body.input
+      .filter((item) => inputImages(item).length).map((item) => ({ type: item.type, role: item.role,
+        content_types: Array.isArray(item.content) ? item.content.map((part) => part.type) : undefined,
+        output_types: Array.isArray(item.output) ? item.output.map((part) => part.type) : undefined }));
     const csv = await create("data");
     await run(csv, "CSV analysis", patch("costs.csv", "item,amount\nTrain,12\nDinner,8") + command("node -e \"const fs=require('node:fs');const total=fs.readFileSync('costs.csv','utf8').trim().split('\\n').slice(1).reduce((sum,row)=>sum+Number(row.split(',')[1]),0);fs.writeFileSync('total.json',JSON.stringify({total}));\""));
     assert.equal(JSON.parse(fs.readFileSync(path.join(csv.cwd, "total.json"), "utf8")).total, 20);
@@ -166,8 +223,14 @@ function command(cmd) { return `text(await tools.exec_command(${JSON.stringify({
     assert.equal(cancelPlan.calls, 1);
     receipts.push({ name: cancelPlan.name, result: cancelStatus, calls: cancelPlan.calls });
     const out = { version: "0.166.0", simulated_provider: true, real_local_execution: true, receipts, requests,
-      assertions: ["unauthorized access rejected", "three compositions persisted", "duplicate send reused job", "follow-up resumed same thread after Bridge restart", "read-only edit refused", "gateway overflow failed truthfully without hidden retry", "wrong scope rejected", "raw request key recovers job", "numeric expiry accepted", "stalled provider cancelled without retry"] };
+      request_envelopes: requests.map((request) => ({ scenario: request.scenario, call: request.call,
+        bytes: Buffer.byteLength(JSON.stringify(request.body)), image_count: inputImages(request.body.input).length })),
+      assertions: ["unauthorized access rejected", "three compositions persisted", "original text and inline image reached pinned runtime/provider", "image history resumed after Bridge restart", "local view_image reached provider as image input", "duplicate send reused job", "follow-up resumed same thread after Bridge restart", "read-only edit refused", "gateway overflow failed truthfully without hidden retry", "wrong scope rejected", "raw request key recovers job", "numeric expiry accepted", "stalled provider cancelled without retry"] };
     if (process.env.SHAPES_CANARY_REPORT) fs.writeFileSync(process.env.SHAPES_CANARY_REPORT, JSON.stringify({ ...out, requests: undefined }, null, 2));
+    // Explicit local-only evidence for replay through the billing gateway.
+    // Captures include runtime prompts; never commit or publish this file.
+    if (process.env.SHAPES_CANARY_CAPTURE) fs.writeFileSync(process.env.SHAPES_CANARY_CAPTURE,
+      JSON.stringify({ version: out.version, simulated_provider: true, requests }, null, 2), { mode: 0o600, flag: "wx" });
     console.log(JSON.stringify({ success: true, scenarios: receipts.map(r => ({ name: r.name, state: r.result.state, calls: r.calls, usage: r.result.usage })), assertions: out.assertions }));
   } catch (error) {
     if (process.env.SHAPES_CANARY_REPORT) fs.writeFileSync(process.env.SHAPES_CANARY_REPORT, JSON.stringify({ error: String(error), receipts }, null, 2));

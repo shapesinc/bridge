@@ -39,6 +39,7 @@ const { expandHome } = require("./local-workspace");
 const { bundledRuntime } = require("./bundled-runtime");
 const { createComputerControl } = require("./computer");
 const { createSession, startSessionTurn, readSession, sessionEvents } = require("./sessions");
+const { supportsToolProxy } = require("./native-tool-proxy");
 const { runCommand: startCommandProcess } = require("./command-process");
 const { commandStatus, cancelCommand } = require("./commands");
 
@@ -205,7 +206,9 @@ function startServer({ port, token, computerControl = createComputerControl(), p
     }
     if (route === "/capabilities" && method === "GET") {
       return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: {
-        command_jobs: true, interactive_codex: true, idempotent_start: true, job_list: true, bundled_sessions: bundledRuntime().available, computer_control: computerControl.available() } });
+        command_jobs: true, interactive_codex: true, idempotent_start: true, job_list: true, bundled_sessions: bundledRuntime().available,
+        session_input: bundledRuntime().available,
+        native_tool_proxy: supportsToolProxy() && bundledRuntime().available, computer_control: computerControl.available() } });
     }
 
     // Everything below requires the token.

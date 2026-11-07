@@ -211,6 +211,18 @@ and updates fetch `main`; signed macOS installation downloads
 
 Use the following coordinated sequence after release authorization:
 
+The original-input and connected-tool candidate uses **0.2.10**, preserving the
+separate Windows parity candidate's 0.2.9 version and retained artifacts. Its
+runtime is the reviewed `4bb147fd658541761a10577134b7a491fd267348` implementation;
+the 0.2.10 preparation changes package metadata and release documentation only.
+It does not incorporate the unmerged Windows parity changes. Pin the native app
+to the exact 0.2.10 candidate commit, publish and verify that compatible native
+release, then publish and verify the 0.2.10 standalone asset before merging its
+installer metadata onto `main`. Preserve the current public 0.2.8 and pending
+0.2.9 artifacts; never relabel them. Runtime acceptance gaps and operating-cost
+assumptions remain in [built-in sessions](docs/bundled-sessions.md) and
+[native capability transport](docs/native-tool-proxy.md).
+
 1. Prepare a dedicated worktree from current `origin/main`, an unused numeric
    `major.minor.patch` package version, and a reviewed release-candidate commit.
    For a version/docs-only change, run `node --test test/package-bin.test.js` and
