@@ -222,6 +222,18 @@ and updates fetch `main`; signed macOS installation downloads
 
 Use the following coordinated sequence after release authorization:
 
+The separate original-input/connected-tool release uses **0.2.10**. The Windows
+parity integration now uses **0.2.11**, combining the reviewed 0.2.9 Windows
+runtime with that incoming input/context/tool source and an authenticated Windows
+local-channel adapter. Preserve all prior signed artifacts and tags; never
+relabel a changed helper. Both desktop pins must identify the same tested
+combined source. Publish an accepted compatible native release, then verify the
+same-version standalone asset as latest, before merging bumped installer metadata.
+The new connected-tool flag remains off. See [transport contracts and costs](docs/native-tool-proxy.md)
+and [input/context cost scenarios](docs/bundled-sessions.md#integrated-windows-input-cost-and-acceptance).
+No new public artifact, standalone publication or completed installed acceptance
+is claimed by this source integration.
+
 1. Prepare a dedicated worktree from current `origin/main`, an unused numeric
    `major.minor.patch` package version, and a reviewed release-candidate commit.
    For a version/docs-only change, run `node --test test/package-bin.test.js` and

@@ -5,6 +5,7 @@ const { StringDecoder } = require("node:string_decoder");
 const { localEnvironment } = require("./local-workspace");
 const { spawnOwned } = require("./owned-process");
 const { closeProcessGroup } = require("./process-close");
+const { normalizeSessionInput } = require("./session-input");
 
 function deferred() {
   let resolve, reject;
@@ -32,6 +33,7 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
   let child, started = false, closing, exited = false, terminal = false, fatalError;
   let threadId, turnId, usage, totalUsage, nextId = 0, lineBuffer = "", startupTimer, turnRevision = 0;
   let waitingTurn, continuing = false;
+  let inputSent = false, inputDelivered = false;
   let phase = "not_started";
   const decoder = new StringDecoder("utf8");
   const completion = deferred();
@@ -98,6 +100,13 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
     if (typeof id !== "string" || !id) throw new Error("Codex app-server did not return a turn ID.");
     if (turnId !== id) { turnId = id; turnRevision++; }
   }
+  function acknowledgeInput(id) {
+    if (inputSent && !inputDelivered) {
+      if (typeof id !== "string" || !id) throw new Error("Codex app-server did not acknowledge its input turn.");
+      inputDelivered = true;
+      emit({ type: "input.delivered", thread_id: threadId, turn_id: id });
+    }
+  }
   function emitItem(type, item) {
     if (!item || typeof item.type !== "string") return;
     if (type === "item.completed") {
@@ -157,7 +166,7 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
       return;
     }
     if (params.threadId !== threadId) return;
-    if (method === "turn/started") { rememberTurn(params.turn?.id); waitingTurn = undefined; return; }
+    if (method === "turn/started") { rememberTurn(params.turn?.id); acknowledgeInput(params.turn?.id); waitingTurn = undefined; return; }
     if (method === "thread/tokenUsage/updated") {
       // A resumed thread includes previous turns. Preserve its cumulative
       // counter privately, and report only this job's increment to callers.
@@ -244,7 +253,8 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
   async function start(prompt) {
     if (started) throw new Error("A Codex RPC session can start only one task.");
     if (closing) throw new Error("A closed Codex RPC session cannot start a task.");
-    if (typeof prompt !== "string" || !prompt.trim()) throw new Error("A nonempty prompt is required.");
+    const input = Array.isArray(prompt) ? normalizeSessionInput(prompt).map(({ context_key: _key, ...item }) => item) : [{ type: "text", text: prompt }];
+    if (!Array.isArray(prompt) && (typeof prompt !== "string" || !prompt.trim())) throw new Error("A nonempty prompt is required.");
     started = true;
     enterPhase("initialize");
     child = spawnOwned(executable, launchArgs || ["app-server", "--listen", "stdio://", "-c", "sandbox_workspace_write.writable_roots=[]"],
@@ -283,7 +293,9 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
       if (thread.approvalPolicy !== undefined && thread.approvalPolicy !== "never") throw new Error("Codex did not disable approval prompts.");
       const revision = turnRevision;
       enterPhase("turn_start");
-      const turn = await rpc("turn/start", { threadId, input: [{ type: "text", text: prompt }] });
+      inputSent = true;
+      const turn = await rpc("turn/start", { threadId, input });
+      acknowledgeInput(turn.turn?.id);
       if (turnRevision === revision) rememberTurn(turn.turn?.id);
       if (!turnId) throw new Error("Codex app-server did not return a turn ID.");
       clearTimeout(startupTimer);

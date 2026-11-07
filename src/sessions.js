@@ -7,6 +7,7 @@ const { ensureStateDir } = require("./state");
 const { expandHome } = require("./local-workspace");
 const { startJob, publicStatus, listJobs, validateCwd, jobEvents, resumeContext } = require("./codex");
 const { bundledRuntime, validateGateway } = require("./bundled-runtime");
+const { normalizeSessionInput, sessionInputText } = require("./session-input");
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"]);
@@ -40,6 +41,23 @@ function status(session) {
   return { session_id: session.session_id, scope_id: session.scope_id, cwd: session.cwd, sandbox: session.sandbox,
     funding: session.funding, state: latest && !TERMINAL.has(latest.state) ? latest.state : "idle",
     created_at: session.created_at, latest_job: latest, turn_count: session.jobs.length };
+}
+function sessionResumeContext(session) {
+  let resume = {};
+  const history = [];
+  for (const id of [...session.jobs].reverse()) {
+    const previous = resumeContext(id);
+    history.push(previous);
+    if (!resume.resumeThreadId && previous.resumeThreadId) resume = {
+      resumeThreadId: previous.resumeThreadId, usageBaseline: previous.usageBaseline,
+    };
+  }
+  const delivered = new Map();
+  for (const previous of history) {
+    if (!resume.resumeThreadId || previous.inputDeliveredThreadId !== resume.resumeThreadId) continue;
+    for (const [key, digest] of Object.entries(previous.inputContext)) if (!delivered.has(key)) delivered.set(key, digest);
+  }
+  return { ...resume, deliveredInputContext: Object.fromEntries(delivered) };
 }
 function recoverPending(session) {
   if (!session.pending_request) return;
@@ -87,9 +105,12 @@ async function createSession(body) {
 
 async function startSessionTurn(body) {
   validateIdentity(body?.session_id, body?.scope_id);
-  if (Object.keys(body).some((key) => !["session_id", "scope_id", "prompt", "request_key", "gateway"].includes(key))
-      || typeof body.prompt !== "string" || !body.prompt.trim()
-      || typeof body.request_key !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(body.request_key)) throw error("Supply prompt and a stable request_key for this session turn.");
+  const hasInput = Object.hasOwn(body, "input"), hasPrompt = Object.hasOwn(body, "prompt");
+  if (Object.keys(body).some((key) => !["session_id", "scope_id", "prompt", "input", "request_key", "gateway"].includes(key))
+      || hasInput === hasPrompt || (hasPrompt && (typeof body.prompt !== "string" || !body.prompt.trim()))
+      || typeof body.request_key !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(body.request_key)) throw error("Supply exactly one of prompt or input, and a stable request_key for this session turn.");
+  const input = hasInput ? normalizeSessionInput(body.input) : undefined;
+  const prompt = input ? sessionInputText(input) : body.prompt;
   return locked(body.session_id, async () => {
     const session = load(body.session_id, body.scope_id);
     recoverPending(session);
@@ -102,17 +123,13 @@ async function startSessionTurn(body) {
     if (!existing && last && !TERMINAL.has(last.state)) throw error("This session already has an active turn. Wait or cancel before sending another.", 409);
     if (!existing && session.jobs.length >= 5000) throw error("This session reached its local turn limit. Create a new session.", 409);
     if (!bundledRuntime().available) throw error("The built-in runtime is unavailable. Update shapes.inc on this computer.", 409);
-    let resume = {};
-    for (const id of [...session.jobs].reverse()) {
-      const previous = resumeContext(id);
-      if (previous.resumeThreadId) { resume = previous; break; }
-    }
+    const { deliveredInputContext, ...resume } = sessionResumeContext(session);
     session.pending_request = requestKey;
     save(session);
     try {
-      const receipt = await startJob({ prompt: body.prompt, cwd: session.cwd, sandbox: session.sandbox,
+      const receipt = await startJob({ prompt, ...(input ? { input, deliveredInputContext } : {}), cwd: session.cwd, sandbox: session.sandbox,
         agent: "codex", interactive: true, requestKey, ...resume,
-        builtIn: { sessionId: session.session_id, scopeId: session.scope_id, gateway: grant.metadata, token: grant.token } });
+        builtIn: { sessionId: session.session_id, scopeId: session.scope_id, gateway: grant.metadata, token: grant.token, toolToken: grant.toolToken } });
       if (!session.jobs.includes(receipt.job_id)) session.jobs.push(receipt.job_id);
       delete session.pending_request;
       save(session);
@@ -121,7 +138,13 @@ async function startSessionTurn(body) {
   });
 }
 
-function readSession(id, scope) { return status(load(id, scope)); }
+function readSession(id, scope) {
+  const session = load(id, scope), context = sessionResumeContext(session);
+  return { ...status(session), context_thread_id: context.resumeThreadId || null,
+    // Bounded discovery lets the authenticated backend avoid downloading
+    // already delivered attachments. Dispatch still checks the full ledger.
+    delivered_context_keys: Object.keys(context.deliveredInputContext).slice(0, 128) };
+}
 function sessionEvents(id, scope, cursor = "0:0") {
   const session = load(id, scope);
   if (!/^\d{1,8}:\d{1,8}$/.test(cursor)) throw error("Invalid session event cursor.");

@@ -14,7 +14,7 @@ const { closeProcessGroup } = require("./process-close");
 function personalConfiguration(profile = process.env.CODEX_HOME || path.join(os.homedir(), ".codex")) {
   if (typeof profile !== "string" || !path.isAbsolute(profile) || /[\x00-\x1f\x7f]/.test(profile)) throw new Error("Invalid personal Codex profile.");
   const environment = localEnvironment();
-  for (const key of Object.keys(environment)) if (/^(?:OPENAI_|ANTHROPIC_|SHAPES_RUNTIME_TOKEN$)/.test(key)) delete environment[key];
+  for (const key of Object.keys(environment)) if (/^(?:OPENAI_|ANTHROPIC_|SHAPES_RUNTIME_TOKEN$|SHAPES_NATIVE_TOOL_TOKEN$)/.test(key)) delete environment[key];
   environment.CODEX_HOME = profile;
   const config = { model_provider: "openai", check_for_update_on_startup: false, "analytics.enabled": false,
     "features.hooks": false, "sandbox_workspace_write.writable_roots": [] };

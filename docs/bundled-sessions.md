@@ -6,14 +6,27 @@ The macOS distribution includes the official Codex OSS app-server **0.166.0**. I
 
 Every endpoint below requires the existing Bridge token except public capability discovery. The backend remains responsible for checking the acting person, chat membership, device grant, wallet and budget; a working directory does not grant access.
 
-- `GET /capabilities`: `features.bundled_sessions` indicates a bundled executable is present. Older helpers remain compatible with installed-agent discovery.
+- `GET /capabilities`: `features.bundled_sessions` indicates a bundled executable is present. `features.session_input` additionally advertises original text/image turn inputs. The backend must check this before sending attachments; older helpers cannot preserve them and must not receive a silently reduced text-only task. Older helpers remain compatible with installed-agent discovery.
 - `POST /sessions/create`: `{session_id, scope_id, cwd, workspace_write, funding:"shapes_credits"}`. The backend supplies a UUID and an opaque actor/chat/device binding. Canonical cwd, write mode and funding are immutable; an identical retry returns the original receipt, a different scope returns 403, and different settings return 409. Creating a session does not start inference.
 - `GET /sessions/read?session_id=…&scope_id=…`: durable session metadata and latest ordinary job status.
 - `GET /sessions/events?session_id=…&scope_id=…&cursor=…`: up to 100 persisted native events and an opaque continuation cursor. Each job retains at most about 8 MiB of events, with large events summarized. Terminal receipts remain available when event history is truncated.
 - `POST /agents/start`: `{session_id, scope_id, prompt, request_key, gateway}` sends one turn using the existing durable job primitive. `gateway` contains `{base_url, token, model, expires_at, run_id, session_id, scope_id, request_key}`. Expiry is Unix seconds (ISO timestamps are also accepted); bindings must match, and HTTPS is required except loopback HTTP for development. The request key remains unchanged for `GET /agents/jobs?request_key=…` recovery after a lost response. Reusing a key with a different task or session returns 409. Only one turn per session runs at a time.
+- Instead of `prompt`, a session turn may supply `input: [{type:"text", text}, {type:"image", url}, …]`. Exactly one of `prompt` and `input` is required. The ordered input is the source of truth passed to Codex without rewriting the human's text or substituting image descriptions. Task guidance can be a separate text item. Inputs have 1–64 items, at most four images, a combined serialized UTF-8 limit of 128 KiB, at most 64 KiB of text, and at most 64 KiB of decoded image data. Images use canonical `data:image/png;base64,…`, JPEG or WebP data URLs with matching file signatures. Remote URLs, `localImage`, extra fields and arbitrary tool/role inputs are rejected before dispatch. The authenticated backend resolves only attachments authorized for the acting person and original chat message, validates/decodes and bounds them, and retains source provenance separately. Bridge does not fetch URLs or derive provenance from model text. Gateway modality, retained-history image counts, token, byte and spending limits still apply independently.
 - Existing `/agents/status`, `/agents/respond` and `/agents/cancel` remain the status/input/cancellation boundaries. A new turn after completion or cancellation resumes the most recent native thread. It starts a new supervised process; the conversation itself persists in the private runtime home.
 
 Receipts identify `agent:"codex"`, `funding:"shapes_credits"`, `session_id` and `runtime_version`. Receipt usage is this job's increment, not cumulative previous-turn usage; the gateway independently meters actual provider calls. Prompts are limited to 64 KiB, jobs retain existing deadlines, and sessions cap at 5,000 turns. A reused request key that never launched can follow the existing job retry contract.
+
+The typed input participates in the complete job fingerprint, including item order and exact inline image bytes. Changing an attachment while reusing the same request key is a conflict, not a second execution. Private job storage retains the input with mode 0600; public task previews contain text only. Start retries, cancellation and later same-thread turns keep their existing behavior. Legacy text-only fingerprints remain unchanged. This change does not enable computer input tools, personal-provider typed input, or access to another app's profile.
+
+Text/image items may additionally carry a server-owned `context_key` (1–160 ASCII letters, digits, `_`, `:`, or `-`, unique per packet). This identifies one immutable source item; it grants no authority. Keys should bind the persisted source content and item index. On a new turn, the session omits only keys already acknowledged on the exact native thread it is resuming. The complete original packet remains the idempotency fingerprint and private record; a separate execution packet omits delivered context and strips all keys before `turn/start`. Reusing a delivered key with different content is a conflict. Unkeyed instructions always reach the new turn. A packet containing only already-delivered items requires a new instruction rather than silently starting an empty turn.
+
+Delivery is recorded only after the runtime acknowledges the initial `turn/start` or emits `turn/started`, never merely when a job is queued or a thread is created. Private per-job records reconstruct the delivered key/content-hash ledger after a Bridge restart, scoped to this session and native thread. A rejected pre-turn input remains eligible for delivery, and another session starts with no delivered context. Authenticated `GET /sessions/read` additionally returns `context_thread_id` and at most 128 recent `delivered_context_keys`, letting the backend avoid downloading known attachments before dispatch. This discovery is bounded and advisory; dispatch still applies the complete local ledger under the session lock. Lost-start recovery must precede source pruning/materialization, so retries do not depend on later attachment availability or alter the original fingerprint.
+
+The actual pinned 0.166.0 runtime rejects remote HTTPS image URLs at `turn/start`; inline images are required despite newer app-server documentation showing remote URL input. Its Responses request emits `{type:"input_image", image_url:"data:…"}` without `detail`, and resumed threads retain earlier image items. The gateway must account for that default detail and retained image history. A successful turn transport check does not prove that the model understood the image.
+
+The funded runtime also enables the existing local `view_image` tool so it can inspect screenshots and other image files covered by its existing filesystem access. This does not capture screens or control the computer. Its image output enters the same funded Responses gateway and must pass the image/model token accounting, current grant, budget, image-count and unchanged 256 KiB request envelope checks; oversized local images can still fail explicitly. It requires deployment of the corresponding gateway image contract first. Other disabled runtime features remain disabled.
+
+HTTP tests cover typed-input rejection before a job exists, authentication, canonical encoding/MIME and aggregate size limits, four-image input, complete-input idempotency, changed-attachment conflict, private persistence, same-thread restart/follow-up and cancellation. Context regressions cover five follow-ups without repeated source delivery, unchanged retries after delivery, changed-key conflicts, new-session isolation and a failed turn before acknowledgement. The actual pinned runtime with a loopback simulated provider receives the original text and inline image, writes a real local fixture file, resumes with both original and follow-up images, continues five more times without duplicating either image, and views a separate local PNG via `view_image`. Existing JavaScript, HTML, CSV, read-only, overflow and cancellation replays remain included. This is actual local execution with simulated model responses, not live vision-quality, billing or macOS UI acceptance.
 
 Failure receipts preserve the sanitized provider status and reason. Recovery advice uses the job's immutable funding: a funded 401 points to retry/support in shapes.inc, and a funded 429 points to shapes.inc credits or retry. Neither asks for personal Codex sign-in or plan changes. Explicit personal jobs keep their existing vendor-account guidance. Error presentation does not change dispatch, grants, retries, billing or terminal state.
 
@@ -107,3 +120,62 @@ separate ASGI tests verify that a smaller follow-up can use the same lease; that
 does not establish automatic native recovery. This is simulated transport, not live
 provider/payment verification. Actual coding acceptance on the new package
 remains required.
+
+
+## Integrated Windows input cost and acceptance
+
+The 0.2.11 integration preserves original input, exact-image idempotency and the
+per-thread acknowledged context ledger on both desktop hosts. It retains Windows
+Job ownership, cancellation receipts, finite revocation writer and default-off
+connected-tool admission. Same-SHA packaging and capability equality are separate
+checks; both actual runtime and installed/backend acceptance remain necessary.
+
+The Windows transport adds no model calls or context at unchanged task packets:
+**+$0/day platform-specific overhead**. The inherited original-input behavior is
+not free. Before implementation, the integration disclosed upstream backend
+`76678ee29f4376a1a503bc8a811855637dac83c6`'s [COMPUTER_BRIDGE cost scenarios](https://github.com/shapesinc/app/blob/76678ee29f4376a1a503bc8a811855637dac83c6/architecture/COMPUTER_BRIDGE.md).
+Traffic, adoption and actual cache mix are unknown; these are scenarios, not
+measured daily spend or ceilings. Assumed November 6 Astra prices are $10/M fresh
+input, $1/M cache reads, $12.50/M cache writes, $50/M output; above 272k context,
+base input/output is $20/$75.
+
+Original screenshot example: 200 header+2,000 original text+900 image+151 local
+view_image description tokens = 3,251 additional input tokens, retained across 10
+requests and 20% retries. At 0–75% cached reads, increase is **$12.68–39.01/day
+per 100 affected existing tasks**, or **$126.79–390.12/day per 1,000**. Five–20
+history reads expands to $6.34–78.02/day per 100. Context-key dedup avoids adding
+duplicate source; later history still consumes input. The 151-token description
+is an estimator proxy; using its 655-byte conservative token bound gives $45.06/day
+per 100 uncached tasks. All fresh cache writes raise the base to $48.77/day per 100;
+long-context rates may double input spend. Another 900-token image retained for
+five requests adds $5.40/day per 100, including retries. The description also
+applies to image-free funded generations and is already counted above.
+
+Actual gateway image reservation uses reviewed 309/3,001/36,001-token bounds for
+low/high/absent-auto detail. These are admission bounds, not actual small-image
+cost. Four images over retained history, 256KiB request envelope, model/image
+policy, current grants and spending ceilings remain authoritative. No saving
+from fewer failures or compactions is assumed.
+
+Upstream backend schema exposure separately adds approximately 13 outer tokens:
+100k daily generations plus 20% retries/no cache adds $3.12/day on Sonnet 5 ($2/$10)
+or $6.24/day on Opus 5.5 ($4/$20); at 1 million, $31.20/$62.40. This is an inherited
+backend change, not another Windows-adapter delta. Conditional workspace-mode
+repair at 20k input/150 output on Opus 5.5 plus 20% retries is $0.0996 each, or
+$1.00/$9.96/$99.60 per day for 10/100/1,000 repairs. Count only work not already
+inside a full-task allowance. No classifier, summarizer, embedding or polling
+generation is added.
+
+Optional tool use remains **$0/day while its flag is off**. If independently
+enabled, the documented 2,000 retained tokens × 10 reads plus two 20k-input/500-output
+continuations with 20% retries/no cache adds $78/day per 100 tool tasks; 16k retained
+tokens makes it $246/day. Original context plus enabled tools for the same 100
+tasks is $90.68–117.01/day under those assumptions. Newly successful Windows
+workloads require the complete ordinary task allowance: 200k input/20k output
+across orchestration/history/continuations plus 20% retries gives $3.60/task,
+$360/$3,600/$36,000 per day at 100/1,000/10,000. Half/double workload gives
+$1,800–7,200/day at 1,000. Do not add included context costs twice; add only
+uncovered global exposures/repair work. Existing 32k compaction is already in
+the Windows baseline, not another integration delta. Provider spend is separate
+from credits/revenue. No new paid nested service or live paid evaluation is
+proposed; runtime replay uses simulated providers.
