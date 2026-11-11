@@ -192,9 +192,12 @@ lost response. Receipts under the private `command-jobs` directory retain job
 identity, command hash, timing, exit status and bounded output for 24 hours
 (maximum 256 records). A missing supervisor is an unknown outcome, never an
 automatic replay. Inspect an interrupted command locally before resuming work.
+`shapes-bridge status` reports a pending lock, its job ID and the command that
+releases it. The lock is local state: it survives restart, update, uninstall and
+re-pairing, and a re-paired computer's chats cannot see the blocking job ID.
 After inspecting it and stopping any remaining processes, the owner can run
-`shapes-bridge acknowledge-command <job_id>` locally to release its mutation
-lock. This also recovers a lock stranded by a crash after a final receipt was
+`shapes-bridge acknowledge-command` locally to release the mutation lock (a
+`<job_id>` argument is optional, since only one lock can exist). This also recovers a lock stranded by a crash after a final receipt was
 saved. If the launcher died before saving its first receipt, acknowledgement
 commits an interrupted receipt before releasing the orphan lock. A live launcher
 or supervisor prevents acknowledgement. Existing receipts stay unchanged and

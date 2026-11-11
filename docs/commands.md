@@ -32,7 +32,8 @@ Cancellation acknowledgement is not cleanup confirmation. On POSIX, the shell
 process group and descendant groups observed before termination receive TERM,
 then KILL; a bounded exit check establishes `cleanup_confirmed`. Signal denial or
 missing ancestry evidence remains `outcome_unknown:true`. Unconfirmed termination
-keeps the mutation fence until the owner reconciles the command locally. Saved
+keeps the mutation fence until the owner reconciles the command locally
+(`status` names the pending job; `acknowledge-command` releases it). Saved
 PIDs alone never authorize a new reader to signal a process. Already orphaned
 daemons are outside the ancestry boundary; earlier writes cannot be undone.
 

@@ -95,6 +95,31 @@ function release(id) {
   } catch (cause) { if (cause.code !== "ENOENT") throw cause; }
 }
 
+// Read-only view of the mutation lock for the local owner. The lock survives
+// restart, update, uninstall and re-pairing, and a re-paired device's new scope
+// cannot learn the blocking job ID remotely. Never settles or changes a receipt.
+function pendingLock() {
+  let lock;
+  try { lock = JSON.parse(fs.readFileSync(lockFile(), "utf8")); }
+  catch (cause) {
+    if (cause.code === "ENOENT") return null;
+    if (!(cause instanceof SyntaxError)) throw cause;
+  }
+  const id = lock && typeof lock.id === "string" && HEX.test(lock.id) ? lock.id : null;
+  if (!id) return { job_id: null, state: "unreadable", running: false, created_at: null, file: lockFile() };
+  let record;
+  try { record = load(id); }
+  catch (cause) { if (cause.errorType !== "command_not_found") throw cause; }
+  if (!record) {
+    return { job_id: id, state: "interrupted", created_at: lock.created_at ?? null,
+      running: Number.isInteger(lock.launcher_pid) && lock.launcher_pid > 0 && alive(lock.launcher_pid) };
+  }
+  const supervisor = supervisorPid(record);
+  const running = Boolean(supervisor && alive(supervisor)) || (!TERMINAL.has(record.state) && Date.now() - record.created_at <= 10000);
+  // A non-terminal receipt whose supervisor is gone is what status() settles as interrupted.
+  return { job_id: id, state: running || TERMINAL.has(record.state) ? record.state : "interrupted", created_at: record.created_at, running };
+}
+
 function claim(id, scope, metadata) {
   if (ephemeralMutation) throw error("Another computer mutation is running. Wait for its receipt.", 409, "computer_busy");
   ensureStateDir();
@@ -237,4 +262,4 @@ async function mutation(run) {
   try { return await run(); } finally { ephemeralMutation = false; }
 }
 
-module.exports = { start, status, cancel, mutation, acknowledgeInterrupted, root, load, save, release, TERMINAL };
+module.exports = { start, status, cancel, mutation, acknowledgeInterrupted, pendingLock, root, load, save, release, TERMINAL };
