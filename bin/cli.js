@@ -34,9 +34,24 @@ function openBrowser(url) {
   child.unref();
 }
 
+const DAMAGED_LOCK = (file) => `A damaged command lock blocks new commands: ${file}\nCheck that nothing from an earlier command is still running on this computer, then delete that file.`;
+
+// The owner's only way to learn why commands are refused after re-pairing.
+function lockNotice() {
+  let lock;
+  try { lock = require("../src/command-jobs").pendingLock(); }
+  catch { return; }
+  if (!lock) return;
+  if (!lock.job_id) return log(DAMAGED_LOCK(lock.file));
+  if (lock.running) return log(`A computer command is running (job ${lock.job_id}). New commands wait until it finishes.`);
+  const launcher = fs.existsSync(runtimePaths().launcher) ? `"${runtimePaths().launcher}"` : "shapes-bridge";
+  const started = Number.isFinite(lock.created_at) ? `, started ${new Date(lock.created_at).toISOString()}` : "";
+  log(`Commands are blocked. An earlier command (${lock.state}${started}) did not release its safety lock, so new commands are refused until you review it. Restarting, updating or reinstalling does not clear this.\nCheck that nothing from that command is still running on this computer, then run:\n  ${launcher} acknowledge-command ${lock.job_id}\nThis releases the lock. It does not retry the command or mark it successful.`);
+}
+
 function showStatus() {
   const config = readState("config");
-  if (!config) { log("This computer is not connected. Run: npx --yes --package=https://github.com/shapesinc/bridge/archive/refs/heads/main.tar.gz shapes-bridge install"); return; }
+  if (!config) { log("This computer is not connected. Run: npx --yes --package=https://github.com/shapesinc/bridge/archive/refs/heads/main.tar.gz shapes-bridge install"); lockNotice(); return; }
   const status = readState("status");
   const recent = status?.updated_at && Date.now() - Date.parse(status.updated_at) < 90000;
   const connection = config.paused ? "paused" : config.revoked ? "removed from your account" : recent ? status.connection : "offline";
@@ -47,6 +62,7 @@ function showStatus() {
     for (const [name, value] of Object.entries(status.permissions)) log(`${name.replace(/_/g, " ")}: ${value}`);
   }
   if (recent && status?.error && !config.revoked) log(status.error);
+  lockNotice();
   log("Manage computers and chat access in shapes.inc. Local controls: status, restart, pause, resume, update, permissions, logs, uninstall.");
 }
 
@@ -129,9 +145,17 @@ async function main() {
     }
   }
   if (command === "acknowledge-command") {
-    if (!argv[1]) throw new Error("After inspecting a finished or interrupted command and stopping any remaining processes locally, use acknowledge-command <job_id>. This does not retry it or mark it successful.");
-    require("../src/command-jobs").acknowledgeInterrupted(argv[1]);
-    log("Command lock acknowledged locally. Existing receipts are unchanged; an orphan lock receives an interrupted receipt. New computer operations are allowed. The command was not replayed.");
+    const jobs = require("../src/command-jobs");
+    let id = argv[1];
+    if (!id) {
+      // Only one mutation lock can exist, so the owner need not copy its ID.
+      const lock = jobs.pendingLock();
+      if (!lock) { log("No command lock is pending. New computer operations are already allowed."); return; }
+      if (!lock.job_id) throw new Error(DAMAGED_LOCK(lock.file));
+      id = lock.job_id;
+    }
+    jobs.acknowledgeInterrupted(id);
+    log(`Job ${id}: command lock acknowledged locally. Existing receipts are unchanged; an orphan lock receives an interrupted receipt. New computer operations are allowed. The command was not replayed.`);
     return;
   }
   if (command === "logs") {
@@ -141,7 +165,7 @@ async function main() {
     return;
   }
   if (["--help", "help", "-h"].includes(command)) {
-    log("shapes.inc Bridge\n  install       Pair once and install the background connection\n  status        Connection and native permission status\n  restart       Restart the background connection\n  update        Install the latest shapes.inc Bridge without pairing again\n  open          What opening the app does: restart, or resume when paused\n  pause         Disconnect and stop automatic startup\n  resume        Reconnect and restore automatic startup\n  permissions   Set up every computer permission in one pass (or name one:\n                accessibility, screen_recording, full_disk_access, automation)\n  awake on|off  Keep the computer awake while connected\n  logs          Recent local activity (may contain private command text)\n  uninstall     Revoke account access and remove the background service\n  foreground    Temporary legacy connection until the terminal closes\n\nInstall options: --name <name>, --no-open, --no-awake, --no-permissions\nDevelopment: --api-url http://127.0.0.1:<port>, --state-dir <directory>");
+    log("shapes.inc Bridge\n  install       Pair once and install the background connection\n  status        Connection and native permission status\n  restart       Restart the background connection\n  update        Install the latest shapes.inc Bridge without pairing again\n  open          What opening the app does: restart, or resume when paused\n  pause         Disconnect and stop automatic startup\n  resume        Reconnect and restore automatic startup\n  permissions   Set up every computer permission in one pass (or name one:\n                accessibility, screen_recording, full_disk_access, automation)\n  awake on|off  Keep the computer awake while connected\n  logs          Recent local activity (may contain private command text)\n  acknowledge-command  Release a stuck command lock after checking that\n                nothing from it is still running (status shows when one is pending)\n  uninstall     Revoke account access and remove the background service\n  foreground    Temporary legacy connection until the terminal closes\n\nInstall options: --name <name>, --no-open, --no-awake, --no-permissions\nDevelopment: --api-url http://127.0.0.1:<port>, --state-dir <directory>");
     return;
   }
   const config = readState("config");
@@ -201,6 +225,7 @@ async function main() {
     }
     removeState("config"); removeState("status"); removeState("permission-request");
     log("Disconnected and removed from your shapes.inc account. Automatic startup is removed. Local runtime and private logs remain in " + stateDir() + ".");
+    lockNotice();
   } else throw new Error(`Unknown command: ${command}. Run help for available commands.`);
 }
 
