@@ -28,6 +28,20 @@ test("private stdio returns fixed errors, contains no diagnostics, and disposes 
   input.end(); await tick(); assert.equal(disposed, true); assert.equal(closed, true);
 });
 
+test("runtime liveness is available only to the opted-in native stdio host", async () => {
+  const request = { version: 1, id: "private-lifecycle", operation: "lifecycleStatus", params: {} };
+  assert.throws(() => parseRequest(JSON.stringify(request)), { code: "invalid_request" });
+  assert.deepEqual(parseRequest(JSON.stringify(request), { allowLifecycle: true }), request);
+  assert.throws(() => parseRequest(JSON.stringify({ ...request, params: { userId: "forged" } }), { allowLifecycle: true }), { code: "invalid_request" });
+  const input = new PassThrough(), output = new PassThrough(); let text = "";
+  output.on("data", part => { text += part; });
+  const protocol = serveEmbeddedProtocol({ input, output, allowLifecycle: true,
+    controller: { lifecycleStatus: async () => ({ active: true }), dispose: async () => {} } });
+  input.write(JSON.stringify(request) + "\n"); await tick();
+  assert.deepEqual(JSON.parse(text), { version: 1, id: request.id, result: { active: true } });
+  await protocol.close();
+});
+
 test("oversized partial line closes the controller before any operation", async () => {
   const input = new PassThrough(), output = new PassThrough(); let calls = 0, disposed = false;
   serveEmbeddedProtocol({ input, output, controller: { status() { calls++; }, async dispose() { disposed = true; } } });

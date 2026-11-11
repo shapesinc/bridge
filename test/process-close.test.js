@@ -20,3 +20,23 @@ test("shutdown reports an unconfirmed parent exit within its bound", async (t) =
   assert.ok(Date.now() - started < 1000);
   assert.doesNotThrow(() => process.kill(child.pid, 0));
 });
+
+
+test("short provider grace does not preempt the native cleanup receipt window", async () => {
+  const { EventEmitter } = require("node:events");
+  const { spawnOwned, signalOwned, ownedCleanup } = require("../src/owned-process");
+  const child = new EventEmitter();
+  Object.assign(child, { pid: 123, exitCode: null, signalCode: null,
+    kill: () => assert.fail("must wait for the native cleanup bound"), unref() {} });
+  child.stdio = Array.from({ length: 6 }, () => Object.assign(new EventEmitter(), { destroy() {} }));
+  [child.stdin, child.stdout, child.stderr] = child.stdio;
+  child.stdio[4].end = () => setTimeout(() => {
+    child.stdio[5].emit("data", Buffer.from("job-empty\n")); child.stdio[5].emit("end");
+    child.exitCode = 130; child.emit("exit", 130, null);
+  }, 300);
+  spawnOwned("C:\\node.exe", [], { cleanupReceipt: true, stdio: ["pipe", "pipe", "pipe"] },
+    { platform: "win32", host: "C:\\Job.exe", exists: () => true, spawnProcess: () => child });
+  const result = await closeProcessGroup(child, { graceMs: 250, exitTimeoutMs: 500,
+    signal: (_pid, name) => signalOwned(child, name, { platform: "win32" }) });
+  assert.equal(result.processExited, true); assert.equal(ownedCleanup(child), true);
+});

@@ -39,7 +39,7 @@ const { expandHome } = require("./local-workspace");
 const { bundledRuntime } = require("./bundled-runtime");
 const { createComputerControl } = require("./computer");
 const { createSession, startSessionTurn, readSession, sessionEvents } = require("./sessions");
-const { supportsToolProxy } = require("./native-tool-proxy");
+const { runtimeCapabilities } = require("./runtime-capabilities");
 const { runCommand: startCommandProcess } = require("./command-process");
 const { commandStatus, cancelCommand } = require("./commands");
 
@@ -48,7 +48,7 @@ const MAX_FILE_READ = 100000;
 const MAX_DIRECTORY_ENTRIES = 2000;
 
 const CAPABILITIES = {
-  computer: "observe the Mac screen or send one keyboard/mouse action (requires computer_control capability)",
+  computer: "observe the desktop screen or send one keyboard/mouse action (requires computer_control capability)",
   run: "run a shell command",
   write: "create or replace a file",
   read: "read a file",
@@ -132,6 +132,7 @@ function readBody(req, limit = 50 * 1024 * 1024) {
 function runCommand(body) { return startCommandProcess(body).result; }
 
 
+
 function openTarget(target) {
   const t = expandHome(target);
   const platform = process.platform;
@@ -206,9 +207,8 @@ function startServer({ port, token, computerControl = createComputerControl(), p
     }
     if (route === "/capabilities" && method === "GET") {
       return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: {
-        command_jobs: true, interactive_codex: true, idempotent_start: true, job_list: true, bundled_sessions: bundledRuntime().available,
-        session_input: bundledRuntime().available,
-        native_tool_proxy: supportsToolProxy() && bundledRuntime().available, computer_control: computerControl.available() } });
+        command_jobs: true, interactive_codex: true, idempotent_start: true, job_list: true,
+        ...runtimeCapabilities(), computer_control: computerControl.available() } });
     }
 
     // Everything below requires the token.
@@ -374,11 +374,13 @@ function startServer({ port, token, computerControl = createComputerControl(), p
       if (route === "/run" && method === "POST") {
         const body = await readBody(req);
         if (!body || typeof body.cmd !== "string" || !body.cmd.trim()
-            || (body.cwd !== undefined && typeof body.cwd !== "string")) {
+            || (body.cwd !== undefined && typeof body.cwd !== "string")
+            || (body.shell !== undefined && !["sh", "powershell", "cmd"].includes(body.shell))) {
           return sendJson(res, 400, { error: "Supply cmd text and optional cwd text." });
         }
         log(`RUN: ${body.cmd}   (cwd=${body.cwd || process.cwd()})`);
-        const { stopped, cleanup_confirmed, ...result } = await commandJobs.mutation(() => runCommand(body));
+        // Cancellation handles remain private to the runtime, never remote JSON.
+        const { stopped, cleanup_confirmed, ...result } = await commandJobs.mutation(() => runCommand({ cmd: body.cmd, cwd: body.cwd, timeout: body.timeout, shell: body.shell }));
         return sendJson(res, 200, result);
       }
 

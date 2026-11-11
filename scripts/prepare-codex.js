@@ -18,14 +18,16 @@ const option = (name, fallback) => {
 };
 const cache = path.resolve(option("--cache", path.join(os.homedir(), ".cache/shapes-bridge-codex", manifest.version)));
 const output = option("--out");
-const architectures = option("--arch") ? [option("--arch")] : Object.keys(manifest.packages);
+const platform = option("--platform", "darwin");
+const architectures = option("--arch") ? [option("--arch")] : platform === "win32" ? ["x64"] : Object.keys(manifest.packages);
 async function main() {
   if (!output) throw new Error("--out directory is required");
+  if (!["darwin", "win32"].includes(platform)) throw new Error("Unsupported package platform.");
   fs.mkdirSync(cache, { recursive: true });
   for (const arch of architectures) {
-    const artifact = manifest.packages[arch];
+    const artifact = platform === "darwin" ? manifest.packages[arch] : manifest.platformPackages[`${platform}-${arch}`];
     if (!artifact) throw new Error("Only arm64 and x64 packages are supported.");
-    const archive = path.join(cache, `${arch}.tar.gz`);
+    const archive = path.join(cache, platform === "darwin" ? `${arch}.tar.gz` : `${platform}-${arch}.tar.gz`);
     if (!fs.existsSync(archive)) {
       const url = `${manifest.repository}/releases/download/${manifest.tag}/${artifact.asset}`;
       const temporary = `${archive}.${process.pid}.download`;
@@ -43,17 +45,19 @@ async function main() {
     try {
     execFileSync("tar", ["-xzf", archive, "-C", staging]);
     const packaged = JSON.parse(fs.readFileSync(path.join(staging, "codex-package.json"), "utf8"));
+    const suffix = platform === "win32" ? ".exe" : "";
+    const target = platform === "win32" ? "x86_64-pc-windows-msvc" : arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
     if (packaged.version !== manifest.version || packaged.variant !== "codex-app-server"
-        || packaged.entrypoint !== "bin/codex-app-server"
-        || packaged.target !== (arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin")) throw new Error("Unexpected Codex package layout.");
-    for (const binary of ["bin/codex-app-server", "bin/codex-code-mode-host", "bin/codex-exec-server", "codex-path/rg"]) {
+        || packaged.entrypoint !== `bin/codex-app-server${suffix}` || packaged.target !== target) throw new Error("Unexpected Codex package layout.");
+    for (const binary of ["bin/codex-app-server", "bin/codex-code-mode-host", "bin/codex-exec-server", "codex-path/rg"].map(file => file + suffix)
+      .concat(platform === "win32" ? ["codex-resources/codex-command-runner.exe", "codex-resources/codex-windows-sandbox-setup.exe"] : [])) {
       fs.accessSync(path.join(staging, binary), fs.constants.X_OK);
     }
     fs.cpSync(path.resolve(__dirname, "../assets/codex"), path.join(staging, "licenses"), { recursive: true });
     fs.rmSync(destination, { recursive: true, force: true });
     fs.renameSync(staging, destination);
     } finally { fs.rmSync(staging, { recursive: true, force: true }); }
-    process.stdout.write(`Verified Codex ${manifest.version} ${arch}: ${artifact.sha256}\n`);
+    process.stdout.write(`Verified Codex ${manifest.version} ${platform}/${arch}: ${artifact.sha256}\n`);
   }
 }
 main().catch((error) => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });

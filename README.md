@@ -70,7 +70,7 @@ even though this package also contains the separate `shapes-codex` command.
 
 ## Controls and computer permissions
 
-The signed macOS bundle exposes authenticated `POST /computer` when
+The signed desktop bundle exposes authenticated `POST /computer` when
 `GET /capabilities` reports `features.computer_control`. The server accepts
 `{scope, control}`; `scope` is a server-derived actor/chat/connection digest,
 never a model-provided identity. `control.operation` is `observe`, `click`,
@@ -86,7 +86,12 @@ never by replaying input. The receipt says `dispatched`, not that the task worke
 The bundled `shapes.inc Bridge Computer` executable captures with ScreenCaptureKit
 and posts CoreGraphics events; it checks consent in that process and never changes
 the clipboard or prompts for permission from a remote action. Installation without
-that signed native executable advertises the capability as unavailable. Existing
+that signed native executable advertises the capability as unavailable. The
+Windows bundle uses `shapes.inc Bridge Computer.exe` with desktop capture and
+Windows input APIs. It validates the foreground window, display geometry,
+interactive desktop and protected-input state before dispatch. See
+[Windows computer control](scripts/windows/COMPUTER_CONTROL.md) for platform
+semantics and required signed-candidate acceptance. Existing
 shell/file actions retain their contracts. Screenshots and typed text are not logged.
 
 The installer creates a local command that works without npm or network access.
@@ -176,6 +181,12 @@ Recoverable commands use `/commands/start`, `/commands/status` and
 supervisor enforces the command deadline independently of the HTTP connection.
 On Linux user-service installations, each supervisor runs in a separate systemd
 user scope so restarting the connection does not kill an in-flight command.
+Native app-owned runtimes keep their existing cancellation boundary: explicit
+pause, logout, disconnect, update retirement or owner termination stops owned
+commands too. An interrupted command keeps its receipt and mutation lock until
+the local owner reconciles it; reopening the app never replays it. A foreground
+close or Quit merely detaches from an established background connection and
+does not retire its runtime. This differs from an explicit disconnect.
 Poll the receipt after a timeout; never submit a second command to recover a
 lost response. Receipts under the private `command-jobs` directory retain job
 identity, command hash, timing, exit status and bounded output for 24 hours
@@ -211,17 +222,17 @@ and updates fetch `main`; signed macOS installation downloads
 
 Use the following coordinated sequence after release authorization:
 
-The original-input and connected-tool candidate uses **0.2.10**, preserving the
-separate Windows parity candidate's 0.2.9 version and retained artifacts. Its
-runtime is the reviewed `4bb147fd658541761a10577134b7a491fd267348` implementation;
-the 0.2.10 preparation changes package metadata and release documentation only.
-It does not incorporate the unmerged Windows parity changes. Pin the native app
-to the exact 0.2.10 candidate commit, publish and verify that compatible native
-release, then publish and verify the 0.2.10 standalone asset before merging its
-installer metadata onto `main`. Preserve the current public 0.2.8 and pending
-0.2.9 artifacts; never relabel them. Runtime acceptance gaps and operating-cost
-assumptions remain in [built-in sessions](docs/bundled-sessions.md) and
-[native capability transport](docs/native-tool-proxy.md).
+The separate original-input/connected-tool release uses **0.2.10**. The Windows
+parity integration now uses **0.2.11**, combining the reviewed 0.2.9 Windows
+runtime with that incoming input/context/tool source and an authenticated Windows
+local-channel adapter. Preserve all prior signed artifacts and tags; never
+relabel a changed helper. Both desktop pins must identify the same tested
+combined source. Publish an accepted compatible native release, then verify the
+same-version standalone asset as latest, before merging bumped installer metadata.
+The new connected-tool flag remains off. See [transport contracts and costs](docs/native-tool-proxy.md)
+and [input/context cost scenarios](docs/bundled-sessions.md#integrated-windows-input-cost-and-acceptance).
+No new public artifact, standalone publication or completed installed acceptance
+is claimed by this source integration.
 
 1. Prepare a dedicated worktree from current `origin/main`, an unused numeric
    `major.minor.patch` package version, and a reviewed release-candidate commit.
@@ -409,6 +420,13 @@ files. `SHAPES_CODEX_BINARY` and `SHAPES_CLAUDE_BINARY` can select explicit
 executables. Claude needs the current headless permission controls, including
 `--permission-prompts none` (added in Claude Code 2.1.259).
 
+The app-owned Windows host checks native `.exe` installs on PATH, the user's
+local bin directory and official npm Codex platform packages. Its bundled Job
+helper owns discovery and execution subprocesses. Installed native hosts ignore
+shell overrides of their runtime binaries. [Windows host contracts and release
+gates](docs/windows-native-host.md) describe foreground quit, task lifetime and
+the same pairing, account and budget boundaries used by macOS.
+
 All agent endpoints require the same `X-Token` header as other machine actions:
 
 - `GET /agents` returns `agents` with `id`, `installed`, `authenticated`,
@@ -567,7 +585,9 @@ bounded logs remain under `~/.shapes-bridge/codex-jobs/` with private permission
 (directories 0700, files 0600); the historical directory name also holds Claude
 jobs. Remove a finished job's directory to delete its local records.
 `SHAPES_CODEX_JOB_DIR` overrides that storage location. The launcher currently
-supports macOS and Linux.
+supports macOS and Linux; the app-owned Windows distribution adds the native
+Job helper needed to enforce the same task cancellation boundary. Foreground
+Windows app quit detaches from its durable host and preserves established work.
 
 Discovery adds **$0/day in inference cost**. Delegated tasks use the selected
 agent's account plan or configured provider; the launcher adds no classifier,

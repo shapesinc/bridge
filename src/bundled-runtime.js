@@ -10,7 +10,7 @@ const VERSION = require("../assets/codex/runtime.json").version;
 const expiryMillis = (value) => typeof value === "number" ? value * 1000 : typeof value === "string" ? Date.parse(value) : NaN;
 function bundledRuntime() {
   const executable = process.env.SHAPES_BUNDLED_CODEX_BINARY
-    || path.resolve(__dirname, "../../codex", process.arch, "bin/codex-app-server");
+    || path.resolve(__dirname, "../../codex", process.arch, process.platform === "win32" ? "bin/codex-app-server.exe" : "bin/codex-app-server");
   try {
     fs.accessSync(executable, fs.constants.X_OK);
     if (!fs.statSync(executable).isFile()) throw new Error("Not a file");

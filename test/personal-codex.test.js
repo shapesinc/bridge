@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test"), assert = require("node:assert/strict");
 const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
-const { personalConfiguration, createAccountClient, inspectBundledPersonal, createPersonalLoginManager, validLoginURL } = require("../src/personal-codex");
+const { personalConfiguration, createAccountClient, inspectBundledPersonal, createPersonalLoginManager, validLoginURL, openBrowser } = require("../src/personal-codex");
 const { publicAgent, inspectAgent } = require("../src/agents");
 const { createEmbeddedController } = require("../src/embedded");
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -189,4 +189,25 @@ test("native private cancellation requires current account and does not touch ex
   assert.deepEqual(await controller.cancelAgentLogin({ expectedUserId: "owner", agent: "codex" }), { cancelled: true });
   await assert.rejects(controller.cancelAgentLogin({ expectedUserId: "other", agent: "codex" }), { code: "account_changed" });
   await controller.dispose();
+});
+
+
+test("provider browser handoff preserves a literal URL on each platform and rejects other origins", async () => {
+  const url = "https://auth.openai.com/authorize?state=quote'&literal=$value";
+  for (const platform of ["darwin", "win32", "linux"]) {
+    let launch;
+    await openBrowser(url, { platform, execute: (file, args, options, done) => {
+      launch = { file, args, options }; done(null);
+    } });
+    assert.equal(launch.options.timeout, 10000);
+    if (platform === "win32") {
+      assert.match(launch.file, /WindowsPowerShell.*powershell\.exe$/);
+      assert.equal(launch.args.at(-2), "-EncodedCommand");
+      assert.equal(Buffer.from(launch.args.at(-1), "base64").toString("utf16le"),
+        "Start-Process -FilePath 'https://auth.openai.com/authorize?state=quote''&literal=$value'");
+    } else assert.deepEqual(launch.args, [url]);
+  }
+  for (const url of ["https://other.invalid/", "https://user@auth.openai.com/", "file:///private"]) {
+    await assert.rejects(openBrowser(url, { platform: "win32", execute: () => assert.fail("must not launch") }), /Invalid provider/);
+  }
 });

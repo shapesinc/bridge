@@ -110,6 +110,10 @@ test("unauthorized commands and writes have no side effects; invalid paths expla
   for (const body of [null, {}, { cmd: 1 }, { cmd: "pwd", cwd: [] }]) assert.equal((await f.request("/run", body)).status, 400);
   const failed = await f.request("/run", { cmd: "printf intentional-error >&2; exit 7", cwd: f.directory });
   assert.deepEqual(failed.body, { exit_code: 7, stdout: "", stderr: "intentional-error", shell: "sh", output_truncated: false });
+  const untrustedSignal = await f.request("/run", { cmd: "printf transport-ok", cwd: f.directory, signal: {} });
+  assert.deepEqual(untrustedSignal.body, { exit_code: 0, stdout: "transport-ok", stderr: "", shell: "sh", output_truncated: false });
+  assert.equal((await f.request("/run", { cmd: "printf must-not-run", shell: {} })).status, 400);
+
 });
 
 test("command timeout stops descendants before reporting, without late file writes", { skip: process.platform === "win32" }, async (t) => {

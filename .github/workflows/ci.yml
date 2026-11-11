@@ -33,16 +33,79 @@ jobs:
           SHAPES_TEST_SYSTEMD=1 node --test test/systemd-commands.test.js
       - run: npm pack --dry-run
 
-  windows-native:
+  windows-runtime:
     runs-on: windows-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
       matrix:
         node: [18, 22]
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - run: node --test test/windows-native.test.js test/command-jobs.test.js test/runtime.test.js
-
+      - name: Compile Windows process owner
+        shell: pwsh
+        run: |
+          $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+          $output = Join-Path $env:RUNNER_TEMP 'shapes.inc Bridge Job.exe'
+          $source = Join-Path $PWD 'scripts\windows\JobHost.cs'
+          & $compiler /nologo /optimize+ /target:winexe /platform:x64 "/out:$output" $source
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "SHAPES_TEST_JOB_HOST=$output" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Verify native process ownership and durable connection transport
+        run: node --test --test-concurrency=1 test/owned-process.test.js test/account-revocation.test.js test/embedded-host.test.js test/embedded-startup-runtime.test.js test/windows-job.test.js test/windows-standalone-native.test.js test/windows-launch-native.test.js test/windows-owned-native.test.js test/windows-command-native.test.js test/windows-cleanup-native.test.js test/windows-command-jobs-native.test.js test/windows-native.test.js test/command-jobs.test.js test/runtime.test.js test/private-channel.test.js test/native-tool-proxy.test.js test/native-tool-mcp.test.js test/tool-supervisor-cleanup.test.js
+      - name: Replay original inputs and connected tools through the pinned Windows runtime
+        if: ${{ matrix.node == 22 }}
+        shell: pwsh
+        run: |
+          node scripts/prepare-codex.js --platform win32 --arch x64 --cache "$env:RUNNER_TEMP/codex-cache" --out "$env:RUNNER_TEMP/codex-runtime"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+          $snapshot = Join-Path $env:RUNNER_TEMP 'ProcessSnapshot.exe'
+          $source = Join-Path $PWD 'test\fixtures\windows\ProcessSnapshot.cs'
+          & $compiler /nologo /target:exe /platform:x64 "/out:$snapshot" $source
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $nodeDir = Join-Path $env:RUNNER_TEMP 'bridge-replay-node'
+          New-Item -ItemType Directory -Path $nodeDir | Out-Null
+          $node = Join-Path $nodeDir 'node.exe'
+          Copy-Item (Get-Command node).Source $node
+          Copy-Item $env:SHAPES_TEST_JOB_HOST (Join-Path $nodeDir 'shapes.inc Bridge Job.exe')
+          $env:SHAPES_TEST_PROCESS_SNAPSHOT = $snapshot
+          $env:SHAPES_BUNDLED_CODEX_BINARY = Join-Path $env:RUNNER_TEMP 'codex-runtime/x64/bin/codex-app-server.exe'
+          $env:SHAPES_CANARY_REPORT = Join-Path $env:RUNNER_TEMP 'windows-input-replay.json'
+          $env:SHAPES_NATIVE_TOOLS_REPORT = Join-Path $env:RUNNER_TEMP 'windows-tools-replay.json'
+          & $node scripts/replay-bundled-sessions.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $node scripts/replay-native-tools.js
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile Windows computer helper and throwaway fixture
+        id: computer
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $helper = Join-Path $env:RUNNER_TEMP 'shapes.inc Bridge Computer.exe'
+          ./scripts/windows/build-computer.ps1 -OutputPath $helper
+          $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+          $fixture = Join-Path $env:RUNNER_TEMP 'ComputerFixture.exe'
+          $source = Join-Path $PWD 'scripts\windows\ComputerFixture.cs'
+          & $compiler /nologo /target:exe /platform:x64 /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll "/out:$fixture" $source
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "SHAPES_TEST_COMPUTER_HELPER=$helper" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SHAPES_TEST_COMPUTER_FIXTURE=$fixture" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $medium = Join-Path $env:RUNNER_TEMP 'MediumProcess.exe'
+          $source = Join-Path $PWD 'test\fixtures\windows\MediumProcess.cs'
+          & $compiler /nologo /target:exe /platform:x64 "/out:$medium" $source
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "SHAPES_TEST_MEDIUM_PROCESS=$medium" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Exercise native Windows observe and input on owned fixture
+        if: ${{ !cancelled() && steps.computer.outcome == 'success' }}
+        shell: pwsh
+        # PowerShell does not wait for a directly invoked GUI executable.
+        # Keep an explicit native parent alive through the complete test run.
+        run: >-
+          node -e "const r=require('node:child_process').spawnSync(process.env.SHAPES_TEST_JOB_HOST,
+          ['--parent-pid',String(process.pid),'--',process.env.SHAPES_TEST_MEDIUM_PROCESS,'--',process.execPath,
+          '--test','--test-concurrency=1','test/computer.test.js','test/windows-computer.test.js','test/windows-computer-native.test.js'],
+          {stdio:'inherit',windowsHide:true});if(r.error)throw r.error;process.exit(r.status===null?1:r.status)"

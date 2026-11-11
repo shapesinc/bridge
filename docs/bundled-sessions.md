@@ -34,7 +34,7 @@ Funding tokens are supplied through the supervisor environment and never written
 
 Existing execution semantics are preserved: read-only uses the native read-only sandbox; authorized write mode uses the existing full-access execution setting, with primary Git checkouts rejected in favor of dedicated worktrees. Plain folders do not require Git or macOS Command Line Tools. A cwd is not a filesystem isolation boundary. Cancellation owns the app-server process group; intentionally escaped detached daemons are not guaranteed to terminate.
 
-`/agents/cancel` acknowledges the cancellation request; callers must read status for the terminal result. Once the runner observes cancellation, it gives its process group 1.5 seconds to exit after SIGTERM, escalates to SIGKILL, and waits at most another 1.5 seconds for the owned parent to exit. It then closes its own pipes, so an escaped descendant holding stdout cannot keep the receipt pending. If parent exit cannot be confirmed, the job fails with `process_exit_unconfirmed` instead of claiming cancellation completed. This same shutdown boundary applies to bundled sessions and personal CLI jobs. It does not guarantee termination of escaped daemons or undo earlier file changes.
+`/agents/cancel` acknowledges the cancellation request; callers must read status for the terminal result. Once the runner observes cancellation, it gives its process group 1.5 seconds to exit after SIGTERM, escalates to SIGKILL, and waits at most another 1.5 seconds for the owned parent to exit. It then closes its own pipes, so an escaped descendant holding stdout cannot keep the receipt pending. If parent exit cannot be confirmed, the job fails with `process_exit_unconfirmed` instead of claiming cancellation completed. This same bounded shutdown contract applies to bundled sessions and personal CLI jobs. Windows uses the private owned-Job receipt described in [commands](commands.md); a wrapper exit without native proof does not confirm cleanup. It does not guarantee termination of escaped daemons or undo earlier file changes.
 
 The signed native host also has `listPersonalAgents({expectedUserId})` and `openAgentLogin({expectedUserId,agent})`. These private operations require the currently verified shapes.inc account; native UI confirms opening sign-in. Discovery returns existing sanitized agent readiness, without executable paths, identities or credentials. Login opens the installed vendor CLI's `codex login` or `claude auth login` through a private, self-deleting Terminal command file. LaunchServices avoids requiring AppleEvents automation permission. `{opened:true}` means handoff only; a fresh readiness check establishes authentication. These are not remote HTTP/model capabilities. Personal accounts require a compatible installed vendor CLI and keep their existing billing/profile; they do not use the isolated funded runtime profile. Vendor OAuth completion remains user-operated.
 
@@ -120,3 +120,62 @@ separate ASGI tests verify that a smaller follow-up can use the same lease; that
 does not establish automatic native recovery. This is simulated transport, not live
 provider/payment verification. Actual coding acceptance on the new package
 remains required.
+
+
+## Integrated Windows input cost and acceptance
+
+The 0.2.11 integration preserves original input, exact-image idempotency and the
+per-thread acknowledged context ledger on both desktop hosts. It retains Windows
+Job ownership, cancellation receipts, finite revocation writer and default-off
+connected-tool admission. Same-SHA packaging and capability equality are separate
+checks; both actual runtime and installed/backend acceptance remain necessary.
+
+The Windows transport adds no model calls or context at unchanged task packets:
+**+$0/day platform-specific overhead**. The inherited original-input behavior is
+not free. Before implementation, the integration disclosed upstream backend
+`76678ee29f4376a1a503bc8a811855637dac83c6`'s [COMPUTER_BRIDGE cost scenarios](https://github.com/shapesinc/app/blob/76678ee29f4376a1a503bc8a811855637dac83c6/architecture/COMPUTER_BRIDGE.md).
+Traffic, adoption and actual cache mix are unknown; these are scenarios, not
+measured daily spend or ceilings. Assumed November 6 Astra prices are $10/M fresh
+input, $1/M cache reads, $12.50/M cache writes, $50/M output; above 272k context,
+base input/output is $20/$75.
+
+Original screenshot example: 200 header+2,000 original text+900 image+151 local
+view_image description tokens = 3,251 additional input tokens, retained across 10
+requests and 20% retries. At 0–75% cached reads, increase is **$12.68–39.01/day
+per 100 affected existing tasks**, or **$126.79–390.12/day per 1,000**. Five–20
+history reads expands to $6.34–78.02/day per 100. Context-key dedup avoids adding
+duplicate source; later history still consumes input. The 151-token description
+is an estimator proxy; using its 655-byte conservative token bound gives $45.06/day
+per 100 uncached tasks. All fresh cache writes raise the base to $48.77/day per 100;
+long-context rates may double input spend. Another 900-token image retained for
+five requests adds $5.40/day per 100, including retries. The description also
+applies to image-free funded generations and is already counted above.
+
+Actual gateway image reservation uses reviewed 309/3,001/36,001-token bounds for
+low/high/absent-auto detail. These are admission bounds, not actual small-image
+cost. Four images over retained history, 256KiB request envelope, model/image
+policy, current grants and spending ceilings remain authoritative. No saving
+from fewer failures or compactions is assumed.
+
+Upstream backend schema exposure separately adds approximately 13 outer tokens:
+100k daily generations plus 20% retries/no cache adds $3.12/day on Sonnet 5 ($2/$10)
+or $6.24/day on Opus 5.5 ($4/$20); at 1 million, $31.20/$62.40. This is an inherited
+backend change, not another Windows-adapter delta. Conditional workspace-mode
+repair at 20k input/150 output on Opus 5.5 plus 20% retries is $0.0996 each, or
+$1.00/$9.96/$99.60 per day for 10/100/1,000 repairs. Count only work not already
+inside a full-task allowance. No classifier, summarizer, embedding or polling
+generation is added.
+
+Optional tool use remains **$0/day while its flag is off**. If independently
+enabled, the documented 2,000 retained tokens × 10 reads plus two 20k-input/500-output
+continuations with 20% retries/no cache adds $78/day per 100 tool tasks; 16k retained
+tokens makes it $246/day. Original context plus enabled tools for the same 100
+tasks is $90.68–117.01/day under those assumptions. Newly successful Windows
+workloads require the complete ordinary task allowance: 200k input/20k output
+across orchestration/history/continuations plus 20% retries gives $3.60/task,
+$360/$3,600/$36,000 per day at 100/1,000/10,000. Half/double workload gives
+$1,800–7,200/day at 1,000. Do not add included context costs twice; add only
+uncovered global exposures/repair work. Existing 32k compaction is already in
+the Windows baseline, not another integration delta. Provider spend is separate
+from credits/revenue. No new paid nested service or live paid evaluation is
+proposed; runtime replay uses simulated providers.

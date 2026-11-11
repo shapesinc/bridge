@@ -15,6 +15,8 @@ process.env.SHAPES_BRIDGE_HOME = path.join(root, "state");
 process.env.SHAPES_CODEX_JOB_DIR = path.join(root, "jobs");
 process.env.SHAPES_BUNDLED_CODEX_BINARY = runtime;
 const { startServer } = require(path.join(bridgeSource, "src/server"));
+const { cancelJob, getStatus } = require(path.join(bridgeSource, "src/codex"));
+const { cleanupReplay } = require("./replay-cleanup");
 const plans = new Map(), receipts = [], requests = [], jobs = [];
 let bridge, origin;
 const modelServer = http.createServer(async (req, res) => {
@@ -236,18 +238,8 @@ function inputImages(value) {
     if (process.env.SHAPES_CANARY_REPORT) fs.writeFileSync(process.env.SHAPES_CANARY_REPORT, JSON.stringify({ error: String(error), receipts }, null, 2));
     console.error(String(error)); process.exitCode = 1;
   } finally {
-    for (const job of jobs) {
-      try {
-        await api('/agents/cancel', { job_id: job });
-        const deadline = Date.now() + 10000;
-        while (Date.now() < deadline) {
-          const value = (await api(`/agents/status?job_id=${job}`)).value;
-          if (['completed', 'failed', 'cancelled', 'timed_out'].includes(value.state)) break;
-        }
-      } catch {}
-    }
-    if (bridge?.listening) await stopBridge();
-    modelServer.closeAllConnections(); await new Promise(resolve => modelServer.close(resolve));
-    fs.rmSync(root, { recursive: true, force: true });
+    await cleanupReplay({ jobs, cancelJob, servers: [bridge, modelServer], root, getState(id) {
+      return { ...JSON.parse(fs.readFileSync(path.join(root, "jobs", id, "state.json"), "utf8")), status: getStatus(id).state };
+    } });
   }
-})();
+})().catch(error => { console.error(error); process.exitCode = 1; });

@@ -74,7 +74,8 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
       const cancelled = await request("/commands/cancel", { job_id: id, scope });
       assert.equal(cancelled.body.cancel_requested, true);
       const final = await request(`/commands/status?job_id=${id}&scope=${scope}`);
-      assert.equal(final.body.state, process.platform === "win32" && !final.body.cleanup_confirmed ? "interrupted" : "cancelled", JSON.stringify(final));
+      assert.equal(final.body.state, "cancelled", JSON.stringify(final));
+      assert.equal(final.body.cleanup_confirmed, true, "successful Stop requires actual process/Job exit proof");
       assert.equal(final.body.exit_code, -1);
       if (process.platform !== "win32") assert.equal(final.body.cleanup_confirmed, true);
       else if (!final.body.cleanup_confirmed) {
