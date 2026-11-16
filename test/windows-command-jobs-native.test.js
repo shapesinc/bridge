@@ -21,7 +21,7 @@ async function waitFor(predicate, timeout = 15000) {
   assert.fail("The Windows command receipt did not settle.");
 }
 
-test("native owner shutdown interrupts a command without replay or releasing its mutation lock", { skip: !available, timeout: 45000 }, async (t) => {
+test("native owner shutdown interrupts a command without replay, and its lock clears with the owner gone", { skip: !available, timeout: 45000 }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-owned-receipt-"));
   const node = path.join(dir, "node.exe"), host = path.join(dir, "shapes.inc Bridge Job.exe");
   fs.copyFileSync(process.execPath, node);
@@ -89,11 +89,8 @@ test("native owner shutdown interrupts a command without replay or releasing its
   assert.equal((await second.request("/commands/start", { ...body, cmd: "Write-Output changed" })).body.error_type, "command_conflict");
   assert.equal((await second.request(`/commands/status?job_id=${id}&scope=${"c".repeat(64)}`)).status, 404);
   const target = path.join(dir, "after-reconcile.txt");
-  assert.equal((await second.request("/write", { path: target, content: "too early" })).body.error_type, "computer_busy");
-  assert.equal(fs.existsSync(target), false);
-
-  // Only the local owner can acknowledge the reconciled unknown outcome.
-  await execute(node, ["-e", "require(process.argv[1]).acknowledgeInterrupted(process.argv[2])", jobsModule, id], { env, timeout: 10000, windowsHide: true });
+  // The owner and its kernel Job are gone, so nothing from that command can
+  // still run: the next mutation releases the lock itself.
   assert.equal((await second.request("/write", { path: target, content: "reconciled" })).status, 200);
   assert.equal(fs.readFileSync(target, "utf8"), "reconciled");
   assert.equal((await second.request("/commands/start", body)).body.state, "interrupted");

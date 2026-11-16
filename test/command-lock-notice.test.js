@@ -9,7 +9,7 @@ const { spawnSync } = require("node:child_process");
 const cli = path.resolve(__dirname, "../bin/cli.js");
 const DEAD_PID = 99999999;
 
-test("the local owner can find and release a stranded command lock without its job ID", { timeout: 30000 }, (t) => {
+test("status releases a lock whose command is gone and reports one that is still running", { timeout: 30000 }, (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-lock-notice-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const run = (...args) => spawnSync(process.execPath, [cli, "--state-dir", dir, ...args], { encoding: "utf8", windowsHide: true, timeout: 10000 });
@@ -31,10 +31,11 @@ test("the local owner can find and release a stranded command lock without its j
   record({ state: "interrupted", finished_at: Date.now() - 50000, supervisor_pid: DEAD_PID,
     result: { exit_code: -1, stdout: "", stderr: "timed out", outcome_unknown: true } });
   lock();
-  const blocked = run("status");
-  assert.match(blocked.stdout, /not connected/);
-  assert.match(blocked.stdout, /Commands are blocked\. An earlier command \(interrupted, started \d{4}-/);
-  assert.match(blocked.stdout, new RegExp(`acknowledge-command ${id}`));
+  const cleared = run("status");
+  assert.match(cleared.stdout, /not connected/);
+  assert.doesNotMatch(cleared.stdout, /Commands are blocked/);
+  assert.equal(fs.existsSync(lockPath), false);
+  lock();
 
   // A live supervisor is reported as running, never as something to release.
   record({ state: "running", supervisor_pid: process.pid });
@@ -46,14 +47,10 @@ test("the local owner can find and release a stranded command lock without its j
   assert.match(refused.stderr, /no live supervisor/);
   assert.equal(fs.existsSync(lockPath), true);
 
-  // Its supervisor died without a receipt: status must not settle the receipt.
+  // Its supervisor died without a receipt: the receipt is settled as
+  // interrupted and the lock is released without the owner.
   record({ state: "running", supervisor_pid: DEAD_PID });
-  assert.match(run("status").stdout, /An earlier command \(interrupted, /);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(jobsDir, `${id}.json`), "utf8")).state, "running");
-
-  const released = run("acknowledge-command");
-  assert.equal(released.status, 0, released.stderr);
-  assert.match(released.stdout, new RegExp(`Job ${id}: command lock acknowledged locally`));
+  assert.doesNotMatch(run("status").stdout, /Commands are blocked/);
   assert.equal(fs.existsSync(lockPath), false);
   assert.equal(JSON.parse(fs.readFileSync(path.join(jobsDir, `${id}.json`), "utf8")).state, "interrupted");
   assert.doesNotMatch(run("status").stdout, /Commands are blocked/);
@@ -63,9 +60,9 @@ test("the local owner can find and release a stranded command lock without its j
   lock({ launcher_pid: process.pid });
   assert.match(run("status").stdout, /A computer command is running/);
   lock();
-  assert.match(run("status").stdout, new RegExp(`acknowledge-command ${id}`));
-  assert.equal(run("acknowledge-command").status, 0);
+  assert.doesNotMatch(run("status").stdout, /Commands are blocked|is running/);
   assert.equal(fs.existsSync(lockPath), false);
+  assert.match(run("acknowledge-command").stdout, /No command lock is pending/);
 
   // A truncated lock cannot be acknowledged; name the file instead of crashing.
   fs.writeFileSync(lockPath, "");

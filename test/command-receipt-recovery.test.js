@@ -67,7 +67,7 @@ test("a supervisor that could not record its start is settled as not run", (t) =
   }
 });
 
-test("without local proof the lock still waits for the owner", async (t) => {
+test("without local proof the outcome stays unknown, and the lock clears once the supervisor is gone", async (t) => {
   home(t);
   const cases = [
     ["5".repeat(64), { state: "running", started_at: 1 }, null],
@@ -79,10 +79,25 @@ test("without local proof the lock still waits for the owner", async (t) => {
   for (const [id, record, pending] of cases) {
     fs.rmSync(lockFile(), { force: true });
     stranded(id, record, pending);
-    assert.equal(jobs.status(id, scope).state, "interrupted", id);
-    assert.equal(fs.existsSync(lockFile()), true, id);
-    await assert.rejects(jobs.mutation(async () => assert.fail("must not run")), { errorType: "computer_busy" });
+    const receipt = jobs.status(id, scope);
+    assert.equal(receipt.state, "interrupted", id);
+    assert.equal(receipt.outcome_unknown, true, id);
+    assert.equal(await jobs.mutation(async () => "ran"), "ran", id);
+    assert.equal(fs.existsSync(lockFile()), false, id);
+    assert.equal(jobs.load(id).state, "interrupted", id);
+    assert.equal(jobs.load(id).released_automatically, true, id);
   }
+});
+
+test("a command whose supervisor is alive keeps the lock", async (t) => {
+  home(t);
+  const id = "b".repeat(64);
+  stranded(id, { state: "running", started_at: 1 }, null);
+  fs.writeFileSync(path.join(jobs.root(), `${id}.json`), JSON.stringify({ ...jobs.load(id), supervisor_pid: process.pid }));
+  await assert.rejects(jobs.mutation(async () => assert.fail("must not run")), { errorType: "computer_busy" });
+  await assert.rejects(jobs.start({ cmd: "echo no", timeout: 5, scope, request_key: "d".repeat(64) }), { errorType: "computer_busy" });
+  assert.equal(fs.existsSync(lockFile()), true);
+  assert.equal(jobs.load(id).state, "running");
 });
 
 test("receipt replacement waits out a longer Windows sharing violation", () => {
