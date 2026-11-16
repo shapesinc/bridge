@@ -32,8 +32,8 @@ Cancellation acknowledgement is not cleanup confirmation. On POSIX, the shell
 process group and descendant groups observed before termination receive TERM,
 then KILL; a bounded exit check establishes `cleanup_confirmed`. Signal denial or
 missing ancestry evidence remains `outcome_unknown:true`. Unconfirmed termination
-keeps the mutation fence until the owner reconciles the command locally
-(`status` names the pending job; `acknowledge-command` releases it). Saved
+keeps the mutation fence only until the command's supervisor has exited; the
+receipt keeps `outcome_unknown:true` (see below). Saved
 PIDs alone never authorize a new reader to signal a process. Already orphaned
 daemons are outside the ancestry boundary; earlier writes cannot be undone.
 
@@ -57,19 +57,28 @@ its mutation fence, while historical protocol0 receipt lookup preserves its
 `failed` plus `outcome_unknown` shape. An ordinary nonzero command exit with
 native proof remains `failed`; successful intentional background handoff remains
 `completed`. A late cancellation cannot rewrite either accepted outcome. Private pipes are disposed at final bounded settlement;
-late data cannot upgrade an unknown receipt. The local `acknowledge-command`
-operation remains the owner's reconciliation path; no remote acknowledgement is
-added. These adapters add no AI call, retry or authorization.
+late data cannot upgrade an unknown receipt. No remote acknowledgement is added: the lock releases itself locally once
+the command's supervisor is gone. These adapters add no AI call, retry or authorization.
 
-One case settles without the owner. A supervisor replaces its receipt by
-writing the complete record beside it and renaming it into place. If that
-rename is refused (Windows does this briefly while another process has the
-receipt open) the supervisor retries for five seconds, then exits and leaves
-the record in `<job>.json.<pid>.tmp` with its reason in `<job>.worker-error`.
-Once that process is gone, the next status or mutation adopts a terminal
-record as the real result, or marks the command as not run when only its
-start could not be recorded, and releases the lock. A receipt whose own
-outcome is unknown still waits for `acknowledge-command`.
+The mutation lock is held only while the command's supervisor is alive (or,
+before a first receipt, its launcher). When a new mutation, a status poll or
+the local `status` command finds a lock whose process is gone, it settles the
+receipt and releases the lock itself; the owner does nothing. On Windows the
+command's kernel Job ends with its supervisor, and on POSIX its process groups
+have already been signalled, so nothing from that command is still running
+under Bridge's ownership. The receipt keeps what is known:
+
+- A supervisor replaces its receipt by writing the complete record beside it
+  and renaming it into place. If Windows refuses the rename it retries for five
+  seconds, then exits, leaving the record in `<job>.json.<pid>.tmp` and its
+  reason in `<job>.worker-error`. A terminal record found there becomes the
+  real result; a record that only shows the start could not be saved means the
+  command never ran and is reported as failed.
+- Otherwise the receipt stays `interrupted` with `outcome_unknown`, marked
+  `released_automatically`. It is never replayed.
+
+A lock file that cannot be parsed is the one case left to the owner: `status`
+names the file.
 
 Successful command stdout/stderr EOF still commits the existing explicit
 background handoff. An atomic native terminal decision orders cancellation

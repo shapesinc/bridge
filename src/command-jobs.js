@@ -89,15 +89,20 @@ function settleLost(record) {
   return settled;
 }
 
-// Called before refusing a new mutation, so a lock left by a lost receipt
-// write clears itself as soon as its evidence is readable.
+// The lock exists so two mutations never overlap. Once the command's
+// supervisor (or, before a first receipt, its launcher) is gone, nothing of
+// ours is still running it: on Windows the kernel Job dies with that process,
+// and on POSIX its process groups were already signalled. Holding the lock
+// past that point protects nothing and leaves the computer unusable, so it is
+// released here without the owner. The receipt keeps its unknown outcome and
+// the request is never replayed.
 function settleLock() {
   let lock;
-  try { lock = JSON.parse(fs.readFileSync(lockFile(), "utf8")); } catch { return false; }
+  try { lock = JSON.parse(fs.readFileSync(lockFile(), "utf8")); } catch { return !fs.existsSync(lockFile()); }
   if (typeof lock?.id !== "string" || !HEX.test(lock.id)) return false;
-  let record;
-  try { record = load(lock.id); } catch { return false; }
-  try { settleLost(record); } catch { return false; }
+  try { settleLost(load(lock.id)); } catch { /* No receipt, or no local proof: fall through. */ }
+  if (!fs.existsSync(lockFile())) return true;
+  try { acknowledgeInterrupted(lock.id, { automatic: true }); } catch { return false; }
   return !fs.existsSync(lockFile());
 }
 
@@ -143,8 +148,10 @@ function release(id) {
 
 // Read-only view of the mutation lock for the local owner. The lock survives
 // restart, update, uninstall and re-pairing, and a re-paired device's new scope
-// cannot learn the blocking job ID remotely. Never settles or changes a receipt.
+// cannot learn the blocking job ID remotely. A lock whose command is gone is
+// released first; what remains is running or unreadable.
 function pendingLock() {
+  try { settleLock(); } catch { /* Report whatever is still there. */ }
   let lock;
   try { lock = JSON.parse(fs.readFileSync(lockFile(), "utf8")); }
   catch (cause) {
@@ -268,7 +275,7 @@ function cancel(id, scope) {
   return { ...result, cancel_requested: true };
 }
 
-function acknowledgeInterrupted(id) {
+function acknowledgeInterrupted(id, { automatic = false } = {}) {
   let record;
   try { record = load(id); }
   catch (cause) {
@@ -297,7 +304,7 @@ function acknowledgeInterrupted(id) {
   if (!TERMINAL.has(latest.state) || (supervisor && alive(supervisor))) {
     throw error("Only a finished or interrupted command with no live supervisor can be acknowledged locally.");
   }
-  save({ ...latest, acknowledged_at: Date.now() });
+  save({ ...latest, acknowledged_at: Date.now(), ...(automatic ? { released_automatically: true } : {}) });
   release(id);
   return receipt(latest);
 }

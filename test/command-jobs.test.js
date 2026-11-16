@@ -148,7 +148,7 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
       assert.equal(jobs.status(id, scope).state, "completed");
       assert.equal(jobs.load(id).state, "completed");
     });
-    await t.test("local acknowledgement recovers a terminal receipt with a stranded lock", async () => {
+    await t.test("a terminal receipt with a stranded lock releases itself once its supervisor is gone", async () => {
       const complete = jobs.load(id);
       for (const state of ["completed", "failed", "cancelled", "timed_out"]) {
         const record = { ...complete, state, supervisor_pid: process.pid,
@@ -156,22 +156,23 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
         jobs.save(record);
         fs.writeFileSync(path.join(jobs.root(), "mutation.lock"), JSON.stringify({ id, scope }));
         assert.throws(() => jobs.acknowledgeInterrupted(id), /live supervisor/);
+        // A live supervisor still owns the lock.
+        assert.equal((await request("/write", { path: path.join(dir, "recovered.txt"), content: state })).status, 409);
         jobs.save({ ...record, supervisor_pid: 99999999 });
         // Persisted completion plus a crash before release survives restart.
         await close();
         await open();
-        assert.equal((await request("/write", { path: path.join(dir, "recovered.txt"), content: state })).status, 409);
         const before = jobs.status(id, scope);
         assert.equal(before.state, state);
-        jobs.acknowledgeInterrupted(id);
-        assert.deepEqual(jobs.status(id, scope), before);
-        assert.equal(fs.existsSync(path.join(jobs.root(), "mutation.lock")), false);
         assert.equal((await request("/write", { path: path.join(dir, "recovered.txt"), content: state })).status, 200);
+        assert.deepEqual(jobs.status(id, scope), before);
+        assert.equal(jobs.load(id).released_automatically, true);
+        assert.equal(fs.existsSync(path.join(jobs.root(), "mutation.lock")), false);
         assert.equal((await jobs.start({ cmd, timeout: 10, scope, request_key: key })).state, state);
         assert.equal(fs.readFileSync(marker, "utf8"), "1");
       }
     });
-    await t.test("local acknowledgement recovers a crash before the first receipt without replay", async () => {
+    await t.test("a crash before the first receipt releases its lock without replay", async () => {
       const orphanBody = { cmd, timeout: 10, scope, request_key: "f".repeat(64) };
       const crashed = spawnSync(process.execPath, ["-e", `
         const fs = require('node:fs');
@@ -186,16 +187,17 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
       const lockPath = path.join(jobs.root(), "mutation.lock");
       const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
       assert.throws(() => jobs.load(lock.id), /not found/);
-      assert.equal((await request("/write", { path: path.join(dir, "orphan-recovered.txt"), content: "ok" })).status, 409);
+      // While the launcher could still finish the launch, the lock holds.
       fs.writeFileSync(lockPath, JSON.stringify({ ...lock, launcher_pid: process.pid }));
+      assert.equal((await request("/write", { path: path.join(dir, "orphan-recovered.txt"), content: "ok" })).status, 409);
       assert.throws(() => jobs.acknowledgeInterrupted(lock.id), /live launcher/);
       fs.writeFileSync(lockPath, JSON.stringify(lock));
       assert.throws(() => jobs.acknowledgeInterrupted("0".repeat(64)), /not found/);
-      const acknowledged = jobs.acknowledgeInterrupted(lock.id);
+      assert.equal((await request("/write", { path: path.join(dir, "orphan-recovered.txt"), content: "ok" })).status, 200);
+      const acknowledged = jobs.status(lock.id, lock.scope);
       assert.equal(acknowledged.state, "interrupted");
       assert.equal(acknowledged.outcome_unknown, true);
       assert.equal(fs.existsSync(lockPath), false);
-      assert.equal((await request("/write", { path: path.join(dir, "orphan-recovered.txt"), content: "ok" })).status, 200);
       const replay = await jobs.start(orphanBody);
       assert.equal(replay.deduplicated, true);
       assert.equal(replay.state, "interrupted");
