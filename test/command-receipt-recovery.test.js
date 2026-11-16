@@ -100,6 +100,32 @@ test("a command whose supervisor is alive keeps the lock", async (t) => {
   assert.equal(jobs.load(id).state, "running");
 });
 
+test("a process number reused by another program does not keep the lock", async (t) => {
+  home(t);
+  // The reported machine: the command finished, its receipt rename was refused,
+  // and hours later Windows gave the supervisor's PID to an unrelated process.
+  const id = "c".repeat(64), old = Date.now() - 2 * 60 * 60 * 1000;
+  stranded(id, { state: "interrupted", started_at: 1, finished_at: 3, result: { exit_code: -1, stdout: "", stderr: LOST, outcome_unknown: true } }, done);
+  const reuse = (file, patch) => fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, "utf8")), ...patch }));
+  const dead = jobs.load(id).supervisor_pid;
+  fs.renameSync(path.join(jobs.root(), `${id}.json.${dead}.tmp`), path.join(jobs.root(), `${id}.json.${process.pid}.tmp`));
+  reuse(path.join(jobs.root(), `${id}.json.${process.pid}.tmp`), { supervisor_pid: process.pid, created_at: old });
+  reuse(path.join(jobs.root(), `${id}.json`), { supervisor_pid: process.pid, created_at: old, command: { timeout: 90 } });
+  fs.writeFileSync(path.join(jobs.root(), `${id}.supervisor`), String(process.pid));
+  assert.equal(await jobs.mutation(async () => "ran"), "ran");
+  assert.equal(jobs.load(id).state, "completed");
+  assert.equal(fs.existsSync(lockFile()), false);
+
+  // Same for a launcher that died before its first receipt.
+  const orphan = "d".repeat(64);
+  fs.writeFileSync(lockFile(), JSON.stringify({ id: orphan, scope, fingerprint, command_hash: "c".repeat(64), launcher_pid: process.pid, created_at: old }));
+  assert.equal(await jobs.mutation(async () => "ran"), "ran");
+  assert.equal(jobs.load(orphan).state, "interrupted");
+  // Inside the launch window a live launcher still owns the lock.
+  fs.writeFileSync(lockFile(), JSON.stringify({ id: "e".repeat(64), scope, fingerprint, command_hash: "c".repeat(64), launcher_pid: process.pid, created_at: Date.now() }));
+  await assert.rejects(jobs.mutation(async () => assert.fail("must not run")), { errorType: "computer_busy" });
+});
+
 test("receipt replacement waits out a longer Windows sharing violation", () => {
   let clock = 0, calls = 0;
   const denied = Object.assign(new Error("denied"), { code: "EPERM" });
