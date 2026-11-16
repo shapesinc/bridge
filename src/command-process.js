@@ -147,6 +147,9 @@ function runCommand({ cmd, cwd, timeout, shell, signal: abortSignal }, { signal 
         detached: platform !== "win32", windowsHide: true, stdio: [platform === "win32" ? "pipe" : "ignore", "pipe", "pipe"] });
       child.stdout.on("data", (chunk) => capture("stdout", chunk));
       child.stderr.on("data", (chunk) => capture("stderr", chunk));
+      // An unobserved pipe error would end the supervisor without a receipt.
+      child.stdout.on("error", (error) => finish(null, error));
+      child.stderr.on("error", (error) => finish(null, error));
       if (platform === "win32") {
         child.stdout.once("end", () => releaseAfterOutput("stdout"));
         child.stderr.once("end", () => releaseAfterOutput("stderr"));

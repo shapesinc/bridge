@@ -5,7 +5,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { ensureStateDir } = require("./state");
+const { ensureStateDir, replaceStateFile } = require("./state");
 const { expandHome } = require("./local-workspace");
 const { runCommand } = require("./command-process");
 
@@ -30,7 +30,8 @@ function location(id) { return path.join(directory(), `${id}.json`); }
 function save(file, row) {
   const temp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temp, JSON.stringify(row), { mode: 0o600, flag: "wx" });
-  fs.renameSync(temp, file);
+  try { replaceStateFile(temp, file); }
+  catch (error) { fs.rmSync(temp, { force: true }); throw error; }
 }
 function read(file) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); }

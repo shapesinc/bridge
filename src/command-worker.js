@@ -31,4 +31,16 @@ async function supervise(id) {
   } finally { clearInterval(timer); process.removeListener("SIGTERM", cancel); process.removeListener("SIGINT", cancel); }
 }
 
-supervise(process.argv[2]).catch(() => { process.exitCode = 1; });
+// This process has no console. Leave the reason beside the receipt so a lost
+// supervisor is diagnosable on the owner's computer.
+function fatal(cause) {
+  try {
+    fs.writeFileSync(path.join(jobs.root(), `${process.argv[2]}.worker-error`), JSON.stringify({ at: Date.now(), pid: process.pid,
+      code: cause?.code || null, syscall: cause?.syscall || null, message: String(cause?.message || cause).slice(0, 2000),
+      stack: String(cause?.stack || "").slice(0, 4000) }), { mode: 0o600 });
+  } catch { /* The state directory itself may be the failure. */ }
+  process.exit(1);
+}
+process.on("uncaughtException", fatal);
+process.on("unhandledRejection", fatal);
+supervise(process.argv[2]).catch(fatal);

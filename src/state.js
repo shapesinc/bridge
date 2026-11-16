@@ -11,8 +11,8 @@ const retryWait = new Int32Array(new SharedArrayBuffer(4));
 // EPERM. Retry the same fully written private file; never unlink the destination
 // or relax its ACL. Persistent permission errors remain bounded failures.
 function replaceStateFile(temporary, destination, { platform = process.platform, rename = fs.renameSync,
-  now = () => performance.now(), wait = ms => Atomics.wait(retryWait, 0, 0, ms) } = {}) {
-  const deadline = now() + 250;
+  now = () => performance.now(), wait = ms => Atomics.wait(retryWait, 0, 0, ms), budgetMs = 250 } = {}) {
+  const deadline = now() + budgetMs, attempts = Math.ceil(budgetMs / 10);
   for (let attempt = 0; ; attempt++) {
     try {
       rename(temporary, destination);
@@ -21,7 +21,7 @@ function replaceStateFile(temporary, destination, { platform = process.platform,
     }
     catch (error) {
       const remaining = deadline - now();
-      if (platform !== "win32" || !["EPERM", "EACCES", "EBUSY"].includes(error.code) || remaining <= 0 || attempt >= 25) throw error;
+      if (platform !== "win32" || !["EPERM", "EACCES", "EBUSY"].includes(error.code) || remaining <= 0 || attempt >= attempts) throw error;
       wait(Math.min(10, remaining));
     }
   }

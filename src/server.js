@@ -455,6 +455,11 @@ function startServer({ port, token, computerControl = createComputerControl(), p
 
       return sendJson(res, 404, { error: `no route ${method} ${route}` });
     } catch (err) {
+      // A missing or unreadable path is the caller's answer, not a helper fault.
+      if ((route === "/read" || route === "/ls") && !err.statusCode) {
+        if (["ENOENT", "ENOTDIR"].includes(err.code)) return sendJson(res, 404, { error: String(err.message), error_type: "path_not_found" });
+        if (["EACCES", "EPERM"].includes(err.code)) return sendJson(res, 403, { error: String(err.message), error_type: "path_denied" });
+      }
       return sendJson(res, err.statusCode || 500, { error: String(err && err.message ? err.message : err), ...(err.errorType ? { error_type: err.errorType } : {}) });
     }
   });
