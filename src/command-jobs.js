@@ -22,6 +22,19 @@ const jobFile = (id) => {
 };
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
+// A PID outlives its process: Windows hands the same number to an unrelated
+// program within minutes. A supervisor lives at most its command's timeout plus
+// termination grace, and a launcher only the moment between taking the lock and
+// saving the first receipt. Past that window a live PID belongs to someone else.
+const SUPERVISOR_GRACE_MS = 60000, LAUNCH_WINDOW_MS = 60000;
+function supervisorAlive(record, pid = supervisorPid(record)) {
+  return Boolean(pid) && alive(pid) && Date.now() - record.created_at <= (record.command?.timeout || 600) * 1000 + SUPERVISOR_GRACE_MS;
+}
+function launcherPending(lock) {
+  if (!Number.isFinite(lock.created_at) || Date.now() - lock.created_at > LAUNCH_WINDOW_MS) return false;
+  return !Number.isInteger(lock.launcher_pid) || lock.launcher_pid <= 0 || alive(lock.launcher_pid);
+}
+
 function supervisorPid(record) {
   if (record.supervisor_pid) return record.supervisor_pid;
   try { return Number(fs.readFileSync(path.join(root(), `${record.job_id}.supervisor`), "utf8")); }
@@ -69,7 +82,7 @@ const LOST = "The command supervisor stopped without a completion receipt.";
 // record over a still-queued receipt means the shell was never started.
 function settleLost(record) {
   const supervisor = supervisorPid(record);
-  if (!supervisor || alive(supervisor)) return null;
+  if (!supervisor || supervisorAlive(record, supervisor)) return null;
   const lost = record.state === "interrupted" && !record.acknowledged_at && String(record.result?.stderr || "").startsWith(LOST);
   if (TERMINAL.has(record.state) && !lost) return null;
   let pending;
@@ -123,7 +136,7 @@ function status(id, scope) {
   if (record.scope !== scope) throw error("Command job not found.", 404, "command_not_found");
   const supervisor = supervisorPid(record);
   if (TERMINAL.has(record.state)) return receipt(settleLost(record) || record);
-  if (Date.now() - record.created_at > 10000 && (!supervisor || !alive(supervisor))) {
+  if (Date.now() - record.created_at > 10000 && !supervisorAlive(record, supervisor)) {
     // The worker can finish between our first read and the liveness check.
     // Once it is dead its final save is complete; never overwrite that receipt.
     record = load(id);
@@ -165,10 +178,10 @@ function pendingLock() {
   catch (cause) { if (cause.errorType !== "command_not_found") throw cause; }
   if (!record) {
     return { job_id: id, state: "interrupted", created_at: lock.created_at ?? null,
-      running: Number.isInteger(lock.launcher_pid) && lock.launcher_pid > 0 && alive(lock.launcher_pid) };
+      running: Number.isInteger(lock.launcher_pid) && lock.launcher_pid > 0 && launcherPending(lock) };
   }
   const supervisor = supervisorPid(record);
-  const running = Boolean(supervisor && alive(supervisor)) || (!TERMINAL.has(record.state) && Date.now() - record.created_at <= 10000);
+  const running = supervisorAlive(record, supervisor) || (!TERMINAL.has(record.state) && Date.now() - record.created_at <= 10000);
   // A non-terminal receipt whose supervisor is gone is what status() settles as interrupted.
   return { job_id: id, state: running || TERMINAL.has(record.state) ? record.state : "interrupted", created_at: record.created_at, running };
 }
@@ -286,7 +299,7 @@ function acknowledgeInterrupted(id, { automatic = false } = {}) {
     if (lock.id !== id || !HEX.test(lock.scope) || !HEX.test(lock.fingerprint)) throw cause;
     // A launcher commits its initial receipt before spawning anything. Never
     // clear that gap while the owning process could still finish the launch.
-    if (!Number.isInteger(lock.launcher_pid) || lock.launcher_pid <= 0 || alive(lock.launcher_pid)) {
+    if (launcherPending(lock)) {
       throw error("An orphan command lock with a live launcher cannot be acknowledged locally.");
     }
     record = { job_id: id, scope: lock.scope, fingerprint: lock.fingerprint,
@@ -301,7 +314,7 @@ function acknowledgeInterrupted(id, { automatic = false } = {}) {
   status(id, record.scope);
   const latest = load(id);
   const supervisor = supervisorPid(latest);
-  if (!TERMINAL.has(latest.state) || (supervisor && alive(supervisor))) {
+  if (!TERMINAL.has(latest.state) || supervisorAlive(latest, supervisor)) {
     throw error("Only a finished or interrupted command with no live supervisor can be acknowledged locally.");
   }
   save({ ...latest, acknowledged_at: Date.now(), ...(automatic ? { released_automatically: true } : {}) });

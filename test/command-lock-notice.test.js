@@ -57,7 +57,7 @@ test("status releases a lock whose command is gone and reports one that is still
 
   // A launcher that died before its first receipt leaves only the lock.
   fs.rmSync(path.join(jobsDir, `${id}.json`));
-  lock({ launcher_pid: process.pid });
+  lock({ launcher_pid: process.pid, created_at: Date.now() });
   assert.match(run("status").stdout, /A computer command is running/);
   lock();
   assert.doesNotMatch(run("status").stdout, /Commands are blocked|is running/);
