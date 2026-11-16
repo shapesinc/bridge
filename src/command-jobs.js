@@ -6,11 +6,12 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn, spawnSync } = require("node:child_process");
-const { stateDir, ensureStateDir } = require("./state");
+const { stateDir, ensureStateDir, replaceStateFile } = require("./state");
 
 const HEX = /^[a-f0-9]{64}$/;
 const TERMINAL = new Set(["completed", "failed", "timed_out", "cancelled", "interrupted"]);
 const RETENTION_MS = 24 * 60 * 60 * 1000;
+const RECEIPT_REPLACE_MS = 5000;
 let ephemeralMutation = false;
 const digest = (value) => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const error = (message, statusCode = 400, errorType = "invalid_command") => Object.assign(new Error(message), { statusCode, errorType });
@@ -55,7 +56,49 @@ function save(record, { exclusive = false } = {}) {
     // Cancel can overtake a delayed start in a second daemon. An initial write
     // must never replace its durable tombstone.
     try { fs.linkSync(temp, file); } finally { fs.rmSync(temp, { force: true }); }
-  } else fs.renameSync(temp, file);
+  // A status poll or a scanner can hold the receipt open for a moment on
+  // Windows. A failed replacement keeps the fully written temporary file:
+  // settleLost() adopts it once this process is gone.
+  } else replaceStateFile(temp, file, { budgetMs: RECEIPT_REPLACE_MS });
+}
+
+const LOST = "The command supervisor stopped without a completion receipt.";
+// A supervisor that could not replace its receipt leaves the complete record
+// beside it. That file is local proof of what happened, so the lock need not
+// wait for the owner: a terminal record is the real result, and a "running"
+// record over a still-queued receipt means the shell was never started.
+function settleLost(record) {
+  const supervisor = supervisorPid(record);
+  if (!supervisor || alive(supervisor)) return null;
+  const lost = record.state === "interrupted" && !record.acknowledged_at && String(record.result?.stderr || "").startsWith(LOST);
+  if (TERMINAL.has(record.state) && !lost) return null;
+  let pending;
+  const temp = `${jobFile(record.job_id)}.${supervisor}.tmp`;
+  try { pending = JSON.parse(fs.readFileSync(temp, "utf8")); }
+  catch (cause) { if (cause.code === "ENOENT" || cause instanceof SyntaxError) return null; throw cause; }
+  if (pending?.job_id !== record.job_id || pending.scope !== record.scope || pending.fingerprint !== record.fingerprint) return null;
+  let settled;
+  if (TERMINAL.has(pending.state)) settled = pending;
+  else if (pending.state === "running" && (record.state === "queued" || (lost && !record.started_at))) {
+    settled = { ...record, state: "failed", finished_at: Date.now(), result: { exit_code: -1, stdout: "",
+      stderr: "The command did not start: its supervisor could not record the start. Nothing ran.", cleanup_confirmed: true } };
+  } else return null;
+  save(settled);
+  fs.rmSync(temp, { force: true });
+  if (settled.state !== "interrupted") release(settled.job_id);
+  return settled;
+}
+
+// Called before refusing a new mutation, so a lock left by a lost receipt
+// write clears itself as soon as its evidence is readable.
+function settleLock() {
+  let lock;
+  try { lock = JSON.parse(fs.readFileSync(lockFile(), "utf8")); } catch { return false; }
+  if (typeof lock?.id !== "string" || !HEX.test(lock.id)) return false;
+  let record;
+  try { record = load(lock.id); } catch { return false; }
+  try { settleLost(record); } catch { return false; }
+  return !fs.existsSync(lockFile());
 }
 
 function load(id) {
@@ -74,13 +117,16 @@ function status(id, scope) {
   let record = load(id);
   if (record.scope !== scope) throw error("Command job not found.", 404, "command_not_found");
   const supervisor = supervisorPid(record);
-  if (!TERMINAL.has(record.state) && Date.now() - record.created_at > 10000 && (!supervisor || !alive(supervisor))) {
+  if (TERMINAL.has(record.state)) return receipt(settleLost(record) || record);
+  if (Date.now() - record.created_at > 10000 && (!supervisor || !alive(supervisor))) {
     // The worker can finish between our first read and the liveness check.
     // Once it is dead its final save is complete; never overwrite that receipt.
     record = load(id);
     if (TERMINAL.has(record.state)) return receipt(record);
+    const settled = settleLost(record);
+    if (settled) return receipt(settled);
     record = { ...record, state: "interrupted", finished_at: Date.now(), result: {
-      exit_code: -1, stdout: "", stderr: "The command supervisor stopped without a completion receipt. Its effects are unknown; inspect the computer before issuing another mutation.", outcome_unknown: true,
+      exit_code: -1, stdout: "", stderr: `${LOST} Its effects are unknown; inspect the computer before issuing another mutation.`, outcome_unknown: true,
     } };
     save(record);
   }
@@ -124,9 +170,11 @@ function claim(id, scope, metadata) {
   if (ephemeralMutation) throw error("Another computer mutation is running. Wait for its receipt.", 409, "computer_busy");
   ensureStateDir();
   fs.mkdirSync(root(), { recursive: true, mode: 0o700 });
-  try { fs.writeFileSync(lockFile(), JSON.stringify({ id, scope, ...metadata, launcher_pid: process.pid, created_at: Date.now() }), { flag: "wx", mode: 0o600 }); }
+  const write = () => fs.writeFileSync(lockFile(), JSON.stringify({ id, scope, ...metadata, launcher_pid: process.pid, created_at: Date.now() }), { flag: "wx", mode: 0o600 });
+  try { write(); }
   catch (cause) {
     if (cause.code !== "EEXIST") throw cause;
+    if (settleLock()) { try { write(); return; } catch (retry) { if (retry.code !== "EEXIST") throw retry; } }
     const lock = JSON.parse(fs.readFileSync(lockFile(), "utf8"));
     // A supervisor owns release; never steal a lock based on age/PID alone.
     const busy = error("Another computer mutation is running or needs reconciliation. Wait for its receipt; do not repeat or work around it.", 409, "computer_busy");
@@ -141,7 +189,7 @@ function prune() {
     if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
     const record = load(name.slice(0, -5));
     if (TERMINAL.has(record.state) && record.state !== "interrupted" && Date.now() - record.finished_at > RETENTION_MS) {
-      for (const suffix of [".json", ".claimed", ".cancel", ".supervisor"]) fs.rmSync(path.join(root(), record.job_id + suffix), { force: true });
+      for (const suffix of [".json", ".claimed", ".cancel", ".supervisor", ".worker-error"]) fs.rmSync(path.join(root(), record.job_id + suffix), { force: true });
     } else count++;
   }
   if (count >= 256) throw error("Command receipt storage is full. Wait for completed receipts to expire before starting more commands.", 409, "command_storage_full");
@@ -257,9 +305,9 @@ function acknowledgeInterrupted(id) {
 async function mutation(run) {
   // Legacy HTTP actions live in this server process. Do not create a durable
   // lock that could outlive them; command workers use the disk lock instead.
-  if (ephemeralMutation || fs.existsSync(lockFile())) throw error("Another computer mutation is running or needs reconciliation. Wait for its receipt.", 409, "computer_busy");
+  if (ephemeralMutation || (fs.existsSync(lockFile()) && !settleLock())) throw error("Another computer mutation is running or needs reconciliation. Wait for its receipt.", 409, "computer_busy");
   ephemeralMutation = true;
   try { return await run(); } finally { ephemeralMutation = false; }
 }
 
-module.exports = { start, status, cancel, mutation, acknowledgeInterrupted, pendingLock, root, load, save, release, TERMINAL };
+module.exports = { start, status, cancel, mutation, acknowledgeInterrupted, pendingLock, settleLock, root, load, save, release, TERMINAL };

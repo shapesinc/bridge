@@ -61,6 +61,16 @@ late data cannot upgrade an unknown receipt. The local `acknowledge-command`
 operation remains the owner's reconciliation path; no remote acknowledgement is
 added. These adapters add no AI call, retry or authorization.
 
+One case settles without the owner. A supervisor replaces its receipt by
+writing the complete record beside it and renaming it into place. If that
+rename is refused (Windows does this briefly while another process has the
+receipt open) the supervisor retries for five seconds, then exits and leaves
+the record in `<job>.json.<pid>.tmp` with its reason in `<job>.worker-error`.
+Once that process is gone, the next status or mutation adopts a terminal
+record as the real result, or marks the command as not run when only its
+start could not be recorded, and releases the lock. A receipt whose own
+outcome is unknown still waits for `acknowledge-command`.
+
 Successful command stdout/stderr EOF still commits the existing explicit
 background handoff. An atomic native terminal decision orders cancellation
 against that handoff: cancellation that wins kills the Job, whereas completed
