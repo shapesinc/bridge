@@ -38,15 +38,19 @@ const DAMAGED_LOCK = (file) => `A damaged command lock blocks new commands: ${fi
 
 // The owner's only way to learn why commands are refused after re-pairing.
 function lockNotice() {
-  let lock;
-  try { lock = require("../src/command-jobs").pendingLock(); }
+  let locks;
+  try { locks = require("../src/command-jobs").pendingLocks(); }
   catch { return; }
-  if (!lock) return;
-  if (!lock.job_id) return log(DAMAGED_LOCK(lock.file));
-  if (lock.running) return log(`A computer command is running (job ${lock.job_id}). New commands wait until it finishes.`);
-  const launcher = fs.existsSync(runtimePaths().launcher) ? `"${runtimePaths().launcher}"` : "shapes-bridge";
-  const started = Number.isFinite(lock.created_at) ? `, started ${new Date(lock.created_at).toISOString()}` : "";
-  log(`Commands are blocked. An earlier command (${lock.state}${started}) did not release its safety lock, so new commands are refused until you review it. Restarting, updating or reinstalling does not clear this.\nCheck that nothing from that command is still running on this computer, then run:\n  ${launcher} acknowledge-command ${lock.job_id}\nThis releases the lock. It does not retry the command or mark it successful.`);
+  const running = locks.filter((lock) => lock.running);
+  if (running.length === 1) log(`A computer command is running (job ${running[0].job_id}). New commands in that chat wait until it finishes.`);
+  else if (running.length) log(`${running.length} computer commands are running (jobs ${running.map((lock) => lock.job_id).join(", ")}). New commands in those chats wait until they finish.`);
+  for (const lock of locks) {
+    if (lock.running) continue;
+    if (!lock.job_id) { log(DAMAGED_LOCK(lock.file)); continue; }
+    const launcher = fs.existsSync(runtimePaths().launcher) ? `"${runtimePaths().launcher}"` : "shapes-bridge";
+    const started = Number.isFinite(lock.created_at) ? `, started ${new Date(lock.created_at).toISOString()}` : "";
+    log(`Commands are blocked. An earlier command (${lock.state}${started}) did not release its safety lock, so new commands are refused until you review it. Restarting, updating or reinstalling does not clear this.\nCheck that nothing from that command is still running on this computer, then run:\n  ${launcher} acknowledge-command ${lock.job_id}\nThis releases the lock. It does not retry the command or mark it successful.`);
+  }
 }
 
 function showStatus() {
@@ -148,11 +152,13 @@ async function main() {
     const jobs = require("../src/command-jobs");
     let id = argv[1];
     if (!id) {
-      // Only one mutation lock can exist, so the owner need not copy its ID.
-      const lock = jobs.pendingLock();
-      if (!lock) { log("No command lock is pending. New computer operations are already allowed."); return; }
-      if (!lock.job_id) throw new Error(DAMAGED_LOCK(lock.file));
-      id = lock.job_id;
+      // With one lock pending the owner need not copy its ID.
+      const locks = jobs.pendingLocks();
+      if (!locks.length) { log("No command lock is pending. New computer operations are already allowed."); return; }
+      const damaged = locks.find((lock) => !lock.job_id);
+      if (damaged) throw new Error(DAMAGED_LOCK(damaged.file));
+      if (locks.length > 1) throw new Error(`Several command locks are pending. Name one: acknowledge-command <job>\n${locks.map((lock) => `  ${lock.job_id} (${lock.state})`).join("\n")}`);
+      id = locks[0].job_id;
     }
     jobs.acknowledgeInterrupted(id);
     log(`Job ${id}: command lock acknowledged locally. Existing receipts are unchanged; an orphan lock receives an interrupted receipt. New computer operations are allowed. The command was not replayed.`);

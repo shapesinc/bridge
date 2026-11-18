@@ -224,7 +224,7 @@ function startServer({ port, token, computerControl = createComputerControl(), p
             error: "Discover /sysinfo command_protocol before starting a new command.", error_type: "command_protocol_mismatch" });
           return sendJson(res, 202, await commandJobs.start(body));
         }
-        catch (error) { return sendJson(res, error.statusCode || 500, { error: error.message, error_type: error.errorType || "command_start_failed", ...(error.jobId ? { job_id: error.jobId } : {}) }); }
+        catch (error) { return sendJson(res, error.statusCode || 500, { error: error.message, error_type: error.errorType || "command_start_failed", ...(error.jobId ? { job_id: error.jobId } : {}), ...(error.busyReason ? { busy_reason: error.busyReason } : {}) }); }
       }
       if (route === "/commands/status" && method === "GET") {
         try {
@@ -380,7 +380,7 @@ function startServer({ port, token, computerControl = createComputerControl(), p
         }
         log(`RUN: ${body.cmd}   (cwd=${body.cwd || process.cwd()})`);
         // Cancellation handles remain private to the runtime, never remote JSON.
-        const { stopped, cleanup_confirmed, ...result } = await commandJobs.mutation(() => runCommand({ cmd: body.cmd, cwd: body.cwd, timeout: body.timeout, shell: body.shell }));
+        const { stopped, cleanup_confirmed, ...result } = await commandJobs.mutation(() => runCommand({ cmd: body.cmd, cwd: body.cwd, timeout: body.timeout, shell: body.shell }), body.scope);
         return sendJson(res, 200, result);
       }
 
@@ -395,7 +395,7 @@ function startServer({ port, token, computerControl = createComputerControl(), p
           fs.mkdirSync(path.dirname(path.resolve(p)), { recursive: true });
           fs.writeFileSync(p, body.content, "utf8");
           return { wrote: p, bytes: Buffer.byteLength(body.content), finished_at: Date.now() };
-        });
+        }, body.scope);
         return sendJson(res, 200, result);
       }
 
@@ -450,7 +450,7 @@ function startServer({ port, token, computerControl = createComputerControl(), p
         const body = await readBody(req);
         if (!body.target) return sendJson(res, 400, { error: "'target' is required" });
         log(`OPEN: ${body.target}`);
-        return sendJson(res, 200, await commandJobs.mutation(() => openTarget(body.target)));
+        return sendJson(res, 200, await commandJobs.mutation(() => openTarget(body.target), body.scope));
       }
 
       return sendJson(res, 404, { error: `no route ${method} ${route}` });

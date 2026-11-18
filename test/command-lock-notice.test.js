@@ -64,6 +64,21 @@ test("status releases a lock whose command is gone and reports one that is still
   assert.equal(fs.existsSync(lockPath), false);
   assert.match(run("acknowledge-command").stdout, /No command lock is pending/);
 
+  // Two chats running at once are both reported, and neither can be released by hand.
+  const second = "9".repeat(64), other = "b".repeat(64);
+  record({ state: "running", supervisor_pid: process.pid, created_at: Date.now() });
+  lock({ launcher_pid: process.pid, created_at: Date.now() });
+  fs.writeFileSync(path.join(jobsDir, `${second}.json`), JSON.stringify({ job_id: second, scope: other, fingerprint, state: "running", created_at: Date.now(), supervisor_pid: process.pid }));
+  fs.mkdirSync(path.join(jobsDir, "locks"), { recursive: true });
+  fs.writeFileSync(path.join(jobsDir, "locks", `${other}.lock`), JSON.stringify({ id: second, scope: other, fingerprint, launcher_pid: process.pid, created_at: Date.now() }));
+  const both = run("status");
+  assert.ok(both.stdout.includes("2 computer commands are running") && both.stdout.includes(id) && both.stdout.includes(second), both.stdout);
+  const several = run("acknowledge-command");
+  assert.equal(several.status, 1);
+  assert.match(several.stderr, /Several command locks are pending/);
+  for (const job of [id, second]) fs.rmSync(path.join(jobsDir, `${job}.json`));
+  fs.rmSync(path.join(jobsDir, "locks"), { recursive: true }); fs.rmSync(lockPath);
+
   // A truncated lock cannot be acknowledged; name the file instead of crashing.
   fs.writeFileSync(lockPath, "");
   const damaged = run("status");

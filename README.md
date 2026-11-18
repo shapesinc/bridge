@@ -190,7 +190,9 @@ does not retire its runtime. This differs from an explicit disconnect.
 Poll the receipt after a timeout; never submit a second command to recover a
 lost response. Receipts under the private `command-jobs` directory retain job
 identity, command hash, timing, exit status and bounded output for 24 hours
-(maximum 256 records). A missing supervisor is an unknown outcome, never an
+(maximum 256 records). Commands from different chats run at the same time, up
+to four at once; one chat's commands run one after another (see
+[docs/commands.md](docs/commands.md)). A missing supervisor is an unknown outcome, never an
 automatic replay. Its mutation lock is held only while the command's supervisor
 (or, before a first receipt, its launcher) is alive. After that the next
 command, status poll or `shapes-bridge status` releases it; nothing has to be

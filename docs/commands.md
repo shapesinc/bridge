@@ -24,9 +24,50 @@ Protocol 1 uses numeric millisecond timestamps, `job_id`, `command_hash`, state,
 exit status and bounded stdout/stderr. States are `queued`, `running`,
 `completed`, `failed`, `cancelled`, `timed_out` and `interrupted`. A detached
 supervisor owns execution and the deadline, independently of the tunnel. Linux
-user-service installations use a separate systemd scope. One mutation fence
-serializes commands with legacy `/run`, file writes and opens. At most 256
+user-service installations use a separate systemd scope. At most 256
 receipts are retained, with completed results eligible for expiry after 24 hours.
+
+## Several chats at once
+
+Commands from different chats run at the same time. Commands in one chat run
+one after another.
+
+- The fence is per `scope`. The backend builds `scope` from the person, the
+  chat and the computer, so a scope is one person's use of this computer in one
+  chat. It is the only chat identity on the wire and receipts are already keyed
+  by it; the working directory is optional and two chats can share one.
+- A running command holds `command-jobs/locks/<scope>.lock`. A second start in
+  the same scope gets `409 computer_busy` with the `job_id` of the command
+  ahead of it, as before.
+- At most 4 commands run at once on a computer. A start beyond that gets
+  `409 computer_busy` with no `job_id`.
+- A refused start records nothing, so the same request can be sent again. The
+  backend already waits and resends for 60 seconds on `computer_busy`.
+- The 409 body also carries `busy_reason`: `scope` (this chat's own command is
+  running), `limit` (the computer is at its limit) or `upgrade` (below). It is
+  additive; a backend that ignores it behaves as before.
+- Receipts, status, cancel, timeout and release work per command exactly as they
+  did. Each command has its own supervisor and deadline; stopping or timing out
+  one does not touch another. Status, cancel, `/sysinfo`, `/health`, `/read`,
+  `/ls` and the agent routes take no lock and are never refused because a
+  command is running.
+- `/write`, `/open` and legacy `/run` run inside the Bridge process. They accept
+  an optional `scope`; with it they wait behind that chat's command (409
+  `computer_busy`). Without it, which is every backend today, they share one
+  lane of their own: one at a time, no longer refused because another chat's
+  command is running. Until the backend sends `scope` on these, a write is not
+  fenced against a command in its own chat.
+- If two Bridge processes start commands at the same instant, each counts the
+  locks again after taking its own and stands down when the count is over the
+  limit. The limit is never exceeded; at worst both are refused and resent.
+
+Bridge 0.2.11 and earlier used one whole-computer lock, `command-jobs/mutation.lock`.
+It is no longer written. One left by a command that was running across the
+update still fences the whole computer until that command is gone: its old
+supervisor removes it on finishing, and otherwise the next start, write or
+`status` settles its receipt and removes it, as described under the lock rules
+below. Old receipts stay readable. An older Bridge does not read `locks/`, so
+after a downgrade it does not wait for a command the newer one started.
 
 Cancellation acknowledgement is not cleanup confirmation. On POSIX, the shell
 process group and descendant groups observed before termination receive TERM,
@@ -60,7 +101,7 @@ native proof remains `failed`; successful intentional background handoff remains
 late data cannot upgrade an unknown receipt. No remote acknowledgement is added: the lock releases itself locally once
 the command's supervisor is gone. These adapters add no AI call, retry or authorization.
 
-The mutation lock is held only while the command's supervisor is alive (or,
+A lock is held only while its command's supervisor is alive (or,
 before a first receipt, its launcher). When a new mutation, a status poll or
 the local `status` command finds a lock whose process is gone, it settles the
 receipt and releases the lock itself; the owner does nothing. On Windows the
@@ -78,7 +119,9 @@ under Bridge's ownership. The receipt keeps what is known:
   `released_automatically`. It is never replayed.
 
 A lock file that cannot be parsed is the one case left to the owner: `status`
-names the file.
+names the file. A damaged `locks/<scope>.lock` stops only that chat; a damaged
+`mutation.lock` stops every chat. With several locks pending,
+`acknowledge-command` needs the job ID.
 
 Successful command stdout/stderr EOF still commits the existing explicit
 background handoff. An atomic native terminal decision orders cancellation
@@ -116,7 +159,10 @@ completed a repository fix, CSV arithmetic and HTML editing through ordinary
 native chats. These are historical candidate receipts, not acceptance of this
 integrated protocol 1 package; its affected UI flows remain pending.
 
-`test/command-jobs.test.js` exercises actual HTTP, local independent supervisors,
+`test/command-concurrency.test.js` runs real supervisors over HTTP for several
+chats at once: different chats together, one chat in order, the limit, stop and
+timeout beside running commands, stale locks, the old lock across an update and
+separate processes racing for the limit. `test/command-jobs.test.js` exercises actual HTTP, local independent supervisors,
 exactly-once writes, scope isolation, disconnected readers, a cross-process
 cancel/initial-save race, tombstones, detached descendants and delayed side
 effects. `test/commands.test.js` preserves legacy receipt/primitive checks and

@@ -12,7 +12,11 @@ const HEX = /^[a-f0-9]{64}$/;
 const TERMINAL = new Set(["completed", "failed", "timed_out", "cancelled", "interrupted"]);
 const RETENTION_MS = 24 * 60 * 60 * 1000;
 const RECEIPT_REPLACE_MS = 5000;
-let ephemeralMutation = false;
+// How many commands may run at once across chats on this computer.
+const MAX_RUNNING = 4;
+// In-process file writes, opens and legacy /run, keyed by chat scope ("" when
+// the caller sent none). They never outlive this process, so they are not on disk.
+const ephemeral = new Set();
 const digest = (value) => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const error = (message, statusCode = 400, errorType = "invalid_command") => Object.assign(new Error(message), { statusCode, errorType });
 const root = () => path.join(stateDir(), "command-jobs");
@@ -102,21 +106,24 @@ function settleLost(record) {
   return settled;
 }
 
-// The lock exists so two mutations never overlap. Once the command's
+// A lock exists so two changes in one chat never overlap. Once the command's
 // supervisor (or, before a first receipt, its launcher) is gone, nothing of
 // ours is still running it: on Windows the kernel Job dies with that process,
 // and on POSIX its process groups were already signalled. Holding the lock
-// past that point protects nothing and leaves the computer unusable, so it is
-// released here without the owner. The receipt keeps its unknown outcome and
-// the request is never replayed.
-function settleLock() {
-  let lock;
-  try { lock = JSON.parse(fs.readFileSync(lockFile(), "utf8")); } catch { return !fs.existsSync(lockFile()); }
-  if (typeof lock?.id !== "string" || !HEX.test(lock.id)) return false;
-  try { settleLost(load(lock.id)); } catch { /* No receipt, or no local proof: fall through. */ }
-  if (!fs.existsSync(lockFile())) return true;
-  try { acknowledgeInterrupted(lock.id, { automatic: true }); } catch { return false; }
-  return !fs.existsSync(lockFile());
+// past that point protects nothing and leaves the chat unable to use the
+// computer, so it is released here without the owner. The receipt keeps its
+// unknown outcome and the request is never replayed. True when the lock is gone.
+function settle(entry) {
+  if (!entry.id) return false;
+  try { settleLost(load(entry.id)); } catch { /* No receipt, or no local proof: fall through. */ }
+  if (!fs.existsSync(entry.file)) return true;
+  try { acknowledgeInterrupted(entry.id, { automatic: true }); } catch { return false; }
+  return !fs.existsSync(entry.file);
+}
+
+// Every lock still held after releasing the ones whose command is gone.
+function heldLocks() {
+  return lockFiles().map(readLock).filter((entry) => entry && !settle(entry));
 }
 
 function load(id) {
@@ -151,56 +158,90 @@ function status(id, scope) {
   return receipt(record);
 }
 
-function lockFile() { return path.join(root(), "mutation.lock"); }
+// One lock per chat scope: locks/<scope>.lock. Commands in one chat run one
+// after another; different chats run side by side, up to MAX_RUNNING.
+// mutation.lock is the single whole-computer lock written by Bridge 0.2.11 and
+// earlier. It is never written now, but one left by a command that was running
+// across the update keeps its original promise: nothing else starts until that
+// command is gone.
+const legacyLockFile = () => path.join(root(), "mutation.lock");
+const lockDir = () => path.join(root(), "locks");
+
+function lockFiles() {
+  const files = fs.existsSync(legacyLockFile()) ? [legacyLockFile()] : [];
+  let names = [];
+  try { names = fs.readdirSync(lockDir()); } catch (cause) { if (cause.code !== "ENOENT") throw cause; }
+  for (const name of names.sort()) if (/^[a-f0-9]{64}\.lock$/.test(name)) files.push(path.join(lockDir(), name));
+  return files;
+}
+
+// `scope` is null for a lock that fences the whole computer: the old
+// mutation.lock. `id` is null when the file cannot be parsed.
+function readLock(file) {
+  let lock;
+  try { lock = JSON.parse(fs.readFileSync(file, "utf8")); }
+  catch (cause) { if (cause.code === "ENOENT") return null; }
+  const valid = Boolean(lock) && typeof lock.id === "string" && HEX.test(lock.id);
+  return { file, id: valid ? lock.id : null, lock: valid ? lock : null,
+    scope: file === legacyLockFile() ? null : path.basename(file, ".lock") };
+}
 
 function release(id) {
-  try {
-    if (JSON.parse(fs.readFileSync(lockFile(), "utf8")).id === id) fs.unlinkSync(lockFile());
-  } catch (cause) { if (cause.code !== "ENOENT") throw cause; }
+  for (const file of lockFiles()) {
+    try { if (JSON.parse(fs.readFileSync(file, "utf8")).id === id) fs.unlinkSync(file); }
+    // Another chat's damaged lock must not keep this one from being released.
+    catch (cause) { if (cause.code !== "ENOENT" && !(cause instanceof SyntaxError)) throw cause; }
+  }
 }
 
-// Read-only view of the mutation lock for the local owner. The lock survives
-// restart, update, uninstall and re-pairing, and a re-paired device's new scope
-// cannot learn the blocking job ID remotely. A lock whose command is gone is
-// released first; what remains is running or unreadable.
-function pendingLock() {
-  try { settleLock(); } catch { /* Report whatever is still there. */ }
-  let lock;
-  try { lock = JSON.parse(fs.readFileSync(lockFile(), "utf8")); }
-  catch (cause) {
-    if (cause.code === "ENOENT") return null;
-    if (!(cause instanceof SyntaxError)) throw cause;
-  }
-  const id = lock && typeof lock.id === "string" && HEX.test(lock.id) ? lock.id : null;
-  if (!id) return { job_id: null, state: "unreadable", running: false, created_at: null, file: lockFile() };
-  let record;
-  try { record = load(id); }
-  catch (cause) { if (cause.errorType !== "command_not_found") throw cause; }
-  if (!record) {
-    return { job_id: id, state: "interrupted", created_at: lock.created_at ?? null,
-      running: Number.isInteger(lock.launcher_pid) && lock.launcher_pid > 0 && launcherPending(lock) };
-  }
-  const supervisor = supervisorPid(record);
-  const running = supervisorAlive(record, supervisor) || (!TERMINAL.has(record.state) && Date.now() - record.created_at <= 10000);
-  // A non-terminal receipt whose supervisor is gone is what status() settles as interrupted.
-  return { job_id: id, state: running || TERMINAL.has(record.state) ? record.state : "interrupted", created_at: record.created_at, running };
+// Read-only view of the locks for the local owner. A lock survives restart,
+// update, uninstall and re-pairing, and a re-paired device's new scope cannot
+// learn the blocking job ID remotely. Locks whose command is gone are released
+// first; what remains is running or unreadable.
+function pendingLocks() {
+  let held;
+  try { held = heldLocks(); } catch { held = lockFiles().map(readLock).filter(Boolean); /* Report whatever is still there. */ }
+  return held.map(({ id, lock, file, scope }) => {
+    if (!id) return { job_id: null, state: "unreadable", running: false, created_at: null, file, scope };
+    let record;
+    try { record = load(id); }
+    catch (cause) { if (cause.errorType !== "command_not_found") throw cause; }
+    if (!record) {
+      return { job_id: id, state: "interrupted", created_at: lock.created_at ?? null, scope,
+        running: Number.isInteger(lock.launcher_pid) && lock.launcher_pid > 0 && launcherPending(lock) };
+    }
+    const supervisor = supervisorPid(record);
+    const running = supervisorAlive(record, supervisor) || (!TERMINAL.has(record.state) && Date.now() - record.created_at <= 10000);
+    // A non-terminal receipt whose supervisor is gone is what status() settles as interrupted.
+    return { job_id: id, state: running || TERMINAL.has(record.state) ? record.state : "interrupted", created_at: record.created_at, running, scope };
+  });
 }
+const busy = (message, reason, blocker) => Object.assign(error(message, 409, "computer_busy"), { busyReason: reason }, blocker ? { jobId: blocker } : {});
+const RECONCILE = "Another computer mutation is running or needs reconciliation. Wait for its receipt; do not repeat or work around it.";
+const LIMIT = `This computer is already running ${MAX_RUNNING} commands. Wait for one to finish, then send this again.`;
 
 function claim(id, scope, metadata) {
-  if (ephemeralMutation) throw error("Another computer mutation is running. Wait for its receipt.", 409, "computer_busy");
+  if (ephemeral.has(scope)) throw busy("Another computer mutation is running. Wait for its receipt.", "scope");
   ensureStateDir();
-  fs.mkdirSync(root(), { recursive: true, mode: 0o700 });
-  const write = () => fs.writeFileSync(lockFile(), JSON.stringify({ id, scope, ...metadata, launcher_pid: process.pid, created_at: Date.now() }), { flag: "wx", mode: 0o600 });
-  try { write(); }
+  fs.mkdirSync(lockDir(), { recursive: true, mode: 0o700 });
+  const held = heldLocks();
+  // A supervisor owns release; never steal a lock based on age/PID alone.
+  const same = held.find((entry) => entry.scope === scope);
+  if (same) throw busy(RECONCILE, "scope", same.id);
+  const whole = held.find((entry) => !entry.scope);
+  if (whole) throw busy(RECONCILE, "upgrade", whole.lock?.scope === scope ? whole.id : undefined);
+  if (held.length >= MAX_RUNNING) throw busy(LIMIT, "limit");
+  const file = path.join(lockDir(), `${scope}.lock`);
+  try { fs.writeFileSync(file, JSON.stringify({ id, scope, ...metadata, launcher_pid: process.pid, created_at: Date.now() }), { flag: "wx", mode: 0o600 }); }
   catch (cause) {
     if (cause.code !== "EEXIST") throw cause;
-    if (settleLock()) { try { write(); return; } catch (retry) { if (retry.code !== "EEXIST") throw retry; } }
-    const lock = JSON.parse(fs.readFileSync(lockFile(), "utf8"));
-    // A supervisor owns release; never steal a lock based on age/PID alone.
-    const busy = error("Another computer mutation is running or needs reconciliation. Wait for its receipt; do not repeat or work around it.", 409, "computer_busy");
-    if (lock.scope === scope && HEX.test(lock.id)) busy.jobId = lock.id;
-    throw busy;
+    const winner = readLock(file);
+    throw busy(RECONCILE, "scope", winner?.id);
   }
+  // Two Bridge processes can each see one free place and both take it. Counting
+  // again after writing means the limit is never exceeded: at worst both stand
+  // down and the backend sends the start again.
+  if (heldLocks().length > MAX_RUNNING) { release(id); throw busy(LIMIT, "limit"); }
 }
 
 function prune() {
@@ -293,10 +334,8 @@ function acknowledgeInterrupted(id, { automatic = false } = {}) {
   try { record = load(id); }
   catch (cause) {
     if (cause.errorType !== "command_not_found") throw cause;
-    let lock;
-    try { lock = JSON.parse(fs.readFileSync(lockFile(), "utf8")); }
-    catch (lockError) { if (lockError.code === "ENOENT") throw cause; throw lockError; }
-    if (lock.id !== id || !HEX.test(lock.scope) || !HEX.test(lock.fingerprint)) throw cause;
+    const lock = lockFiles().map(readLock).find((entry) => entry?.id === id)?.lock;
+    if (!lock || !HEX.test(lock.scope) || !HEX.test(lock.fingerprint)) throw cause;
     // A launcher commits its initial receipt before spawning anything. Never
     // clear that gap while the owning process could still finish the launch.
     if (launcherPending(lock)) {
@@ -322,12 +361,19 @@ function acknowledgeInterrupted(id, { automatic = false } = {}) {
   return receipt(latest);
 }
 
-async function mutation(run) {
-  // Legacy HTTP actions live in this server process. Do not create a durable
-  // lock that could outlive them; command workers use the disk lock instead.
-  if (ephemeralMutation || (fs.existsSync(lockFile()) && !settleLock())) throw error("Another computer mutation is running or needs reconciliation. Wait for its receipt.", 409, "computer_busy");
-  ephemeralMutation = true;
-  try { return await run(); } finally { ephemeralMutation = false; }
+// File writes, opens and legacy /run live in this server process. They take no
+// durable lock that could outlive them; command workers use the disk locks.
+// With a chat `scope` they wait their turn behind that chat's command. Without
+// one (every backend today) they share one lane of their own: one at a time,
+// not held up by commands running in other chats.
+async function mutation(run, scope) {
+  if (scope !== undefined && (typeof scope !== "string" || !HEX.test(scope))) throw error("Invalid command scope.");
+  const lane = scope || "";
+  if (ephemeral.has(lane) || heldLocks().some((entry) => !entry.scope || entry.scope === scope)) {
+    throw busy("Another computer mutation is running or needs reconciliation. Wait for its receipt.", "scope");
+  }
+  ephemeral.add(lane);
+  try { return await run(); } finally { ephemeral.delete(lane); }
 }
 
-module.exports = { start, status, cancel, mutation, acknowledgeInterrupted, pendingLock, settleLock, root, load, save, release, TERMINAL };
+module.exports = { start, status, cancel, mutation, acknowledgeInterrupted, pendingLocks, root, load, save, release, TERMINAL, MAX_RUNNING };

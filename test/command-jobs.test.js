@@ -43,18 +43,25 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
     assert.equal((await request("/commands/start", { cmd: cmd + " changed", timeout: 10, scope, request_key: key })).body.error_type, "command_conflict");
     assert.equal((await request("/commands/status?job_id=" + id + "&scope=" + "c".repeat(64))).status, 404);
     assert.equal((await request("/commands/cancel", { job_id: id, scope: "c".repeat(64) })).status, 404);
-    const busy = await request("/commands/start", { cmd, timeout: 10, scope: "c".repeat(64), request_key: key });
+    // A second command in the same chat waits its turn and is told which job is ahead of it.
+    const busy = await request("/commands/start", { cmd, timeout: 10, scope, request_key: "9".repeat(64) });
+    assert.equal(busy.status, 409);
     assert.equal(busy.body.error_type, "computer_busy");
-    assert.equal(busy.body.job_id, undefined);
+    assert.equal(busy.body.job_id, id);
+    // File writes, opens and legacy /run that name the chat wait behind its command too.
     for (const [route, body] of [
-      ["/run", { cmd }], ["/write", { path: path.join(dir, "conflicting.txt"), content: "wrong run" }],
-      ["/open", { target: path.join(dir, "conflicting.txt") }],
+      ["/run", { cmd, scope }], ["/write", { path: path.join(dir, "conflicting.txt"), content: "wrong run", scope }],
+      ["/open", { target: path.join(dir, "conflicting.txt"), scope }],
     ]) {
       const rejected = await request(route, body);
       assert.equal(rejected.status, 409);
       assert.equal(rejected.body.error_type, "computer_busy");
     }
     assert.equal(fs.existsSync(path.join(dir, "conflicting.txt")), false);
+    assert.equal((await request("/write", { path: path.join(dir, "conflicting.txt"), content: "x", scope: "not-a-scope" })).status, 400);
+    // Without a chat scope (every backend today) a write is not held up by another chat's command.
+    assert.equal((await request("/write", { path: path.join(dir, "unscoped.txt"), content: "ok" })).status, 200);
+    assert.equal(fs.readFileSync(path.join(dir, "unscoped.txt"), "utf8"), "ok");
     // Closing/reopening the HTTP server models a lost tunnel/daemon. The
     // independent supervisor finishes once and its receipt remains readable.
     await close();
@@ -117,7 +124,7 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
         assert.equal(late.body.state, "cancelled", JSON.stringify(late));
         assert.equal(late.body.cleanup_confirmed, true);
         assert.equal(fs.existsSync(path.join(jobs.root(), `${id}.supervisor`)), false);
-        assert.equal(fs.existsSync(path.join(jobs.root(), "mutation.lock")), false);
+        assert.deepEqual(jobs.pendingLocks(), []);
       } finally { fs.linkSync = link; }
     });
     await t.test("protocol1 Stop ends the owned process tree before a delayed side effect", { skip: process.platform === "win32" }, async () => {
@@ -184,16 +191,16 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
         require(${JSON.stringify(path.join(commandSource, 'src/command-jobs'))}).start(${JSON.stringify(orphanBody)});
       `], { encoding: "utf8", windowsHide: true, timeout: 5000 });
       assert.equal(crashed.status, 93, crashed.stderr);
-      const lockPath = path.join(jobs.root(), "mutation.lock");
+      const lockPath = path.join(jobs.root(), "locks", `${scope}.lock`);
       const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
       assert.throws(() => jobs.load(lock.id), /not found/);
       // While the launcher could still finish the launch, the lock holds.
       fs.writeFileSync(lockPath, JSON.stringify({ ...lock, launcher_pid: process.pid }));
-      assert.equal((await request("/write", { path: path.join(dir, "orphan-recovered.txt"), content: "ok" })).status, 409);
+      assert.equal((await request("/write", { path: path.join(dir, "orphan-recovered.txt"), content: "ok", scope })).status, 409);
       assert.throws(() => jobs.acknowledgeInterrupted(lock.id), /live launcher/);
       fs.writeFileSync(lockPath, JSON.stringify(lock));
       assert.throws(() => jobs.acknowledgeInterrupted("0".repeat(64)), /not found/);
-      assert.equal((await request("/write", { path: path.join(dir, "orphan-recovered.txt"), content: "ok" })).status, 200);
+      assert.equal((await request("/write", { path: path.join(dir, "orphan-recovered.txt"), content: "ok", scope })).status, 200);
       const acknowledged = jobs.status(lock.id, lock.scope);
       assert.equal(acknowledged.state, "interrupted");
       assert.equal(acknowledged.outcome_unknown, true);
