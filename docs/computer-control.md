@@ -65,6 +65,7 @@ Before posting, the helper rechecks the target:
 Otherwise it returns `target_changed` or `outside_target`. Other typed blockers:
 
 - `target_not_found`: the app isn't open.
+- `target_not_focused`: keys for a window target would reach another window of the app; click a field in it first.
 - `target_ambiguous`: more than one app matches.
 - `target_not_visible`: hidden, minimized or on another Space.
 - `secure_input`, `accessibility_denied`, `screen_recording_denied`,

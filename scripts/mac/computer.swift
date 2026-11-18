@@ -334,6 +334,12 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
     func primer(_ p: CGPoint, _ window: LiveWindow) { mouse(.mouseMoved, p, window: window); Thread.sleep(forTimeInterval: 0.03) }
     let ax = BackgroundAccessibility(pid: pid)
     var pointer: [String: Any] = [:], via = "events"
+    // Keys reach the app's key window. With a window target that must be the
+    // observed window, or the text would land somewhere the shape can't see.
+    if ["type", "press_key"].contains(request["operation"] as? String ?? ""), kind == "window",
+       let target = live.first(where: { $0.id == routed }), !ax.focused(in: target.frame) {
+        throw fail("target_not_focused", "Keys would go to another window of this app. Click a field in the observed window first.")
+    }
     switch request["operation"] as? String {
     case "click":
         let p = try point("point"), w = try window(at: p), right = request["button"] as? String == "right"
@@ -431,7 +437,7 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
     if !pointer.isEmpty { reply["pointer"] = pointer }
     // Background delivery never changes the person's front app. Report it if
     // the app brought itself forward in response anyway.
-    if let now = NSWorkspace.shared.frontmostApplication, now.processIdentifier != front.processIdentifier { reply["frontmost_changed"] = describe(now) }
+    if front.processIdentifier != pid, let now = NSWorkspace.shared.frontmostApplication, now.processIdentifier == pid { reply["frontmost_changed"] = describe(now) }
     return reply
 }
 
@@ -505,6 +511,11 @@ struct BackgroundAccessibility {
             if NSLocationInRange(index, r) { found = r; stop.pointee = true }
         }
         return found
+    }
+    // Whether the app's focused window is the given one (by frame).
+    func focused(in window: CGRect) -> Bool {
+        guard let w = element(value(app, kAXFocusedWindowAttribute)), let f = frame(w) else { return false }
+        return close(f, window)
     }
     // Focus moves inside the app only; an inactive app stays inactive.
     func select(_ e: AXUIElement, _ r: NSRange) -> Bool {

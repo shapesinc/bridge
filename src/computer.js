@@ -215,7 +215,6 @@ function createComputerControl({ platform = process.platform, binary = nativePat
       }
       return reply({ success: true, result: { dispatched: true, delivery_verified: false, ...(background ? { delivery: "background" } : {}),
         ...(object(value.frontmost_changed) ? { frontmost_changed: true } : {}),
-        ...(value.person_pointer_moved === true ? { person_pointer_moved: true } : {}),
         message: typeof value.message === "string" ? value.message.slice(0, 300) : "Events were posted. Observe again to verify the result." } });
     } catch { return reply(failure("native_control_failed", "Computer control failed. Observe before continuing.", { outcome_unknown: !LOOK.has(control.operation) })); }
     finally { busy = false; }
