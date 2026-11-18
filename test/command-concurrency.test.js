@@ -268,8 +268,19 @@ function home(t, label) {
 }
 const hold = `${process.platform === "win32" ? "& " : ""}'${process.execPath}' -e 'setInterval(()=>{},1000)'`;
 
-test("separate Bridge processes starting at once never exceed the runaway guard", { timeout: 60000 }, async (t) => {
-  const { spawn } = require("node:child_process");
+// Start one command per body, each from its own Bridge process, all at once.
+const startSource = `require(${JSON.stringify(path.resolve(__dirname, "../src/command-jobs"))}).start(JSON.parse(process.argv[1]))
+  .then((r)=>console.log(r.state+(r.deduplicated?":deduplicated":"")),(e)=>console.log((e.errorType||e.message)+":"+e.busyReason))`;
+const startTogether = (bodies) => Promise.all(bodies.map((body) => new Promise((resolve) => {
+  const child = require("node:child_process").spawn(process.execPath, ["-e", startSource, JSON.stringify(body)], { env: process.env, windowsHide: true });
+  let out = ""; child.stdout.on("data", (chunk) => { out += chunk; }); child.on("close", () => resolve(out.trim()));
+})));
+const settled = async (count = 0) => {
+  for (const deadline = Date.now() + 20000; jobs.pendingLocks().length > count && Date.now() < deadline;) await sleep(50);
+  assert.equal(jobs.pendingLocks().length, count);
+};
+
+test("separate Bridge processes starting at once never exceed the runaway guard, and its free places get used", { timeout: 60000 }, async (t) => {
   home(t, "concurrency-race");
   // Leave two places, then race eight starts from eight processes for them.
   fs.mkdirSync(path.join(jobs.root(), "running"), { recursive: true });
@@ -278,25 +289,85 @@ test("separate Bridge processes starting at once never exceed the runaway guard"
     jobs.save({ job_id: id, scope: hex("held"), fingerprint: hex("f"), command_hash: hex("c"), state: "running", created_at: Date.now(), started_at: Date.now(), supervisor_pid: process.pid, command: { timeout: 60 } });
     fs.writeFileSync(path.join(jobs.root(), "running", `${id}.json`), JSON.stringify({ id, scope: hex("held"), launcher_pid: process.pid, created_at: Date.now() }));
   }
-  const chats = Array.from({ length: 8 }, (_, index) => ({ scope: hex(`race ${index}`), request_key: hex(`race key ${index}`) }));
-  const source = `require(${JSON.stringify(path.resolve(__dirname, "../src/command-jobs"))}).start(JSON.parse(process.argv[1]))
-    .then((r)=>console.log(r.state),(e)=>console.log(e.errorType+":"+e.busyReason))`;
-  const replies = await Promise.all(chats.map((chat) => new Promise((resolve) => {
-    const child = spawn(process.execPath, ["-e", source, JSON.stringify({ cmd: hold, timeout: 30, ...chat })], { env: process.env, windowsHide: true });
-    let out = ""; child.stdout.on("data", (chunk) => { out += chunk; }); child.on("close", () => resolve(out.trim()));
-  })));
-  const accepted = replies.filter((reply) => reply === "queued").length;
+  const bodies = Array.from({ length: 8 }, (_, index) => ({ cmd: hold, timeout: 30, scope: hex(`race ${index}`), request_key: hex(`race key ${index}`) }));
+  const replies = await startTogether(bodies);
+  let accepted = replies.filter((reply) => reply === "queued").length;
   assert.deepEqual(replies.filter((reply) => reply !== "queued" && reply !== "computer_busy:limit"), []);
-  // Racing processes may all stand down; the guard itself is never exceeded,
-  // and a refused start recorded nothing, so sending it again is safe.
+  // Processes racing for the last places may stand down together; the guard
+  // itself is never exceeded and a refused start recorded nothing.
   assert.ok(accepted <= 2, `accepted ${accepted}`);
   assert.equal(jobs.pendingLocks().length, jobs.MAX_RUNNING - 2 + accepted);
-  for (const [index, chat] of chats.entries()) {
-    if (replies[index] === "queued") jobs.cancel(jobId(chat.scope, chat.request_key), chat.scope);
-    else assert.throws(() => jobs.load(jobId(chat.scope, chat.request_key)), /not found/);
+  // The refused starts are sent again, as the backend does: both free places
+  // get used, and only then is the computer full.
+  for (const [index, body] of bodies.entries()) {
+    if (replies[index] === "queued") continue;
+    assert.throws(() => jobs.load(jobId(body.scope, body.request_key)), /not found/);
+    if (accepted < 2) { assert.equal((await jobs.start(body)).state, "queued"); accepted++; replies[index] = "queued"; }
+    else await assert.rejects(jobs.start(body), { errorType: "computer_busy", busyReason: "limit" });
   }
-  for (const deadline = Date.now() + 15000; jobs.pendingLocks().length > jobs.MAX_RUNNING - 2 && Date.now() < deadline;) await sleep(50);
-  assert.equal(jobs.pendingLocks().length, jobs.MAX_RUNNING - 2);
+  assert.equal(accepted, 2);
+  assert.equal(jobs.pendingLocks().length, jobs.MAX_RUNNING);
+  for (const [index, body] of bodies.entries()) if (replies[index] === "queued") jobs.cancel(jobId(body.scope, body.request_key), body.scope);
+  await settled(jobs.MAX_RUNNING - 2);
+});
+
+test("the same start from several Bridge processes at once runs once", { timeout: 60000 }, async (t) => {
+  home(t, "concurrency-twins");
+  const ran = path.join(process.env.SHAPES_BRIDGE_HOME, "ran.txt");
+  const body = { cmd: `${process.platform === "win32" ? "& " : ""}'${process.execPath}' -e "require('fs').appendFileSync(process.argv[1],'1')" '${ran}'`,
+    timeout: 30, scope: hex("twins"), request_key: hex("twins key") };
+  for (let round = 0; round < 3; round++) {
+    const replies = await startTogether(Array.from({ length: 6 }, () => ({ ...body, request_key: hex(`twins key ${round}`) })));
+    // Each process either launched it or was handed the launcher's receipt.
+    assert.deepEqual(replies.filter((reply) => !/^(queued|running|completed)(:deduplicated)?$/.test(reply)), [], JSON.stringify(replies));
+    assert.equal(replies.filter((reply) => !reply.endsWith(":deduplicated")).length, 1, JSON.stringify(replies));
+    await settled();
+    assert.equal(jobs.status(jobId(body.scope, hex(`twins key ${round}`)), body.scope).state, "completed");
+    assert.equal(fs.readFileSync(ran, "utf8"), "1".repeat(round + 1));
+  }
+});
+
+test("several Bridge processes pruning a full receipt store at once all start their commands", { timeout: 120000 }, async (t) => {
+  home(t, "concurrency-prune");
+  fs.mkdirSync(jobs.root(), { recursive: true });
+  const now = Date.now();
+  for (let index = 0; index < jobs.MAX_RECEIPTS + 16; index++) {
+    jobs.save({ job_id: hex(`old ${index}`), scope: hex("old"), fingerprint: hex("f"), command_hash: hex("c"), state: "completed",
+      created_at: now - 100000 + index, finished_at: now - 90000 + index, result: { exit_code: 0, stdout: "", stderr: "", cleanup_confirmed: true } });
+  }
+  const quick = `${process.platform === "win32" ? "& " : ""}'${process.execPath}' -e '0'`;
+  for (let round = 0; round < 4; round++) {
+    const bodies = Array.from({ length: 8 }, (_, index) => ({ cmd: quick, timeout: 30, scope: hex(`prune ${index}`), request_key: hex(`prune key ${round} ${index}`) }));
+    assert.deepEqual(await startTogether(bodies), bodies.map(() => "queued"), `round ${round}`);
+    await settled();
+    for (const body of bodies) assert.equal(jobs.status(jobId(body.scope, body.request_key), body.scope).state, "completed");
+    // Top the store back up so every round prunes.
+    for (let index = 0; index < 16; index++) {
+      jobs.save({ job_id: hex(`old ${round} ${index}`), scope: hex("old"), fingerprint: hex("f"), command_hash: hex("c"), state: "completed",
+        created_at: now - 80000 + round * 100 + index, finished_at: now - 70000 + round * 100 + index, result: { exit_code: 0, stdout: "", stderr: "", cleanup_confirmed: true } });
+    }
+  }
+  // Eight processes each make room for one and add one, then 16 are topped up.
+  assert.ok(fs.readdirSync(jobs.root()).filter((name) => /^[a-f0-9]{64}\.json$/.test(name)).length <= jobs.MAX_RECEIPTS + 8 + 16);
+});
+
+test("a marker that cannot be read right now is counted as running and left alone", (t) => {
+  home(t, "concurrency-unread");
+  const id = hex("busy marker"), file = path.join(jobs.root(), "running", `${id}.json`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ id, scope: hex("s"), fingerprint: hex("f"), command_hash: hex("c"), launcher_pid: 99999999, created_at: Date.now() - 600000 }));
+  fs.utimesSync(file, new Date(Date.now() - 600000), new Date(Date.now() - 600000));
+  const read = fs.readFileSync;
+  t.mock.method(fs, "readFileSync", (target, ...rest) => {
+    if (target === file) throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+    return read.call(fs, target, ...rest);
+  });
+  assert.deepEqual(jobs.pendingLocks().map((entry) => [entry.state, entry.running]), [["starting", true]]);
+  assert.equal(fs.existsSync(file), true);
+  t.mock.restoreAll();
+  // Readable again, and its launcher is long gone: now it is cleared.
+  assert.deepEqual(jobs.pendingLocks(), []);
+  assert.equal(fs.existsSync(file), false);
 });
 
 test("a full receipt store drops its oldest finished receipts instead of refusing commands", { timeout: 60000 }, async (t) => {

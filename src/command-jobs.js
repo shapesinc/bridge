@@ -114,6 +114,7 @@ function settleLost(record) {
 // without the owner. The receipt keeps its unknown outcome and the request is
 // never replayed. True when the marker is gone.
 function settle(entry) {
+  if (entry.unread) return false;
   if (!entry.id) {
     // Unreadable: a launcher that died while writing it, or a damaged
     // mutation.lock. Nothing can be running behind it once the launch window passed.
@@ -183,11 +184,16 @@ function markerFiles() {
   return files;
 }
 
-// `id` is null when the file cannot be parsed.
+// `id` is null when the file cannot be parsed. A file that could not be read at
+// all (a Windows sharing violation, say) is `unread`: it may belong to a live
+// command, so it is counted as running and left alone.
 function readMarker(file) {
   let lock;
   try { lock = JSON.parse(fs.readFileSync(file, "utf8")); }
-  catch (cause) { if (cause.code === "ENOENT") return null; }
+  catch (cause) {
+    if (cause.code === "ENOENT") return null;
+    if (!(cause instanceof SyntaxError)) return { file, id: null, lock: null, unread: true };
+  }
   const valid = Boolean(lock) && typeof lock.id === "string" && HEX.test(lock.id);
   return { file, id: valid ? lock.id : null, lock: valid ? lock : null };
 }
@@ -215,7 +221,8 @@ const LIMIT = `This computer is already running ${MAX_RUNNING} commands. Wait fo
 const busy = () => Object.assign(error(LIMIT, 409, "computer_busy"), { busyReason: "limit" });
 
 // Take a place for this command. It never waits for another command; the only
-// refusal is the runaway guard.
+// refusal is the runaway guard. True when this call wrote the marker; false
+// when the same start, from another process, already had.
 function claim(id, scope, metadata) {
   ensureStateDir();
   fs.mkdirSync(runningDir(), { recursive: true, mode: 0o700 });
@@ -223,17 +230,21 @@ function claim(id, scope, metadata) {
   // The same start arriving twice at once is settled by the exclusive receipt
   // write that follows, not here: whoever loses that reads the winner's receipt.
   try { fs.writeFileSync(path.join(runningDir(), `${id}.json`), JSON.stringify({ id, scope, ...metadata, launcher_pid: process.pid, created_at: Date.now() }), { flag: "wx", mode: 0o600 }); }
-  catch (cause) { if (cause.code !== "EEXIST") throw cause; return; }
+  catch (cause) { if (cause.code !== "EEXIST") throw cause; return false; }
   // Two Bridge processes can each see one free place and both take it. Counting
   // again after writing means the guard is never exceeded.
   if (running().length > MAX_RUNNING) { release(id); throw busy(); }
+  return true;
 }
 
 function prune() {
   const kept = [];
   for (const name of fs.readdirSync(root())) {
     if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
-    const record = load(name.slice(0, -5));
+    let record;
+    // Another Bridge process pruning the same store can remove it first.
+    try { record = load(name.slice(0, -5)); }
+    catch (cause) { if (cause.errorType === "command_not_found") continue; throw cause; }
     const finished = TERMINAL.has(record.state);
     if (finished && record.state !== "interrupted" && Date.now() - record.finished_at > RETENTION_MS) forget(record.job_id);
     else kept.push({ id: record.job_id, finished, at: record.finished_at || record.created_at || 0 });
@@ -261,8 +272,10 @@ async function start(body) {
     if (existing.fingerprint && existing.fingerprint !== fingerprint) throw error("The command request key was reused for different arguments.", 409, "command_conflict");
     return { ...status(id, body.scope), deduplicated: true };
   } catch (cause) { if (cause.errorType !== "command_not_found") throw cause; }
-  claim(id, body.scope, { fingerprint, command_hash: digest(body.cmd) });
-  let record, launched = false;
+  // `mine`: this call owns the job's marker and receipt. Until it does, they
+  // may belong to the same start running in another process and are not touched.
+  let mine = claim(id, body.scope, { fingerprint, command_hash: digest(body.cmd) });
+  let record, saved = false, launched = false;
   try {
     prune();
     record = { job_id: id, scope: body.scope, fingerprint, command_hash: digest(body.cmd),
@@ -273,10 +286,12 @@ async function start(body) {
       // A cancel tombstone or the same start from another process got there
       // first. A tombstone means nothing runs; a twin start owns the marker.
       const existing = load(id);
-      if (TERMINAL.has(existing.state)) release(id);
+      if (mine && TERMINAL.has(existing.state)) release(id);
+      mine = false;
       if (existing.scope !== body.scope || existing.fingerprint && existing.fingerprint !== fingerprint) throw error("The command request key was reused for different arguments.", 409, "command_conflict");
       return { ...status(id, body.scope), deduplicated: true };
     }
+    saved = mine = true;
     const child = launchSupervisor(id);
     await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
     launched = true;
@@ -286,8 +301,8 @@ async function start(body) {
   } catch (cause) {
     if (launched) throw error("Command supervisor started but its launch receipt could not be saved. Poll the existing job; do not repeat it.", 503, "command_start_unconfirmed");
     try {
-      if (record && fs.existsSync(jobFile(id)) && load(id).state === "queued") save({ ...record, state: "failed", finished_at: Date.now(), result: { exit_code: -1, stdout: "", stderr: "Command supervisor could not start.", cleanup_confirmed: true } });
-    } finally { release(id); }
+      if (saved && fs.existsSync(jobFile(id)) && load(id).state === "queued") save({ ...record, state: "failed", finished_at: Date.now(), result: { exit_code: -1, stdout: "", stderr: "Command supervisor could not start.", cleanup_confirmed: true } });
+    } finally { if (mine) release(id); }
     throw cause;
   }
 }
