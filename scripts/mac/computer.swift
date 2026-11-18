@@ -336,8 +336,11 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
     var pointer: [String: Any] = [:], via = "events"
     // Keys reach the app's key window. With a window target that must be the
     // observed window, or the text would land somewhere the shape can't see.
+    // Making it the app's main window changes nothing outside that app: the
+    // app stays inactive and the person's front app keeps focus.
     if ["type", "press_key"].contains(request["operation"] as? String ?? ""), kind == "window",
-       let target = live.first(where: { $0.id == routed }), !ax.focused(in: target.frame) {
+       let target = live.first(where: { $0.id == routed }), !ax.focused(in: target.frame),
+       !(ax.makeMain(target.frame) && ax.focused(in: target.frame)) {
         throw fail("target_not_focused", "Keys would go to another window of this app. Click a field in the observed window first.")
     }
     switch request["operation"] as? String {
@@ -346,6 +349,9 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
         let count = request["click_count"] as? Int ?? 1
         guard (1...2).contains(count) else { throw fail("invalid_arguments", "Use one or two clicks.") }
         pointer = ["x": p.x, "y": p.y]
+        // A click into another of the app's windows makes it that app's main
+        // window, as a real click would, without activating the app.
+        if !ax.focused(in: w.frame) { _ = ax.makeMain(w.frame) }
         // Accessibility first: text views ignore clicks into an inactive app,
         // and a press or caret needs no pointer at all. Once a press was sent
         // its outcome is the receipt's; never repeat it as mouse events.
@@ -414,7 +420,18 @@ func input(_ request: [String: Any]) throws -> [String: Any] {
             let units = Array(String(character).utf16)
             guard units.count <= 20 else { throw fail("invalid_arguments", "A text character exceeds the event size limit.") }
         }
-        for character in text { let units = Array(String(character).utf16); if chunk.count + units.count > 20 { send() }; chunk += units }
+        // Apps drop a Unicode event that carries a line break or tab, so
+        // those are sent as real Return/Tab presses between text chunks.
+        for character in text {
+            if character == "\n" || character == "\r\n" || character == "\r" || character == "\t" {
+                if !chunk.isEmpty { send() }
+                postKey(character == "\t" ? 48 : 36, true); postKey(character == "\t" ? 48 : 36, false)
+                continue
+            }
+            let units = Array(String(character).utf16)
+            if chunk.count + units.count > 20 { send() }
+            chunk += units
+        }
         if !chunk.isEmpty { send() }
     case "press_key":
         let keys: [String: CGKeyCode] = ["A":0,"S":1,"D":2,"F":3,"H":4,"G":5,"Z":6,"X":7,"C":8,"V":9,"B":11,"Q":12,"W":13,"E":14,"R":15,"Y":16,"T":17,"1":18,"2":19,"3":20,"4":21,"6":22,"5":23,"9":25,"7":26,"8":28,"0":29,"O":31,"U":32,"I":34,"P":35,"RETURN":36,"L":37,"J":38,"K":40,"N":45,"M":46,"TAB":48,"SPACE":49,"BACKSPACE":51,"ESCAPE":53,"HOME":115,"PAGEUP":116,"DELETE":117,"END":119,"PAGEDOWN":121,"LEFT":123,"RIGHT":124,"DOWN":125,"UP":126,"F1":122,"F2":120,"F3":99,"F4":118,"F5":96,"F6":97,"F7":98,"F8":100,"F9":101,"F10":109,"F11":103,"F12":111]
@@ -516,6 +533,12 @@ struct BackgroundAccessibility {
     func focused(in window: CGRect) -> Bool {
         guard let w = element(value(app, kAXFocusedWindowAttribute)), let f = frame(w) else { return false }
         return close(f, window)
+    }
+    func makeMain(_ frame: CGRect) -> Bool {
+        guard let windows = value(app, kAXWindowsAttribute) as? [AXUIElement],
+              let window = windows.first(where: { self.frame($0).map { close($0, frame) } ?? false }),
+              settable(window, kAXMainAttribute) else { return false }
+        return AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue) == .success
     }
     // Focus moves inside the app only; an inactive app stays inactive.
     func select(_ e: AXUIElement, _ r: NSRange) -> Bool {
