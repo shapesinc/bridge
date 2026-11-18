@@ -54,4 +54,5 @@ existing test install first.
 - By contributing you agree that your contribution is licensed under the
   [MIT license](LICENSE).
 
-AI coding agents should also follow [AGENTS.md](AGENTS.md).
+Everyone taking part is expected to follow our
+[Code of Conduct](CODE_OF_CONDUCT.md). AI coding agents should also follow [AGENTS.md](AGENTS.md).
