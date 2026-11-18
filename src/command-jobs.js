@@ -12,7 +12,12 @@ const HEX = /^[a-f0-9]{64}$/;
 const TERMINAL = new Set(["completed", "failed", "timed_out", "cancelled", "interrupted"]);
 const RETENTION_MS = 24 * 60 * 60 * 1000;
 const RECEIPT_REPLACE_MS = 5000;
-let ephemeralMutation = false;
+// Runaway guard only: how many commands may be running on this computer at
+// once, across and within chats. Raise it freely; nothing else depends on it.
+const MAX_RUNNING = 64;
+// A finished receipt is what makes a repeated start a no-op. Keep this many;
+// beyond it the oldest finished ones are dropped so new commands are never refused.
+const MAX_RECEIPTS = 1024;
 const digest = (value) => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const error = (message, statusCode = 400, errorType = "invalid_command") => Object.assign(new Error(message), { statusCode, errorType });
 const root = () => path.join(stateDir(), "command-jobs");
@@ -59,7 +64,8 @@ function launchSupervisor(id) {
       ...(systemdVersion >= 254 ? ["--expand-environment=no"] : []), "--", binary, ...args];
     binary = "systemd-run";
   }
-  return spawn(binary, args, { detached: true, windowsHide: true, stdio: "ignore", env: process.env });
+  // start() secured the state directory (claim → ensureStateDir) before this.
+  return spawn(binary, args, { detached: true, windowsHide: true, stdio: "ignore", env: { ...process.env, SHAPES_BRIDGE_STATE_SECURED: stateDir() } });
 }
 
 function save(record, { exclusive = false } = {}) {
@@ -102,21 +108,30 @@ function settleLost(record) {
   return settled;
 }
 
-// The lock exists so two mutations never overlap. Once the command's
-// supervisor (or, before a first receipt, its launcher) is gone, nothing of
-// ours is still running it: on Windows the kernel Job dies with that process,
-// and on POSIX its process groups were already signalled. Holding the lock
-// past that point protects nothing and leaves the computer unusable, so it is
-// released here without the owner. The receipt keeps its unknown outcome and
-// the request is never replayed.
-function settleLock() {
-  let lock;
-  try { lock = JSON.parse(fs.readFileSync(lockFile(), "utf8")); } catch { return !fs.existsSync(lockFile()); }
-  if (typeof lock?.id !== "string" || !HEX.test(lock.id)) return false;
-  try { settleLost(load(lock.id)); } catch { /* No receipt, or no local proof: fall through. */ }
-  if (!fs.existsSync(lockFile())) return true;
-  try { acknowledgeInterrupted(lock.id, { automatic: true }); } catch { return false; }
-  return !fs.existsSync(lockFile());
+// A marker says "this command is running". Once the command's supervisor (or,
+// before a first receipt, its launcher) is gone, nothing of ours is still
+// running it: on Windows the kernel Job dies with that process, and on POSIX
+// its process groups were already signalled. The marker is then removed here
+// without the owner. The receipt keeps its unknown outcome and the request is
+// never replayed. True when the marker is gone.
+function settle(entry) {
+  if (entry.unread) return false;
+  if (!entry.id) {
+    // Unreadable: a launcher that died while writing it, or a damaged
+    // mutation.lock. Nothing can be running behind it once the launch window passed.
+    try { if (Date.now() - fs.statSync(entry.file).mtimeMs > LAUNCH_WINDOW_MS) fs.rmSync(entry.file, { force: true }); }
+    catch (cause) { if (cause.code !== "ENOENT") throw cause; }
+    return !fs.existsSync(entry.file);
+  }
+  try { settleLost(load(entry.id)); } catch { /* No receipt, or no local proof: fall through. */ }
+  if (!fs.existsSync(entry.file)) return true;
+  try { acknowledgeInterrupted(entry.id, { automatic: true }); } catch { return false; }
+  return !fs.existsSync(entry.file);
+}
+
+// Every command still running, after clearing the markers of those that are gone.
+function running() {
+  return markerFiles().map(readMarker).filter((entry) => entry && !settle(entry));
 }
 
 function load(id) {
@@ -151,68 +166,95 @@ function status(id, scope) {
   return receipt(record);
 }
 
-function lockFile() { return path.join(root(), "mutation.lock"); }
+// Commands do not wait for each other: any number of chats, and any number of
+// commands in one chat, run side by side. running/<job>.json marks a command
+// that is running, only so the runaway guard can count them and so a command
+// whose supervisor died gets its receipt settled.
+// mutation.lock is the single whole-computer lock written by Bridge 0.2.11 and
+// earlier. It is never written now. One left by a command that was running
+// across the update is treated as that command's marker and no longer stops
+// anything else.
+const legacyLockFile = () => path.join(root(), "mutation.lock");
+const runningDir = () => path.join(root(), "running");
 
-function release(id) {
-  try {
-    if (JSON.parse(fs.readFileSync(lockFile(), "utf8")).id === id) fs.unlinkSync(lockFile());
-  } catch (cause) { if (cause.code !== "ENOENT") throw cause; }
+function markerFiles() {
+  const files = fs.existsSync(legacyLockFile()) ? [legacyLockFile()] : [];
+  let names = [];
+  try { names = fs.readdirSync(runningDir()); } catch (cause) { if (cause.code !== "ENOENT") throw cause; }
+  for (const name of names.sort()) if (/^[a-f0-9]{64}\.json$/.test(name)) files.push(path.join(runningDir(), name));
+  return files;
 }
 
-// Read-only view of the mutation lock for the local owner. The lock survives
-// restart, update, uninstall and re-pairing, and a re-paired device's new scope
-// cannot learn the blocking job ID remotely. A lock whose command is gone is
-// released first; what remains is running or unreadable.
-function pendingLock() {
-  try { settleLock(); } catch { /* Report whatever is still there. */ }
+// `id` is null when the file cannot be parsed. A file that could not be read at
+// all (a Windows sharing violation, say) is `unread`: it may belong to a live
+// command, so it is counted as running and left alone.
+function readMarker(file) {
   let lock;
-  try { lock = JSON.parse(fs.readFileSync(lockFile(), "utf8")); }
+  try { lock = JSON.parse(fs.readFileSync(file, "utf8")); }
   catch (cause) {
     if (cause.code === "ENOENT") return null;
-    if (!(cause instanceof SyntaxError)) throw cause;
+    if (!(cause instanceof SyntaxError)) return { file, id: null, lock: null, unread: true };
   }
-  const id = lock && typeof lock.id === "string" && HEX.test(lock.id) ? lock.id : null;
-  if (!id) return { job_id: null, state: "unreadable", running: false, created_at: null, file: lockFile() };
-  let record;
-  try { record = load(id); }
-  catch (cause) { if (cause.errorType !== "command_not_found") throw cause; }
-  if (!record) {
-    return { job_id: id, state: "interrupted", created_at: lock.created_at ?? null,
-      running: Number.isInteger(lock.launcher_pid) && lock.launcher_pid > 0 && launcherPending(lock) };
-  }
-  const supervisor = supervisorPid(record);
-  const running = supervisorAlive(record, supervisor) || (!TERMINAL.has(record.state) && Date.now() - record.created_at <= 10000);
-  // A non-terminal receipt whose supervisor is gone is what status() settles as interrupted.
-  return { job_id: id, state: running || TERMINAL.has(record.state) ? record.state : "interrupted", created_at: record.created_at, running };
+  const valid = Boolean(lock) && typeof lock.id === "string" && HEX.test(lock.id);
+  return { file, id: valid ? lock.id : null, lock: valid ? lock : null };
 }
 
+function release(id) {
+  fs.rmSync(path.join(runningDir(), `${id}.json`), { force: true });
+  try { if (JSON.parse(fs.readFileSync(legacyLockFile(), "utf8")).id === id) fs.unlinkSync(legacyLockFile()); }
+  catch (cause) { if (cause.code !== "ENOENT" && !(cause instanceof SyntaxError)) throw cause; }
+}
+
+// Read-only view of what is running, for the local owner. Markers whose
+// command is gone are cleared first.
+function pendingLocks() {
+  return running().map(({ id, lock, file }) => {
+    if (!id) return { job_id: null, state: "starting", running: true, created_at: null, file };
+    let record;
+    try { record = load(id); }
+    catch (cause) { if (cause.errorType !== "command_not_found") throw cause; }
+    if (!record) return { job_id: id, state: "starting", created_at: lock.created_at ?? null, running: true };
+    return { job_id: id, state: record.state, created_at: record.created_at, running: true };
+  });
+}
+
+const LIMIT = `This computer is already running ${MAX_RUNNING} commands. Wait for one to finish, then send this again.`;
+const busy = () => Object.assign(error(LIMIT, 409, "computer_busy"), { busyReason: "limit" });
+
+// Take a place for this command. It never waits for another command; the only
+// refusal is the runaway guard. True when this call wrote the marker; false
+// when the same start, from another process, already had.
 function claim(id, scope, metadata) {
-  if (ephemeralMutation) throw error("Another computer mutation is running. Wait for its receipt.", 409, "computer_busy");
   ensureStateDir();
-  fs.mkdirSync(root(), { recursive: true, mode: 0o700 });
-  const write = () => fs.writeFileSync(lockFile(), JSON.stringify({ id, scope, ...metadata, launcher_pid: process.pid, created_at: Date.now() }), { flag: "wx", mode: 0o600 });
-  try { write(); }
-  catch (cause) {
-    if (cause.code !== "EEXIST") throw cause;
-    if (settleLock()) { try { write(); return; } catch (retry) { if (retry.code !== "EEXIST") throw retry; } }
-    const lock = JSON.parse(fs.readFileSync(lockFile(), "utf8"));
-    // A supervisor owns release; never steal a lock based on age/PID alone.
-    const busy = error("Another computer mutation is running or needs reconciliation. Wait for its receipt; do not repeat or work around it.", 409, "computer_busy");
-    if (lock.scope === scope && HEX.test(lock.id)) busy.jobId = lock.id;
-    throw busy;
-  }
+  fs.mkdirSync(runningDir(), { recursive: true, mode: 0o700 });
+  if (running().length >= MAX_RUNNING) throw busy();
+  // The same start arriving twice at once is settled by the exclusive receipt
+  // write that follows, not here: whoever loses that reads the winner's receipt.
+  try { fs.writeFileSync(path.join(runningDir(), `${id}.json`), JSON.stringify({ id, scope, ...metadata, launcher_pid: process.pid, created_at: Date.now() }), { flag: "wx", mode: 0o600 }); }
+  catch (cause) { if (cause.code !== "EEXIST") throw cause; return false; }
+  // Two Bridge processes can each see one free place and both take it. Counting
+  // again after writing means the guard is never exceeded.
+  if (running().length > MAX_RUNNING) { release(id); throw busy(); }
+  return true;
 }
 
 function prune() {
-  let count = 0;
+  const kept = [];
   for (const name of fs.readdirSync(root())) {
     if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
-    const record = load(name.slice(0, -5));
-    if (TERMINAL.has(record.state) && record.state !== "interrupted" && Date.now() - record.finished_at > RETENTION_MS) {
-      for (const suffix of [".json", ".claimed", ".cancel", ".supervisor", ".worker-error"]) fs.rmSync(path.join(root(), record.job_id + suffix), { force: true });
-    } else count++;
+    let record;
+    // Another Bridge process pruning the same store can remove it first.
+    try { record = load(name.slice(0, -5)); }
+    catch (cause) { if (cause.errorType === "command_not_found") continue; throw cause; }
+    const finished = TERMINAL.has(record.state);
+    if (finished && record.state !== "interrupted" && Date.now() - record.finished_at > RETENTION_MS) forget(record.job_id);
+    else kept.push({ id: record.job_id, finished, at: record.finished_at || record.created_at || 0 });
   }
-  if (count >= 256) throw error("Command receipt storage is full. Wait for completed receipts to expire before starting more commands.", 409, "command_storage_full");
+  const droppable = kept.filter((entry) => entry.finished).sort((a, b) => a.at - b.at);
+  for (let extra = kept.length - MAX_RECEIPTS + 1; extra > 0 && droppable.length; extra--) forget(droppable.shift().id);
+}
+function forget(id) {
+  for (const suffix of [".json", ".claimed", ".cancel", ".supervisor", ".worker-error"]) fs.rmSync(path.join(root(), id + suffix), { force: true });
 }
 
 async function start(body) {
@@ -231,8 +273,10 @@ async function start(body) {
     if (existing.fingerprint && existing.fingerprint !== fingerprint) throw error("The command request key was reused for different arguments.", 409, "command_conflict");
     return { ...status(id, body.scope), deduplicated: true };
   } catch (cause) { if (cause.errorType !== "command_not_found") throw cause; }
-  claim(id, body.scope, { fingerprint, command_hash: digest(body.cmd) });
-  let record, launched = false;
+  // `mine`: this call owns the job's marker and receipt. Until it does, they
+  // may belong to the same start running in another process and are not touched.
+  let mine = claim(id, body.scope, { fingerprint, command_hash: digest(body.cmd) });
+  let record, saved = false, launched = false;
   try {
     prune();
     record = { job_id: id, scope: body.scope, fingerprint, command_hash: digest(body.cmd),
@@ -240,11 +284,15 @@ async function start(body) {
     try { save(record, { exclusive: true }); }
     catch (cause) {
       if (cause.code !== "EEXIST") throw cause;
-      release(id);
+      // A cancel tombstone or the same start from another process got there
+      // first. A tombstone means nothing runs; a twin start owns the marker.
       const existing = load(id);
+      if (mine && TERMINAL.has(existing.state)) release(id);
+      mine = false;
       if (existing.scope !== body.scope || existing.fingerprint && existing.fingerprint !== fingerprint) throw error("The command request key was reused for different arguments.", 409, "command_conflict");
       return { ...status(id, body.scope), deduplicated: true };
     }
+    saved = mine = true;
     const child = launchSupervisor(id);
     await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
     launched = true;
@@ -254,8 +302,8 @@ async function start(body) {
   } catch (cause) {
     if (launched) throw error("Command supervisor started but its launch receipt could not be saved. Poll the existing job; do not repeat it.", 503, "command_start_unconfirmed");
     try {
-      if (record && fs.existsSync(jobFile(id)) && load(id).state === "queued") save({ ...record, state: "failed", finished_at: Date.now(), result: { exit_code: -1, stdout: "", stderr: "Command supervisor could not start.", cleanup_confirmed: true } });
-    } finally { release(id); }
+      if (saved && fs.existsSync(jobFile(id)) && load(id).state === "queued") save({ ...record, state: "failed", finished_at: Date.now(), result: { exit_code: -1, stdout: "", stderr: "Command supervisor could not start.", cleanup_confirmed: true } });
+    } finally { if (mine) release(id); }
     throw cause;
   }
 }
@@ -293,10 +341,8 @@ function acknowledgeInterrupted(id, { automatic = false } = {}) {
   try { record = load(id); }
   catch (cause) {
     if (cause.errorType !== "command_not_found") throw cause;
-    let lock;
-    try { lock = JSON.parse(fs.readFileSync(lockFile(), "utf8")); }
-    catch (lockError) { if (lockError.code === "ENOENT") throw cause; throw lockError; }
-    if (lock.id !== id || !HEX.test(lock.scope) || !HEX.test(lock.fingerprint)) throw cause;
+    const lock = markerFiles().map(readMarker).find((entry) => entry?.id === id)?.lock;
+    if (!lock || !HEX.test(lock.scope) || !HEX.test(lock.fingerprint)) throw cause;
     // A launcher commits its initial receipt before spawning anything. Never
     // clear that gap while the owning process could still finish the launch.
     if (launcherPending(lock)) {
@@ -322,12 +368,4 @@ function acknowledgeInterrupted(id, { automatic = false } = {}) {
   return receipt(latest);
 }
 
-async function mutation(run) {
-  // Legacy HTTP actions live in this server process. Do not create a durable
-  // lock that could outlive them; command workers use the disk lock instead.
-  if (ephemeralMutation || (fs.existsSync(lockFile()) && !settleLock())) throw error("Another computer mutation is running or needs reconciliation. Wait for its receipt.", 409, "computer_busy");
-  ephemeralMutation = true;
-  try { return await run(); } finally { ephemeralMutation = false; }
-}
-
-module.exports = { start, status, cancel, mutation, acknowledgeInterrupted, pendingLock, settleLock, root, load, save, release, TERMINAL };
+module.exports = { start, status, cancel, acknowledgeInterrupted, pendingLocks, root, load, save, release, TERMINAL, MAX_RUNNING, MAX_RECEIPTS };

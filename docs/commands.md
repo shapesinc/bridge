@@ -24,15 +24,67 @@ Protocol 1 uses numeric millisecond timestamps, `job_id`, `command_hash`, state,
 exit status and bounded stdout/stderr. States are `queued`, `running`,
 `completed`, `failed`, `cancelled`, `timed_out` and `interrupted`. A detached
 supervisor owns execution and the deadline, independently of the tunnel. Linux
-user-service installations use a separate systemd scope. One mutation fence
-serializes commands with legacy `/run`, file writes and opens. At most 256
-receipts are retained, with completed results eligible for expiry after 24 hours.
+user-service installations use a separate systemd scope. Completed results are
+eligible for expiry after 24 hours.
+
+## Commands run in parallel
+
+Commands do not wait for each other. Any number of chats can use the computer
+at once, and several commands sent together in one chat (a model issuing
+several tool calls in one step) all start immediately.
+
+- There is no lock between commands, between chats, or between a command and a
+  file write, open or legacy `/run`. Two commands that touch the same files at
+  the same moment behave like two terminal windows doing so.
+- What still keeps one job from running twice is per job, not per chat:
+  `job_id` is derived from `[scope, request_key]`, the first receipt is created
+  exclusively, and a supervisor claims its job exclusively. The same start sent
+  twice, even at the same instant, runs once and the second reply says
+  `deduplicated:true`.
+- Receipts, status, cancel and timeouts are per job. Each command has its own
+  supervisor and deadline; stopping or timing out one does not touch another.
+- `command-jobs/running/<job_id>.json` marks a running command. It is removed
+  when the command ends. It fences nothing; it exists so the count below works
+  and so a command whose supervisor died gets its receipt settled.
+- Runaway guard: at most 64 commands running on a computer at once
+  (`MAX_RUNNING` in `src/command-jobs.js`; raise it freely). Past that a start
+  gets `409 computer_busy` with `busy_reason:"limit"` and no `job_id`. Nothing
+  is recorded, so the same request can be sent again; the backend already
+  waits and resends for 60 seconds on `computer_busy`. This is the only case in
+  which Bridge answers a command with `computer_busy`.
+- Receipts: 1,024 are kept (`MAX_RECEIPTS`). When the store is full the oldest
+  finished receipts are dropped to make room; a new command is never refused
+  for storage, and a running command's receipt is never dropped. A start
+  repeated with the same `request_key` after its receipt was dropped would run
+  again; that needs 1,024 newer commands in between.
+- On Windows a supervisor does not repeat the state directory's ACL rewrite:
+  the Bridge process that starts it has just done so and passes
+  `SHAPES_BRIDGE_STATE_SECURED`. Repeating it per command made commands that
+  start together time each other out.
+- `/sysinfo`, `/health`, `/read`, `/ls`, status, cancel and the agent routes
+  never waited on commands and still do not.
+
+What still runs one at a time, on purpose:
+
+- `POST /computer` (screenshots, mouse and keyboard): one action at a time,
+  because there is one screen and one pointer. A second action sent while one
+  is in flight gets `computer_busy` from `src/computer.js`.
+- A bundled session accepts one turn at a time (`src/sessions.js`).
+- Protocol 0 commands (helpers from build 109 and earlier): 32 at once.
+
+Bridge 0.2.11 and earlier used one whole-computer lock, `command-jobs/mutation.lock`.
+It is no longer written and no longer stops anything. One left by a command
+that was running across the update is treated as that command's running
+marker: its old supervisor removes it on finishing, and otherwise the next
+start or `status` settles its receipt and removes it. A damaged one is removed.
+Old receipts stay readable. An older Bridge does not read `running/`, so after
+a downgrade it does not see commands the newer one started.
 
 Cancellation acknowledgement is not cleanup confirmation. On POSIX, the shell
 process group and descendant groups observed before termination receive TERM,
 then KILL; a bounded exit check establishes `cleanup_confirmed`. Signal denial or
 missing ancestry evidence remains `outcome_unknown:true`. Unconfirmed termination
-keeps the mutation fence only until the command's supervisor has exited; the
+keeps the running marker only until the command's supervisor has exited; the
 receipt keeps `outcome_unknown:true` (see below). Saved
 PIDs alone never authorize a new reader to signal a process. Already orphaned
 daemons are outside the ancestry boundary; earlier writes cannot be undone.
@@ -49,21 +101,21 @@ On Stop, timeout or bounded provider close, the native observer terminates its
 private Job and queries its accounting until `ActiveProcesses == 0`, for at most
 750ms. Only that observation emits the exact private `job-empty` receipt. The JS
 owner allows at least1s before hard fallback, requires the complete receipt and
-EOF, and otherwise reports interrupted/unknown and retains the mutation fence.
+EOF, and otherwise reports interrupted/unknown and keeps its running marker.
 Missing/malformed receipts, query failures, observer death and hard fallback are
 not cleanup confirmation. A nonzero observer exit without proof is also unknown
 when no explicit Stop was requested: protocol1 persists `interrupted` and keeps
-its mutation fence, while historical protocol0 receipt lookup preserves its
+its running marker, while historical protocol0 receipt lookup preserves its
 `failed` plus `outcome_unknown` shape. An ordinary nonzero command exit with
 native proof remains `failed`; successful intentional background handoff remains
 `completed`. A late cancellation cannot rewrite either accepted outcome. Private pipes are disposed at final bounded settlement;
-late data cannot upgrade an unknown receipt. No remote acknowledgement is added: the lock releases itself locally once
+late data cannot upgrade an unknown receipt. No remote acknowledgement is added: the marker is cleared locally once
 the command's supervisor is gone. These adapters add no AI call, retry or authorization.
 
-The mutation lock is held only while the command's supervisor is alive (or,
-before a first receipt, its launcher). When a new mutation, a status poll or
-the local `status` command finds a lock whose process is gone, it settles the
-receipt and releases the lock itself; the owner does nothing. On Windows the
+A running marker stays only while its command's supervisor is alive (or,
+before a first receipt, its launcher). When a new start, a status poll or
+the local `status` command finds a marker whose process is gone, it settles the
+receipt and removes the marker itself; the owner does nothing. On Windows the
 command's kernel Job ends with its supervisor, and on POSIX its process groups
 have already been signalled, so nothing from that command is still running
 under Bridge's ownership. The receipt keeps what is known:
@@ -77,8 +129,8 @@ under Bridge's ownership. The receipt keeps what is known:
 - Otherwise the receipt stays `interrupted` with `outcome_unknown`, marked
   `released_automatically`. It is never replayed.
 
-A lock file that cannot be parsed is the one case left to the owner: `status`
-names the file.
+A marker that cannot be parsed is removed once it is older than a launch can
+take (60 seconds). Nothing is left for the owner to clear by hand.
 
 Successful command stdout/stderr EOF still commits the existing explicit
 background handoff. An atomic native terminal decision orders cancellation

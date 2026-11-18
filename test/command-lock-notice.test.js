@@ -64,13 +64,28 @@ test("status releases a lock whose command is gone and reports one that is still
   assert.equal(fs.existsSync(lockPath), false);
   assert.match(run("acknowledge-command").stdout, /No command lock is pending/);
 
-  // A truncated lock cannot be acknowledged; name the file instead of crashing.
+  // Two chats running at once are both reported, and neither can be released by hand.
+  const second = "9".repeat(64), other = "b".repeat(64);
+  record({ state: "running", supervisor_pid: process.pid, created_at: Date.now() });
+  lock({ launcher_pid: process.pid, created_at: Date.now() });
+  fs.writeFileSync(path.join(jobsDir, `${second}.json`), JSON.stringify({ job_id: second, scope: other, fingerprint, state: "running", created_at: Date.now(), supervisor_pid: process.pid }));
+  fs.mkdirSync(path.join(jobsDir, "running"), { recursive: true });
+  fs.writeFileSync(path.join(jobsDir, "running", `${second}.json`), JSON.stringify({ id: second, scope: other, fingerprint, launcher_pid: process.pid, created_at: Date.now() }));
+  const both = run("status");
+  assert.ok(both.stdout.includes("2 computer commands are running"), both.stdout);
+  const several = run("acknowledge-command");
+  assert.equal(several.status, 1);
+  assert.match(several.stderr, /Several commands are running/);
+  for (const job of [id, second]) fs.rmSync(path.join(jobsDir, `${job}.json`));
+  fs.rmSync(path.join(jobsDir, "running"), { recursive: true }); fs.rmSync(lockPath);
+
+  // A truncated old lock needs nothing from the owner any more: once it is
+  // older than a launch could take, it is removed.
   fs.writeFileSync(lockPath, "");
+  assert.match(run("status").stdout, /A computer command is starting/);
+  fs.utimesSync(lockPath, new Date(Date.now() - 120000), new Date(Date.now() - 120000));
   const damaged = run("status");
   assert.equal(damaged.status, 0, damaged.stderr);
-  assert.ok(damaged.stdout.includes(`A damaged command lock blocks new commands: ${lockPath}`));
-  const stuck = run("acknowledge-command");
-  assert.equal(stuck.status, 1);
-  assert.ok(stuck.stderr.includes(lockPath));
-  assert.equal(fs.existsSync(lockPath), true);
+  assert.doesNotMatch(damaged.stdout, /is running|damaged/);
+  assert.equal(fs.existsSync(lockPath), false);
 });

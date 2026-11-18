@@ -53,19 +53,19 @@ On Linux user-service installations, each supervisor runs in a separate systemd
 user scope so restarting the connection does not kill an in-flight command.
 Native app-owned runtimes keep their existing cancellation boundary: explicit
 pause, logout, disconnect, update retirement or owner termination stops owned
-commands too. An interrupted command keeps its receipt and mutation lock until
-the local owner reconciles it; reopening the app never replays it. A foreground
+commands too. An interrupted command keeps its receipt; reopening the app never replays it. A foreground
 close or Quit merely detaches from an established background connection and
 does not retire its runtime. This differs from an explicit disconnect.
 Poll the receipt after a timeout; never submit a second command to recover a
 lost response. Receipts under the private `command-jobs` directory retain job
 identity, command hash, timing, exit status and bounded output for 24 hours
-(maximum 256 records). A missing supervisor is an unknown outcome, never an
-automatic replay. Its mutation lock is held only while the command's supervisor
+(the newest 1,024 records). Commands run in parallel: any number of chats, and
+several commands in one chat, without waiting for each other (see
+[commands.md](commands.md)). A missing supervisor is an unknown outcome, never an
+automatic replay. Its running marker stays only while the command's supervisor
 (or, before a first receipt, its launcher) is alive. After that the next
-command, status poll or `shapes-bridge status` releases it; nothing has to be
-run by hand, and restart, update and re-pairing no longer leave a computer
-refusing commands. The receipt keeps its unknown outcome and the command never
+command, status poll or `shapes-bridge status` clears it; nothing has to be
+run by hand, and no earlier command can leave a computer refusing commands. The receipt keeps its unknown outcome and the command never
 reruns. `shapes-bridge acknowledge-command` still exists and does the same
 release on request. There is no remote acknowledgement endpoint.
 The public tunnel is reverified on every heartbeat; three endpoint failures

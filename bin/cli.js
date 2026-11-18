@@ -34,19 +34,13 @@ function openBrowser(url) {
   child.unref();
 }
 
-const DAMAGED_LOCK = (file) => `A damaged command lock blocks new commands: ${file}\nCheck that nothing from an earlier command is still running on this computer, then delete that file.`;
-
-// The owner's only way to learn why commands are refused after re-pairing.
+// Commands never wait for each other, so this is information, not a blocker.
 function lockNotice() {
-  let lock;
-  try { lock = require("../src/command-jobs").pendingLock(); }
+  let running;
+  try { running = require("../src/command-jobs").pendingLocks(); }
   catch { return; }
-  if (!lock) return;
-  if (!lock.job_id) return log(DAMAGED_LOCK(lock.file));
-  if (lock.running) return log(`A computer command is running (job ${lock.job_id}). New commands wait until it finishes.`);
-  const launcher = fs.existsSync(runtimePaths().launcher) ? `"${runtimePaths().launcher}"` : "shapes-bridge";
-  const started = Number.isFinite(lock.created_at) ? `, started ${new Date(lock.created_at).toISOString()}` : "";
-  log(`Commands are blocked. An earlier command (${lock.state}${started}) did not release its safety lock, so new commands are refused until you review it. Restarting, updating or reinstalling does not clear this.\nCheck that nothing from that command is still running on this computer, then run:\n  ${launcher} acknowledge-command ${lock.job_id}\nThis releases the lock. It does not retry the command or mark it successful.`);
+  if (running.length === 1) log(running[0].job_id ? `A computer command is running (job ${running[0].job_id}).` : "A computer command is starting.");
+  else if (running.length) log(`${running.length} computer commands are running.`);
 }
 
 function showStatus() {
@@ -148,14 +142,13 @@ async function main() {
     const jobs = require("../src/command-jobs");
     let id = argv[1];
     if (!id) {
-      // Only one mutation lock can exist, so the owner need not copy its ID.
-      const lock = jobs.pendingLock();
-      if (!lock) { log("No command lock is pending. New computer operations are already allowed."); return; }
-      if (!lock.job_id) throw new Error(DAMAGED_LOCK(lock.file));
-      id = lock.job_id;
+      const pending = jobs.pendingLocks();
+      if (!pending.length) { log("No command lock is pending. New computer operations are already allowed."); return; }
+      if (pending.length > 1 || !pending[0].job_id) throw new Error(`Several commands are running. Name one: acknowledge-command <job>\n${pending.map((entry) => `  ${entry.job_id} (${entry.state})`).join("\n")}`);
+      id = pending[0].job_id;
     }
     jobs.acknowledgeInterrupted(id);
-    log(`Job ${id}: command lock acknowledged locally. Existing receipts are unchanged; an orphan lock receives an interrupted receipt. New computer operations are allowed. The command was not replayed.`);
+    log(`Job ${id}: acknowledged locally. Existing receipts are unchanged; a command that never saved a receipt gets an interrupted one. The command was not replayed.`);
     return;
   }
   if (command === "logs") {

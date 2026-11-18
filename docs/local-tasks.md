@@ -38,4 +38,4 @@ process containment. Intentional background commands and the existing legacy
 HTTP-disconnect behavior are unchanged. [Scoped command start/status/cancel](commands.md)
 provide explicit cancellation instead of relying on closing an HTTP request.
 Windows uses the owned Job and independently confirmed cleanup receipt described
-in the command contract; uncertain termination retains its mutation fence.
+in the command contract; uncertain termination keeps its running marker.
