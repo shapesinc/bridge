@@ -45,8 +45,10 @@ How each input is delivered:
 | `drag` within one text element | Accessibility text selection | |
 | other `drag` | Mouse events posted to the app | Stays inside the app. Moving windows and dropping onto another app need the real pointer, so they aren't attempted. |
 | `scroll` | Scroll-wheel event posted to the app's window | Chromium/Electron content may drop background wheel events. |
-| `type`, `press_key` | Keyboard events posted to the app's process | They reach the app's focused element (click the field first). Text never touches the clipboard. |
+| `type`, `press_key` | Keyboard events posted to the app's process; line breaks and tabs go as Return/Tab presses | They reach the app's focused element (click the field first). For a window target, that window is first made the app's main window (inside that app only; it stays inactive) or the keys are refused with `target_not_focused`. Text never touches the clipboard. |
 
+A click into another of the app's windows makes it that app's main window
+through Accessibility, as a real click would, without activating the app.
 Mouse events posted to a process carry its pid and window number. From macOS 27
 they also carry a window-local point, because WindowServer no longer derives it.
 The receipt's `via` is `accessibility` or `events`; `pointer` is the global point
