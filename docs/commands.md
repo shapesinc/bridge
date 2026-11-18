@@ -57,6 +57,10 @@ several tool calls in one step) all start immediately.
   for storage, and a running command's receipt is never dropped. A start
   repeated with the same `request_key` after its receipt was dropped would run
   again; that needs 1,024 newer commands in between.
+- On Windows a supervisor does not repeat the state directory's ACL rewrite:
+  the Bridge process that starts it has just done so and passes
+  `SHAPES_BRIDGE_STATE_SECURED`. Repeating it per command made commands that
+  start together time each other out.
 - `/sysinfo`, `/health`, `/read`, `/ls`, status, cancel and the agent routes
   never waited on commands and still do not.
 
@@ -153,37 +157,3 @@ the selected wire and identity across lost responses, status and cancellation;
 it must never fall back to another hash/protocol after a possibly executed start.
 Older upstream protocol 1 helpers may lack cleanup evidence and tombstones, so
 version 1 alone is not proof of either. Inspect the actual receipt fields.
-
-## Verification and cost
-
-Actual native 106 testing reproduced a shell surviving UI Stop and writing a
-late marker. Build 108 repeated that ordinary request through the new primitives:
-UI Stop ended the captured Node process/group, persisted cancellation, and the
-marker stayed absent beyond its original deadline. Build 109 additionally
-completed a repository fix, CSV arithmetic and HTML editing through ordinary
-native chats. These are historical candidate receipts, not acceptance of this
-integrated protocol 1 package; its affected UI flows remain pending.
-
-`test/command-concurrency.test.js` runs real supervisors over HTTP: several
-chats at once, five commands sent together in one chat, the same start sent
-twice, the runaway guard, stop and timeout beside running commands, commands
-whose process died, the old lock across an update, separate processes racing
-for the guard and a full receipt store. `test/command-jobs.test.js` exercises actual HTTP, local independent supervisors,
-exactly-once writes, scope isolation, disconnected readers, a cross-process
-cancel/initial-save race, tombstones, detached descendants and delayed side
-effects. `test/commands.test.js` preserves legacy receipt/primitive checks and
-injects signal denial without changing real permissions. Missing-supervisor and
-storage-failure cases are explicit simulations. No test uses a paid provider.
-
-Version negotiation, status and cancellation add no inference calls. Native
-cleanup proof and private revocation tokens never enter model context. Durable
-command receipt fields may enter existing tool continuations, so the integrated
-protocol is not assumed to have zero context cost. Adoption and serialized
-receipt sizes are unmeasured: an explicit upper scenario of 200 extra input
-tokens/result, read 1–5 times, with 20% retry overhead and $1–10/million input
-(fully cached to fully fresh) is **+$0.024–1.20/day at 100 results,
-+$0.24–12/day at 1,000, or +$2.40–120/day at 10,000**. This covers receipt history
-and retries, with no added classifier/embedding/output calls. It is provider
-spend, not user credits, and is separate from the 24k→32k retained-history
-projection in `docs/bundled-sessions.md`. No savings or measured adoption are
-assumed. Regression fixtures themselves spend $0.
