@@ -24,6 +24,8 @@ function home(t) {
 // An exited child's PID models a supervisor that is gone.
 const deadPid = () => spawnSync(process.execPath, ["-e", ""]).pid;
 const lockFile = () => path.join(jobs.root(), "mutation.lock");
+// Anything that looks at what is running clears the markers of commands that are gone.
+const sweep = () => jobs.pendingLocks();
 function stranded(id, record, pending) {
   const supervisor = deadPid(), base = { job_id: id, scope, fingerprint, command_hash: "c".repeat(64), created_at: Date.now() - 60000 };
   fs.writeFileSync(path.join(jobs.root(), `${id}.json`), JSON.stringify({ ...base, ...record, ...(record.state === "queued" ? {} : { supervisor_pid: supervisor }) }));
@@ -45,11 +47,11 @@ test("a finished command whose receipt could not be replaced is adopted and unlo
   assert.deepEqual(fs.readdirSync(jobs.root()).filter((name) => name.endsWith(".tmp")), []);
 });
 
-test("an already interrupted receipt with the finished record beside it heals on the next mutation", async (t) => {
+test("an already interrupted receipt with the finished record beside it heals on the next look", async (t) => {
   home(t);
   const id = "2".repeat(64);
   stranded(id, { state: "interrupted", started_at: 1, finished_at: 3, result: { exit_code: -1, stdout: "", stderr: LOST, outcome_unknown: true } }, done);
-  assert.equal(await jobs.mutation(async () => "ran"), "ran");
+  sweep();
   assert.equal(jobs.load(id).state, "completed");
   assert.equal(fs.existsSync(lockFile()), false);
 });
@@ -82,20 +84,19 @@ test("without local proof the outcome stays unknown, and the lock clears once th
     const receipt = jobs.status(id, scope);
     assert.equal(receipt.state, "interrupted", id);
     assert.equal(receipt.outcome_unknown, true, id);
-    assert.equal(await jobs.mutation(async () => "ran"), "ran", id);
+    sweep();
     assert.equal(fs.existsSync(lockFile()), false, id);
     assert.equal(jobs.load(id).state, "interrupted", id);
     assert.equal(jobs.load(id).released_automatically, true, id);
   }
 });
 
-test("a command whose supervisor is alive keeps the lock", async (t) => {
+test("a command whose supervisor is alive keeps its marker", async (t) => {
   home(t);
   const id = "b".repeat(64);
   stranded(id, { state: "running", started_at: 1 }, null);
   fs.writeFileSync(path.join(jobs.root(), `${id}.json`), JSON.stringify({ ...jobs.load(id), supervisor_pid: process.pid }));
-  await assert.rejects(jobs.mutation(async () => assert.fail("must not run")), { errorType: "computer_busy" });
-  await assert.rejects(jobs.start({ cmd: "echo no", timeout: 5, scope, request_key: "d".repeat(64) }), { errorType: "computer_busy" });
+  assert.deepEqual(sweep().map((entry) => [entry.job_id, entry.running]), [[id, true]]);
   assert.equal(fs.existsSync(lockFile()), true);
   assert.equal(jobs.load(id).state, "running");
 });
@@ -112,18 +113,19 @@ test("a process number reused by another program does not keep the lock", async 
   reuse(path.join(jobs.root(), `${id}.json.${process.pid}.tmp`), { supervisor_pid: process.pid, created_at: old });
   reuse(path.join(jobs.root(), `${id}.json`), { supervisor_pid: process.pid, created_at: old, command: { timeout: 90 } });
   fs.writeFileSync(path.join(jobs.root(), `${id}.supervisor`), String(process.pid));
-  assert.equal(await jobs.mutation(async () => "ran"), "ran");
+  sweep();
   assert.equal(jobs.load(id).state, "completed");
   assert.equal(fs.existsSync(lockFile()), false);
 
   // Same for a launcher that died before its first receipt.
   const orphan = "d".repeat(64);
   fs.writeFileSync(lockFile(), JSON.stringify({ id: orphan, scope, fingerprint, command_hash: "c".repeat(64), launcher_pid: process.pid, created_at: old }));
-  assert.equal(await jobs.mutation(async () => "ran"), "ran");
+  sweep();
   assert.equal(jobs.load(orphan).state, "interrupted");
   // Inside the launch window a live launcher still owns the lock.
   fs.writeFileSync(lockFile(), JSON.stringify({ id: "e".repeat(64), scope, fingerprint, command_hash: "c".repeat(64), launcher_pid: process.pid, created_at: Date.now() }));
-  await assert.rejects(jobs.mutation(async () => assert.fail("must not run")), { errorType: "computer_busy" });
+  assert.equal(sweep().length, 1);
+  assert.equal(fs.existsSync(lockFile()), true);
 });
 
 test("receipt replacement waits out a longer Windows sharing violation", () => {

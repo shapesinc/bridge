@@ -25,8 +25,8 @@ async function supervise(id) {
     Object.assign(record, { state: uncertain ? "interrupted" : result.stopped === "cancelled" ? "cancelled" : result.termination_reason?.startsWith("timed out") ? "timed_out" : result.exit_code === 0 ? "completed" : "failed",
       finished_at: Date.now(), result });
     jobs.save(record);
-    // Unconfirmed termination keeps this chat's lock until this supervisor has
-    // exited; a signal acknowledgement is not a completed cleanup.
+    // Unconfirmed termination keeps the running marker until this supervisor
+    // has exited; a signal acknowledgement is not a completed cleanup.
     if (!uncertain) jobs.release(id);
   } finally { clearInterval(timer); process.removeListener("SIGTERM", cancel); process.removeListener("SIGINT", cancel); }
 }
