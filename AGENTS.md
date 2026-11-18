@@ -15,4 +15,4 @@
 - Instead of compiling twice, the standalone asset may reuse the unchanged helper from a completed native release built from the exact reviewed Bridge commit/version. Verify the accepted notary ticket and staple an extracted copy if needed; never re-sign, relabel or change its runtime. Archive that verified helper and generate its checksum. Bundled-installer smoke tests must isolate home/state and simulate global service-manager calls: a custom state directory alone does not isolate `stopService`. Keep signature, copy and version checks real and label the service-manager simulation.
 - Record commit/tag, native pin/release, asset hashes, validation and public latest-download proof. Do not claim rollout from a draft upload or CI alone. Tagging, publishing, merging and production changes require authorization from the current task; existing explicit authorization remains valid.
 
-See [README: Releasing the macOS app](README.md#releasing-the-macos-app) for the supported build and publication sequence.
+See [Releasing the macOS app](docs/releasing.md) for the supported build and publication sequence.
