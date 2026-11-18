@@ -224,7 +224,9 @@ Use the following coordinated sequence after release authorization:
 The separate original-input/connected-tool release uses **0.2.10**. The Windows
 parity integration now uses **0.2.11**, combining the reviewed 0.2.9 Windows
 runtime with that incoming input/context/tool source and an authenticated Windows
-local-channel adapter. Preserve all prior signed artifacts and tags; never
+local-channel adapter. The parallel-commands runtime (commands no longer wait
+for each other, see [docs/commands.md](docs/commands.md)) uses **0.2.12**.
+Preserve all prior signed artifacts and tags; never
 relabel a changed helper. Both desktop pins must identify the same tested
 combined source. Publish an accepted compatible native release, then verify the
 same-version standalone asset as latest, before merging bumped installer metadata.
