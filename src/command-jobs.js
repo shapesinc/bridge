@@ -64,7 +64,8 @@ function launchSupervisor(id) {
       ...(systemdVersion >= 254 ? ["--expand-environment=no"] : []), "--", binary, ...args];
     binary = "systemd-run";
   }
-  return spawn(binary, args, { detached: true, windowsHide: true, stdio: "ignore", env: process.env });
+  // start() secured the state directory (claim → ensureStateDir) before this.
+  return spawn(binary, args, { detached: true, windowsHide: true, stdio: "ignore", env: { ...process.env, SHAPES_BRIDGE_STATE_SECURED: stateDir() } });
 }
 
 function save(record, { exclusive = false } = {}) {
