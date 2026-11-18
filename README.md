@@ -1,42 +1,81 @@
-# shapes.inc Bridge
+<p align="center">
+  <img src="assets/shapes-inc-bridge.png" alt="shapes.inc Bridge" width="96" height="96">
+</p>
 
-**Give your shapes hands on your own computer — with your consent.**
+<h1 align="center">shapes.inc Bridge</h1>
 
-Your shapes live in the chat. shapes.inc Bridge is a small app you run on your
-computer that lets them reach *this machine* — run a command, read or write a
-file, open an app — over a secure, token-locked door that only you control.
-Connect it once to your shapes.inc account, then allow it in the chats where
-you want to use it. The connection runs in the background, survives a closed
-terminal, and starts again when you sign in to your computer.
+<p align="center">
+  Let your shapes use your computer, only in the chats you allow.
+</p>
 
-On macOS it installs as **shapes.inc Bridge** in `~/Applications`: the signed,
-notarized app from the latest GitHub release (Developer ID: Circle Labs, Inc.),
-with the shapes.inc icon in Finder, Spotlight, Login Items and permission
-prompts. Opening the app restarts the connection (or resumes it when paused).
-If the release cannot be downloaded, the installer builds an unsigned copy from
-your own Node, which macOS lists as an unidentified developer. On Linux it adds
-a **shapes.inc Bridge** launcher entry; on Windows it registers a
-**shapes.inc Bridge** scheduled task.
+<p align="center">
+  <a href="https://github.com/shapesinc/bridge/actions/workflows/ci.yml"><img src="https://github.com/shapesinc/bridge/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+</p>
 
-## Run it
+> [!TIP]
+> **Most people don't need this repo.** Get the shapes.inc app for Mac or
+> Windows from **[shapes.inc/downloads](https://shapes.inc/downloads)**, sign
+> in, and choose **Connect this Mac** or **Connect this PC** in a chat. Bridge
+> is built into the app, so you don't need a terminal, Node or anything else.
+>
+> This repo is the source code, plus a terminal install for advanced users:
+> Linux, headless machines, or anyone who wants to run it from source.
 
-The shapes.inc Mac app can include Bridge. Choose **Computer connection…**
-from the shapes.inc application menu, then **Connect**. Approve the matching
-code in shapes.inc and choose which chats may use the computer. Node and the
-tunnel helper are included; no terminal command or separate download is needed.
-**Disconnect** stops remote access and keeps the computer disconnected after
-restart. Closing the window cancels unfinished approval; an established
-connection keeps running until disconnected. This requires a Mac app release
-built with Bridge 0.2.5 or later; older app releases do not include these controls.
+## What it does
+
+Bridge is a small background app on your computer. Once you connect it to your
+shapes.inc account and allow it in a chat, shapes in that chat can:
+
+- run commands and read or write files
+- open files, apps and links
+- see the screen and use the keyboard and mouse (with your OS permission)
+- hand tasks to Codex or Claude Code if you already use them
+
+It keeps running in the background, reconnects after network changes, and
+starts again when you sign in.
+
+## Is it safe?
+
+- **Account pairing and chat consent are separate.** Pairing saves the computer
+  to your account; a chat receives access only after an explicit chat grant.
+  The persistent device credential stays in private local state and is never
+  printed in the terminal, browser approval URL, or chat message.
+- **Locked with a random secret token**, generated fresh on each background
+  process start. The server rejects machine actions without it. Endpoint and
+  token changes are registered over the authenticated account connection.
+- **Visible activity.** Bridge actions are recorded in private local logs.
+  Delegated agent jobs keep their detailed diagnostics in private local files.
+- **Disconnect immediately.** `pause` closes remote bridge access. Removing the
+  computer in shapes.inc revokes its device credential; the service notices at its
+  next heartbeat and stops serving. Agent jobs already started continue until completion
+  or cancellation; cancel them first if you also want that work to stop.
+- **Your OS stays in charge.** Password, secure-input, lock-screen, and
+  system-protected UI remain subject to OS restrictions. The bridge does not
+  bypass these protections.
+- The tunnel is a [Cloudflare quick-tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/)
+  — no account, no signup, temporary. The `cloudflared` helper is downloaded once
+  and cached under `~/.shapes-bridge/`.
+
+## Using the shapes.inc app (recommended)
+
+In the shapes.inc Mac app, choose **Computer connection…** from the shapes.inc
+application menu, then **Connect**. Approve the matching code in shapes.inc and
+choose which chats may use the computer. Node and the tunnel helper are
+included; no terminal command or separate download is needed. **Disconnect**
+stops remote access and keeps the computer disconnected after restart. This
+requires a Mac app release built with Bridge 0.2.5 or later.
 
 The native window does not grant chat access or operating-system permissions.
 **Computer permissions…** explicitly requests the existing permission flow.
-Pairing remains separate from the web app's current signed-in session; the
-account approving the displayed code owns the computer connection.
+The app runs its embedded Bridge under **ComputerConnectionHost**: enable that
+item under Privacy & Security → Accessibility. Approving the standalone Bridge
+does not approve the embedded host.
 
-### Standalone installation
+## Standalone install (advanced)
 
-You need [Node.js](https://nodejs.org) 18+. No DMG, Python, or administrator
+For Linux, a headless machine, or a computer without the shapes.inc app. You
+need [Node.js](https://nodejs.org) 18+. No DMG, Python, or administrator
 installation is required.
 
 ```bash
@@ -49,50 +88,19 @@ npx --yes --package=https://github.com/shapesinc/bridge/archive/refs/heads/main.
 4. Choose this computer in **Connect Computer** in a chat. You can use the same
    saved computer in other chats without installing or pairing it again.
 
-The installer reports **Connected** only after the background process has
-contacted shapes.inc. You can close the terminal. Changing networks or restarting
-the tunnel automatically updates the endpoint without changing your account
-pairing or existing chat grants.
+You can close the terminal afterwards. Install options: `--name <name>` names
+this computer, `--no-open` does not open the browser for the approval link,
+`--no-awake` turns keep-awake off, and `--no-permissions` skips the guided
+permission pass.
 
-Install options: `--name <name>` names this computer, `--no-open` does not open
-the browser for the approval link, `--no-awake` turns keep-awake off, and
-`--no-permissions` skips the guided permission pass.
+On macOS it installs as **shapes.inc Bridge** in `~/Applications`: the signed,
+notarized app from the latest GitHub release (Developer ID: Circle Labs, Inc.).
+If the release cannot be downloaded, the installer builds an unsigned copy from
+your own Node, which macOS lists as an unidentified developer. On Linux it adds
+a **shapes.inc Bridge** launcher entry and a user systemd service; on Windows it
+registers a **shapes.inc Bridge** scheduled task.
 
-The installed code and a private Node runtime live inside the app bundle on
-macOS (`~/Applications/shapes.inc Bridge.app`) and in `~/.shapes-bridge/runtime`
-on Linux and Windows; the service never depends on an `npx` cache or an open
-terminal. Run `update` (or `install` again) to update it without pairing again. Bare `npx --yes --package=https://github.com/shapesinc/bridge/archive/refs/heads/main.tar.gz shapes-bridge`
-starts setup on a new computer and shows status on an existing installation.
-
-Older instructions using `npx github:shapesinc/bridge` are also supported. The
-package includes a `bridge` command alias so npm can choose the setup command
-even though this package also contains the separate `shapes-codex` command.
-
-## Controls and computer permissions
-
-The signed desktop bundle exposes authenticated `POST /computer` when
-`GET /capabilities` reports `features.computer_control`. The server accepts
-`{scope, control}`; `scope` is a server-derived actor/chat/connection digest,
-never a model-provided identity. `control.operation` is `observe`, `click`,
-`move`, `drag`, `scroll`, `type` or `press_key` (see `src/computer.js`).
-An observation returns a JPEG, image dimensions, available displays, foreground
-app and a single-use `observation_id`, valid for 30 seconds. Each input consumes
-that observation before dispatch. Input uses image-pixel coordinates translated
-to the captured display's global bounds. A changed foreground app or display,
-secure input, missing Accessibility/Screen Recording consent, expired image or
-concurrent operation fails closed. A lost response must be recovered by observing,
-never by replaying input. The receipt says `dispatched`, not that the task worked.
-
-The bundled `shapes.inc Bridge Computer` executable captures with ScreenCaptureKit
-and posts CoreGraphics events; it checks consent in that process and never changes
-the clipboard or prompts for permission from a remote action. Installation without
-that signed native executable advertises the capability as unavailable. The
-Windows bundle uses `shapes.inc Bridge Computer.exe` with desktop capture and
-Windows input APIs. It validates the foreground window, display geometry,
-interactive desktop and protected-input state before dispatch. See
-[Windows computer control](scripts/windows/COMPUTER_CONTROL.md) for platform
-semantics and required signed-candidate acceptance. Existing
-shell/file actions retain their contracts. Screenshots and typed text are not logged.
+### Everyday commands
 
 The installer creates a local command that works without npm or network access.
 On macOS and Linux:
@@ -132,202 +140,21 @@ Replace `status` with any of these commands. No shell profile changes are made.
   the local service still stops; run `uninstall` again when online to finish
   account revocation.
 
-On macOS, `install` ends with one guided permission pass: the installed app asks
-for Accessibility and Screen Recording, triggers the Automation prompts for
-Finder and System Events, and opens the Full Disk Access pane with shapes.inc
-Bridge already listed so it only has to be turned on. The installer shows the
-checklist and waits until everything is allowed (Enter skips; `--no-permissions`
-skips the pass). `permissions` repeats it any time. Grant access to the
-installed **shapes.inc Bridge** app for the standalone installation. The native
-shapes.inc app instead runs its embedded Bridge under **ComputerConnectionHost**:
-enable that item under Privacy & Security → Accessibility. The native setup's
-**Show app in Finder** action reveals the exact bundled app if it must be added
-to the list. Approving the standalone Bridge does not approve the embedded host.
-Setup requests permissions from the background service;
-granting Terminal access does not establish that the service has access.
-Accessibility and Screen Recording use native preflight checks. Full Disk
-Access is checked by opening a protected system file; Automation is checked per
-target app (Finder, System Events) without prompting.
-Recovery links select the Privacy & Security extension on macOS 13 and newer,
-and retain the Security preference pane on older macOS. Opening a pane or
-requesting access never changes the reported permission until the native probe
-confirms it. The standalone guided setup, explicit per-permission requests and
-embedded native requests share this recovery implementation.
-The OS may require restarting the connection after a grant (`pause`, then
-`resume`). Password, secure-input, lock-screen, and system-protected UI remain
-subject to OS restrictions. The bridge does not bypass these protections.
+### Troubleshooting
 
-Background startup uses a macOS LaunchAgent (listed in Login Items as
-shapes.inc Bridge), Linux user systemd service, or Windows Task Scheduler task
-in the signed-in user's interactive session. When the account removes this
-computer, the service stops and removes its own automatic startup; run `install`
-to connect it again.
-Linux requires a working user systemd session; graphical control depends on
-the desktop and display server. Windows and Linux report macOS-specific TCC
-permissions as unsupported. Cross-platform service definitions are tested with
-fixtures; real desktop and restart acceptance requires each supported OS.
+- **Shape says it can't connect?** Run `status`. Resume a paused connection;
+  check the network and `logs` if it says reconnecting. There is no need to pair again.
+- **Computer removed / revoked?** Run `install` to approve a new pairing.
+- **Permissions denied?** Run `permissions` on that computer and approve the OS
+  prompt. Full Disk Access and per-app Automation may need separate grants.
+- **Installed but offline on macOS?** Use the default location. The OS may
+  prevent a background service from loading code stored in Downloads or Desktop.
+- **Windows: "The task XML is malformed"?** Fixed in November 2026. Run the
+  install command again to pick up the fix.
+- **Want to stop?** Run `pause`, or `uninstall` to also revoke account access.
 
-Windows command scripts default to PowerShell and retain newlines, `$env`
-variables, quotes and Unicode. Use `shell=cmd` explicitly for a single-line
-cmd.exe command. The scheduled task remains **LeastPrivilege**: sharing a
-computer with another chat member does not grant administrator rights.
-`sysinfo.elevated` reports the actual token (or null if it cannot be checked).
-For a task needing elevation, the owner must review and perform that specific
-operation in an Administrator terminal. `update` or `restart` rewrites the
-scheduled task with a valid UTF-16 BOM; existing pairing is retained.
-
-Recoverable commands use `/commands/start`, `/commands/status` and
-`/commands/cancel` with server-issued scope and request keys. A detached local
-supervisor enforces the command deadline independently of the HTTP connection.
-On Linux user-service installations, each supervisor runs in a separate systemd
-user scope so restarting the connection does not kill an in-flight command.
-Native app-owned runtimes keep their existing cancellation boundary: explicit
-pause, logout, disconnect, update retirement or owner termination stops owned
-commands too. An interrupted command keeps its receipt and mutation lock until
-the local owner reconciles it; reopening the app never replays it. A foreground
-close or Quit merely detaches from an established background connection and
-does not retire its runtime. This differs from an explicit disconnect.
-Poll the receipt after a timeout; never submit a second command to recover a
-lost response. Receipts under the private `command-jobs` directory retain job
-identity, command hash, timing, exit status and bounded output for 24 hours
-(maximum 256 records). A missing supervisor is an unknown outcome, never an
-automatic replay. Its mutation lock is held only while the command's supervisor
-(or, before a first receipt, its launcher) is alive. After that the next
-command, status poll or `shapes-bridge status` releases it; nothing has to be
-run by hand, and restart, update and re-pairing no longer leave a computer
-refusing commands. The receipt keeps its unknown outcome and the command never
-reruns. `shapes-bridge acknowledge-command` still exists and does the same
-release on request. There is no remote acknowledgement endpoint.
-The public tunnel is reverified on every heartbeat; three endpoint failures
-replace the tunnel without pairing again or replaying commands. Windows CI
-tests actual Task Scheduler registration, script execution and cancellation.
-
-Keep-awake is enabled by default and can be disabled at setup with `--no-awake`.
-It prevents idle system sleep while the service runs, using `caffeinate`,
-`systemd-inhibit`, or Windows `SetThreadExecutionState`. It does not unlock the
-screen, keep the display lit, override a closed laptop lid, power on a shut-down
-computer, or maintain a connection without internet. The service reconnects
-after wake or network recovery. Automatic startup begins after user sign-in;
-there is no desktop session available before sign-in.
-
-## Releasing the macOS app
-
-The standalone Bridge release and the shapes.inc native-app release are separate
-deliverables. Merging Bridge or publishing a native app does **not** publish the
-standalone GitHub asset. This repository currently automates CI only, with no
-automatic release workflow or npm-registry publication contract. Source installs
-and updates fetch `main`; signed macOS installation downloads
-`shapes.inc-Bridge-macos.zip` from the latest GitHub release.
-
-Use the following coordinated sequence after release authorization:
-
-The separate original-input/connected-tool release uses **0.2.10**. The Windows
-parity integration now uses **0.2.11**, combining the reviewed 0.2.9 Windows
-runtime with that incoming input/context/tool source and an authenticated Windows
-local-channel adapter. Preserve all prior signed artifacts and tags; never
-relabel a changed helper. Both desktop pins must identify the same tested
-combined source. Publish an accepted compatible native release, then verify the
-same-version standalone asset as latest, before merging bumped installer metadata.
-The new connected-tool flag remains off. See [transport contracts and costs](docs/native-tool-proxy.md)
-and [input/context cost scenarios](docs/bundled-sessions.md#integrated-windows-input-cost-and-acceptance).
-No new public artifact, standalone publication or completed installed acceptance
-is claimed by this source integration.
-
-1. Prepare a dedicated worktree from current `origin/main`, an unused numeric
-   `major.minor.patch` package version, and a reviewed release-candidate commit.
-   For a version/docs-only change, run `node --test test/package-bin.test.js` and
-   `npm pack --dry-run`, then let the configured CI checks finish. Create the
-   `v<version>` tag/draft release at that exact candidate, without publishing it.
-2. Under the machine-wide build lock, run `scripts/build-mac-release.sh` on a Mac
-   with the authorized Developer ID certificate and notarytool profile. It
-   verifies downloads, builds both Mac architectures, signs with hardened
-   runtime, notarizes/staples, and writes `dist/shapes.inc-Bridge-macos.zip` and
-   its `.sha256` file. Do not use `SKIP_NOTARIZE=1` for public distribution.
-   Alternatively, reuse the unchanged helper from a completed native release
-   built from the exact reviewed Bridge commit/version. Verify its accepted
-   notary ticket and staple the extracted copy if needed; never re-sign, relabel
-   or modify its runtime. Archive that verified helper and generate the checksum
-   without recompiling it.
-3. Verify the archive's source commit, both architectures, strict signatures and
-   team identity, notarization/stapling and Gatekeeper acceptance. The nested
-   runtime `package.json`, bundle versions and release tag must agree. Exercise
-   `installSignedMacApp` against a disposable destination with the new package
-   version as its minimum; never relabel an already signed older helper.
-   For bundled-installer tests, isolate home/state and simulate global service
-   manager calls because `stopService` is not isolated by a custom state directory.
-   Keep signature, copy and version checks real and record that simulation.
-4. Coordinate the native app's Bridge pin and public release at the same helper
-   version before publishing the standalone asset. The standalone installer
-   rejects an older signed helper, while the bundled installer refuses to
-   downgrade a newer installed Bridge. Updating only one channel can therefore
-   prevent reconnecting through the other entry point that shares the install.
-   Modern app-owned runtime state remains separate from the standalone install.
-5. Upload the verified ZIP and checksum to the draft, publish it as the latest
-   standalone release, then download through the public `releases/latest` URL
-   and verify its bytes, checksum and version. Only then merge the installer
-   version metadata PR onto `main`. Merging the bump first can reject the old
-   latest asset and trigger the existing unsigned local-build fallback. Record
-   the source/tag, native release and public asset verification in the handoff.
-
-Version/docs-only release work adds **$0/day** in AI calls or context. Runtime
-changes still require their affected integration and user-flow checks; packaging
-checks do not replace them. See [AGENTS.md](https://github.com/shapesinc/bridge/blob/main/AGENTS.md)
-for contributor rules.
-
-The release now also builds the native **Computer connection** window and
-packages a universal cloudflared 2026.10.6 executable, with both architecture
-archives checked against pinned SHA-256 values. Both executables are signed
-before the app. Host apps embed the complete signed bundle and open it with
-the `desktop-ui` argument. First connection verifies and copies that bundled
-release into the existing per-user install location, preserving account pairing
-and grants. It never downloads a replacement, accepts an unsigned helper, or
-downgrades a newer installed Bridge. The parent app must be re-signed and
-notarized after embedding; an archive assembled locally is not a release.
-
-`src/desktop.js` exposes independent `connect`, `status`, `pause`, `permissions`
-and `dispose` contracts. `bin/desktop.js` exposes the first four as fixed newline
-commands over private stdin, with JSON status snapshots on stdout. No device
-credential or private polling code is returned. Repeated connect during approval
-resumes that operation; pause/EOF cancels unfinished approval. Status requires a
-fresh heartbeat from the matching device and a live PID before claiming a
-connection. The same primitives cover first pairing, resuming a paused device
-and reconnecting a revoked device. They do not introduce AI calls: **+$0/day**
-provider inference spend; existing requested task execution costs are unchanged.
-
-`bin/embedded.js` is the separate app-owned contract: the signed host launches
-it with its own absolute `SHAPES_BRIDGE_HOME` (never the standalone
-`~/.shapes-bridge`) and speaks one JSON object per line over private stdio
-(`status`, `updateAccount`, `beginConnect`, `completeConnect`, `cancelConnect`,
-`disconnect`, `detach`, `requestPermission`). The standalone CLI, controls app,
-LaunchAgent and state are untouched. `docs/embedded-native-control.md` holds
-the full contract and its acceptance status.
-
-## Is it safe?
-
-- **Account pairing and chat consent are separate.** Pairing saves the computer
-  to your account; a chat receives access only after an explicit chat grant.
-  The persistent device credential stays in private local state and is never
-  printed in the terminal, browser approval URL, or chat message.
-- **Locked with a random secret token**, generated fresh on each background
-  process start. The server rejects machine actions without it. Endpoint and
-  token changes are registered over the authenticated account connection.
-- **Visible activity.** Bridge actions are recorded in private local logs.
-  Delegated agent jobs keep their detailed diagnostics in private local files.
-- **Disconnect immediately.** `pause` closes remote bridge access. Removing the
-  computer in shapes.inc revokes its device credential; the service notices at its
-  next heartbeat and stops serving. Agent jobs already started continue until completion
-  or cancellation; cancel them first if you also want that work to stop.
-- The tunnel is a [Cloudflare quick-tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/)
-  — no account, no signup, temporary. The `cloudflared` helper is downloaded once
-  and cached under `~/.shapes-bridge/`.
-
-There are no new inference calls for pairing, heartbeats, native permission
-checks, or keep-awake: **$0/day added provider inference spend**. Existing task
-and local-agent execution charges still depend on the work you request.
-
-For temporary legacy URL/token connections, run `foreground`. This mode ends
-when its terminal closes. Enter its secret only in the private connection
-dialog, never a chat message.
+Still stuck? [Open an issue](https://github.com/shapesinc/bridge/issues/new)
+with your OS, the command you ran and its full output.
 
 ## What your shapes can do
 
@@ -352,16 +179,18 @@ These map 1:1 to the `SHAPES_BRIDGE` tool in shapes.inc.
 | `codex_cancel` | request that a job stops                  | `POST /codex/cancel` |
 | `codex_jobs` | list recent Codex jobs                     | `GET /codex/jobs` |
 
-## Troubleshooting
+## Documentation
 
-- **Shape says it can't connect?** Run `status`. Resume a paused connection;
-  check the network and `logs` if it says reconnecting. There is no need to pair again.
-- **Computer removed / revoked?** Run `install` to approve a new pairing.
-- **Permissions denied?** Run `permissions` on that computer and approve the OS
-  prompt. Full Disk Access and per-app Automation may need separate grants.
-- **Installed but offline on macOS?** Use the default location. The OS may
-  prevent a background service from loading code stored in Downloads or Desktop.
-- **Want to stop?** Run `pause`, or `uninstall` to also revoke account access.
+| Topic | |
+| --- | --- |
+| Standalone install details, legacy `foreground` mode, dev notes | [docs/standalone-reference.md](docs/standalone-reference.md) |
+| Permissions, background service, Windows, keep-awake | [docs/platform-details.md](docs/platform-details.md) |
+| Screen, keyboard and mouse control | [docs/computer-control.md](docs/computer-control.md) · [Windows](scripts/windows/COMPUTER_CONTROL.md) |
+| Recoverable shell commands | [docs/commands.md](docs/commands.md) |
+| Local Codex and Claude Code | [docs/local-agents.md](docs/local-agents.md) |
+| Account autofill for input forms | [docs/autofill-metadata.md](docs/autofill-metadata.md) |
+| Native app integration | [docs/native-app-integration.md](docs/native-app-integration.md) · [embedded contract](docs/embedded-native-control.md) · [Windows host](docs/windows-native-host.md) |
+| Releasing | [docs/releasing.md](docs/releasing.md) · [AGENTS.md](AGENTS.md) |
 
 ## Development
 
@@ -369,311 +198,18 @@ These map 1:1 to the `SHAPES_BRIDGE` tool in shapes.inc.
 git clone https://github.com/shapesinc/bridge
 cd bridge
 node bin/cli.js --help
+npm test
 ```
 
 Zero runtime dependencies — just Node's standard library. The only external
-piece is the `cloudflared` tunnel binary, fetched on first run.
+piece is the `cloudflared` tunnel binary, fetched on first run. CI runs
+`npm test` and `npm pack --dry-run` on every push to `main` and every pull
+request.
 
-For isolated development, `install --api-url http://127.0.0.1:8098 --state-dir
-/absolute/private/test-directory --no-open` uses a local pairing service.
-Remote API origins require HTTPS and redirects are rejected. Only one
-background shapes.inc Bridge service may be installed per OS user; stop the
-previous test installation before choosing a different state directory.
-
-`npm test` runs Node's built-in test runner (`node --test`) over `test/`; there
-are no dependencies to install. CI (`.github/workflows/ci.yml`) runs `npm test`
-and `npm pack --dry-run` on Node 18 and 22 for every push to `main` and every
-pull request. Design notes for the connection runtime and the app-owned
-contract live in `docs/`. The tests cover the local CLI fixtures and
-authenticated HTTP tests; they make no inference calls. A 2026-10-02 smoke test
-also exercised a real temporary tunnel, the shapes.inc connection service (with
-isolated test membership and storage), and the installed CLI: token checks and
-cross-member rejection passed, discovery identified signed-in Codex and
-signed-out Claude Code,
-Claude was rejected before creating a job, and `auto` completed a Codex
-read-only file task with the expected answer. Claude execution is covered by
-structured fixtures; live Claude inference remains unverified while it is
-signed out.
-
-## Let your shapes use local Codex or Claude Code
-
-Ask a shape to use an agent on your computer for a task. Shapes can discover
-local Codex and Claude Code, then delegate using the agent's existing sign-in
-and settings. You do not need to supply executable paths or shell commands.
-If the computer is not connected, the Shape's **Connect your computer** link
-opens the private setup dialog. **Connect and continue** resumes the request
-after connection succeeds. Update an older bridge with `install` to add new
-endpoints without changing the saved account pairing.
-
-Discovery runs only version, help, and authentication-status checks. `ready`
-means installed, compatible, and signed in; it does **not** establish provider
-availability, quota, or task success. No prompt is sent during discovery, and
-no account identity, authentication output, or credentials are copied to shapes.inc.
-Sign in to the agent locally if it reports `auth_required`.
-
-On macOS, Codex discovery checks its ChatGPT/Codex app bundles and PATH. Claude
-discovery checks PATH, `~/.local/bin`, legacy `~/.claude/local` installs,
-Homebrew locations, and bounded version directories under Claude Desktop's
-`Library/Application Support/Claude/claude-code`. It does not scan credential
-files. `SHAPES_CODEX_BINARY` and `SHAPES_CLAUDE_BINARY` can select explicit
-executables. Claude needs the current headless permission controls, including
-`--permission-prompts none` (added in Claude Code 2.1.259).
-
-The app-owned Windows host checks native `.exe` installs on PATH, the user's
-local bin directory and official npm Codex platform packages. Its bundled Job
-helper owns discovery and execution subprocesses. Installed native hosts ignore
-shell overrides of their runtime binaries. [Windows host contracts and release
-gates](docs/windows-native-host.md) describe foreground quit, task lifetime and
-the same pairing, account and budget boundaries used by macOS.
-
-All agent endpoints require the same `X-Token` header as other machine actions:
-
-- `GET /agents` returns `agents` with `id`, `installed`, `authenticated`,
-  `available`, `status`, and safe `version`/`reason` fields. Status is `ready`,
-  `not_installed`, `unsupported`, `auth_required`, or `check_failed`.
-  `default_agent` is the first ready agent (Codex preferred), or null.
-- `POST /agents/start` accepts a required `prompt` (up to 64 KiB), optional
-  `agent` (`auto`, `codex`, or `claude`; default `auto`), absolute `cwd`
-  (default: bridge working directory), and boolean `workspace_write`
-  (default: false). The authenticated shapes.inc integration can also set
-  `interactive: true` for Codex. It returns HTTP 202 with `job_id`, `agent`,
-  `state: "queued"`, `interactive`, `cwd`, and `sandbox`. Claude receipts also
-  identify `permission_scope`; Claude continues to use its headless runner.
-  Once the agent checks pass, the job is saved as `queued` (and bound to its
-  `request_key`) before its runner launches, so its ID can be listed even if
-  the start response is lost.
-- Start also accepts an optional `request_key` (16-128 letters, digits, `-`,
-  or `_`). Repeating a start with the same key and task returns HTTP 200 with
-  the existing job's current receipt and `deduplicated: true` instead of
-  running the task again. Only a job that failed before it began running can
-  be started again with the same key. Reusing a key for a different task
-  returns HTTP 409.
-- `GET /agents/jobs` lists up to `limit` (default 10, max 50) recent jobs,
-  newest first, with `job_id`, `state`, `agent`, `cwd`, `created_at`,
-  `error`, and a short `task_preview`. `?request_key=…` returns only the job
-  started with that key. `GET /codex/jobs` lists Codex jobs only.
-- If no requested agent is ready, start returns HTTP 409 with
-  `error_type: "agent_unavailable"`, `started: false`, and sanitized `agents`.
-  No job was created. `auto` chooses a ready agent before execution; it never
-  retries another agent after a job starts, because partial work may exist.
-- `GET /agents/status?job_id=…` waits up to 20 seconds for a terminal result
-  and returns HTTP 200 with the current state, `agent`, `final`, `error`,
-  `error_type`, `permission_denials` count, and `thread_id` when reported.
-  `waiting_on_user` returns immediately with a bounded `pending_requests` form;
-  `wait=0` makes any status read immediate. Pending forms are private to the
-  authenticated requesting human, not model tool context or other room members.
-- `POST /agents/cancel` accepts `{"job_id":"…"}`. `cancel_requested` confirms
-  the request, not that the process stopped. Check status afterward.
-
-Native responses exclude raw logs and local diagnostic paths. Poll until
-`completed`, `failed`, `cancelled`, or `timed_out`; queued, running, and
-`waiting_on_user` jobs are not completed work. `completed` confirms a successful agent turn, not that a
-purchase or other requested external effect occurred; verify that from the
-actual task result. Codex browser/app permission rejections produce `failed`
-with `error_type: "permission_denied"`, a positive `permission_denials` count,
-and `needs_user_action: true`, even if the CLI exits zero after explaining the
-blocker. Cancellation and timeout retain their own states. Claude requires an
-explicit successful result, a nonempty final answer, exit code zero, and no
-reported permission denials. Assistant text or tool activity alone never
-counts as completion. Error details remain in private local diagnostics.
-
-## Permissions and task lifetime
-
-The default `workspace_write: false` uses Codex's read-only shell sandbox.
-Claude uses **read-only tools**, not an OS sandbox: only its `Read`, `Grep`, and
-`Glob` built-ins are exposed, with `dontAsk` mode, an empty strict MCP config,
-and MCP tools denied. User hooks and other local configuration still apply.
-Its receipt says `permission_scope: "read-only-tools"` to distinguish this.
-
-For edits, set `workspace_write: true` and a dedicated Git worktree path. The
-launcher refuses writes in a repository's primary checkout; create the worktree
-first. A directory outside Git can also be used, but has no Git worktree
-protection. Granting a chat this computer is the consent: write jobs run with
-**full access and no per-command approval prompts**. Headless and interactive
-Codex both use `danger-full-access` with approvals set to `never`; the shape is
-still asked real questions (`item/tool/requestUserInput`), never for permission.
-Codex rules, MCP configuration, and model preferences are retained.
-
-Interactive Codex jobs use a bidirectional
-[app-server session](https://learn.chatgpt.com/docs/app-server), keeping the
-same thread and task alive during native browser permission requests and user
-questions. They require Codex 0.160.0 or later with app-server support;
-unsupported clients return an update instruction before creating a job.
-The human answers the form in the shapes.inc chat. The backend
-checks the actor, room, original computer connection and still-pending request,
-then calls `POST /agents/respond` with `{job_id, request_id, response}`. The
-response is `{decision: "accept" | "decline" | "cancel", values: {...}}`.
-This endpoint is deliberately absent from the model tool's actions. The bridge
-revalidates against the original native request and accepts each request ID
-once. Cancel stops the job; answering resumes it without starting the task over.
-Native asynchronous questions are recognized only from structured
-`agentMessage` items with `delivery: "async"` and `questions`. If their turn has
-already ended, the job stays waiting. Explicit answers then start one
-continuation in the same thread containing only those answers, never a replay
-of the original task. Question-like prose alone does not create an approval.
-
-The bridge advertises `features.interactive_codex` on `/capabilities`. Existing
-clients and shared computers retain their established headless behavior. The
-new personal-job integration monitors completion with deterministic polling and
-reports the final result in the original turn. Worker restarts do not replay
-tasks; pending jobs remain inspectable through their authenticated room UI.
-
-Supported prompts are MCP primitive forms, native user questions and one-time
-command approvals. Unknown schemas, URL authentication, device-verification
-proofs and broader filesystem grants stop with `unsupported_approval`;
-ordinary chat consent cannot satisfy them. Hard organization/safety denials
-remain denials. Neither a textual question nor an exit code proves permission
-was granted. Native request IDs, metadata and raw logs are not public receipts.
-Native action-level approval details (`tool_title`, `tool_description` and
-`tool_params`) are shown intact as bounded plain text; an oversized action is
-not approvable through a shortened summary. Other native metadata stays private.
-Browser approval uses the native conversation/turn scope, never a fabricated
-global grant; only command approval is labeled "Allow once".
-The computer owner still controls local code and the token-protected bridge;
-this UI is not an isolation boundary against arbitrary same-user code execution.
-
-The bridge saves `thread_id` immediately. If native access remains blocked,
-the [desktop task link](https://learn.chatgpt.com/docs/reference/commands)
-`codex://threads/THREAD_ID` opens the saved task without granting permission or
-retrying it. The bridge never switches browser or agent to bypass a denial.
-
-Incremental provider cost, estimated October 4, 2026: approval handling and
-deterministic monitoring add no inference calls (**$0/day directly**). For
-legacy clients still polling through the model, detection itself adds
-**$0/day**, but returning the task ID in earlier status replies adds an estimated
-20–40 input tokens per receipt. Fleet traffic and the affected engine mix have
-not been measured; the two inspected incident jobs are not a traffic baseline.
-With three status reads per job and full reuse of prior receipts in later
-context (six total exposures), this is 120–240 input tokens/job. Using current
-[OpenRouter catalog](https://openrouter.ai/api/v1/models) Opus 5 rates of $5/M
-uncached or $0.50/M cached input tokens gives **$0.006–$0.12/day at 100 jobs/day**
-or **$0.06–$1.20/day at 1,000 jobs/day**. These are explicit scenarios, not an
-observed bill; more polls, other engines, or cache writes change the estimate.
-No classifier, extra report generation, retry, embedding, or retrieval is added
-by the monitoring transport; the existing source turn receives the final result.
-Avoided retries/final replies are excluded from these gross increases. Local
-agent plan usage and user credits are separate; neither rate is changed.
-Completing a formerly blocked task uses additional inference on the local
-agent account; its engine, token usage, subscription allowance and affected
-daily task volume are unknown. As a usage-priced illustration only, an
-additional 10,000 input / 2,000 output tokens at Opus 5's $5/M input and $25/M
-output would cost $0.10/task ($10/day at 100 such tasks or $100/day at 1,000),
-or $0.055/task if all input receives the $0.50/M cache-read price. Actual
-continuations can be much shorter or longer; these are not shapes.inc provider
-charges or changes to user credit pricing. Automated tests use fake agents
-($0 in evaluation inference spend). One bounded, question-only validation
-probe used the existing local Codex account and its configured gpt-6-astra
-engine; that is one-time local account usage, not recurring shapes.inc spend.
-
-Claude write jobs run with `--dangerously-skip-permissions`: no permission
-prompts and no per-command approvals for this task. Managed policy, MCP
-services, hooks, and model preferences remain in effect; the launcher changes
-no saved settings. The worktree check validates the starting directory only: it
-does not make Claude an OS sandbox. Read-only jobs keep `--permission-prompts
-none`, so a request that would need interactive permission fails with
-`error_type: "permission_denied"` instead of waiting. The write receipt says
-`permission_scope: "full-access"`.
-See the official [CLI reference](https://code.claude.com/docs/en/cli-reference),
-[headless guide](https://code.claude.com/docs/en/headless), and
-[permission modes](https://code.claude.com/docs/en/permission-modes).
-
-Jobs run independently after start returns. **Closing the bridge does not stop
-an agent job already started**; cancel first if needed. Cancellation and timeout
-terminate the process group. The default timeout is 30 minutes. Prompts and
-bounded logs remain under `~/.shapes-bridge/codex-jobs/` with private permissions
-(directories 0700, files 0600); the historical directory name also holds Claude
-jobs. Remove a finished job's directory to delete its local records.
-`SHAPES_CODEX_JOB_DIR` overrides that storage location. The launcher currently
-supports macOS and Linux; the app-owned Windows distribution adds the native
-Job helper needed to enforce the same task cancellation boundary. Foreground
-Windows app quit detaches from its durable host and preserves established work.
-
-Discovery adds **$0/day in inference cost**. Delegated tasks use the selected
-agent's account plan or configured provider; the launcher adds no classifier,
-extra inference step, or automatic retry. Provider availability is established by each
-actual task result, not by discovery.
-
-## Existing Codex integrations
-
-`/codex/start`, `/codex/status`, and `/codex/cancel` retain the same request
-shapes and only operate on Codex jobs. Start accepts `prompt`, `cwd`, and
-`workspace_write`; status takes the `job_id` query parameter and cancel accepts
-`{"job_id":"…"}`. The `shapes-codex` CLI also remains Codex-only:
-
-```bash
-shapes-codex start --prompt-file /absolute/task.txt --cwd /absolute/project
-shapes-codex status JOB_ID
-shapes-codex cancel JOB_ID
-```
-
-CLI status additionally returns the private diagnostic directory. Use
-`--workspace-write` for edits and `--timeout-seconds` to change the 30-minute
-timeout (maximum 24 hours). A Codex `thread_id` can be opened in its desktop app
-using `codex://threads/THREAD_ID` through `open` when the user requests it;
-Claude session IDs are not Codex thread links.
-
-For a local installation independent of your development worktree:
-
-```bash
-mkdir -p ~/.shapes-bridge/local-codex
-cp -R bin src package.json ~/.shapes-bridge/local-codex/
-node ~/.shapes-bridge/local-codex/bin/codex.js --help
-```
-
-Use that absolute `bin/codex.js` path with Node in bridge commands, or install
-this package to expose `shapes-codex` on PATH.
+Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md) for what we're
+looking for. Report security issues privately as described in
+[SECURITY.md](SECURITY.md). AI coding agents should follow [AGENTS.md](AGENTS.md).
 
 ## License
 
 MIT © Shapes, Inc.
-
-## Account autofill metadata for private input forms
-
-Compatible personal-details forms can prefill and save ordinary account details
-in shapes.inc after the person submits the form. This never answers a question
-or approves a command by itself. Existing unannotated questions are unchanged.
-No labels or ids are interpreted as personal information.
-
-An MCP form producer can attach this extension to its native elicitation params
-without changing the original `requestedSchema`:
-
-```json
-{
-  "_meta": {
-    "shapes.inc/autofill": {
-      "subject": "self",
-      "fields": {
-        "delivery_email": { "section": "contact", "field": "email" }
-      }
-    }
-  },
-  "requestedSchema": {
-    "type": "object",
-    "required": ["delivery_email"],
-    "properties": {
-      "delivery_email": { "type": "string", "format": "email" }
-    }
-  }
-}
-```
-
-Native `item/tool/requestUserInput` producers may instead provide request-level
-`subject: "self"` and each question's `autofill: {section, field}`. The same
-metadata on asynchronous `agentMessage` questions survives the RPC adapter.
-`subject: "other"` explicitly disables account autofill. The only supported
-sections/fields are:
-
-- `personal`: `first_name`, `last_name`, `date_of_birth`, `gender`, `nationality`.
-- `contact`: `email`, `phone`, `title`.
-- `address`: `name`, `line1`, `line2`, `city`, `state`, `postal_code`, `country`.
-- `travel`: `passport_number`, `passport_expiry`, `passport_country`.
-
-Only text/select input fields qualify. Unknown/malformed metadata, duplicate
-mappings, permission-only requests and secret questions never enable autofill.
-Password, OTP and payment fields are not part of this contract. The account's
-human form still validates and explicitly submits the current request; Cancel
-and Decline send no answers. A profile save failure stops before sending the
-answer, and the native runner still enforces the original schema and single use.
-The native/local agent receives the answer it requested after submission, as it
-did before this addition. This metadata transport adds no AI calls or prompt
-text; its incremental inference cost is $0/day.

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/shapesinc/bridge/security/advisories/new
+    about: Please report security issues privately, not as a public issue.
+  - name: Get the shapes.inc app
+    url: https://shapes.inc/downloads
+    about: Most people should use the Mac or Windows app, which has Bridge built in.

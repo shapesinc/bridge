@@ -8,10 +8,8 @@ Windows requires its packaged executable before advertising computer control.
 
 The original composition is observe → click → observe. The same primitives also
 support observe → Unicode text → observe and observe → keyboard chord → observe;
-no workflow-specific command or new model call is introduced. Incremental
-recurring AI spend is **$0/day**; screenshots remain the existing observation
-context, with the same 1600-pixel longest edge and 3MB JPEG bounds. No new
-classifier, retries or automatic observation loop is added.
+no workflow-specific command or new model call is introduced. Screenshots keep the existing observation bounds: a 1600-pixel longest edge
+and 3MB JPEG.
 
 ## Native boundary
 
@@ -85,9 +83,3 @@ to verified medium integrity inside the existing owned Job; production guards
 are unchanged. The portable tests use simulated native replies and verify actor
 scope, expiry, consumed receipts, executable discovery and Windows identity
 binding. Windows-native tests still skip explicitly when run on macOS/Linux.
-
-**NO-GO until signed installed Windows acceptance passes.** Additional
-required acceptance includes multiple monitors and mixed DPI, actual locked and
-disconnected desktops, protected/UAC/elevated targets, normal browser/native app
-editing, background connection and packaged update behavior. A skipped Windows
-test or successful portable test is not Windows acceptance evidence.
