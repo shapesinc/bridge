@@ -272,3 +272,26 @@ test("invalid job IDs and unsafe inputs fail without starting Codex", (t) => {
     assert.ok(JSON.parse(result.stderr).error);
   }
 });
+
+test("a job finishing between the status read and the supervisor liveness check is not reported lost", (t) => {
+  const { getStatus } = require("../src/codex");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-codex-finish-race-")), previous = process.env.SHAPES_CODEX_JOB_DIR;
+  process.env.SHAPES_CODEX_JOB_DIR = dir;
+  t.after(() => {
+    if (previous === undefined) delete process.env.SHAPES_CODEX_JOB_DIR; else process.env.SHAPES_CODEX_JOB_DIR = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const id = "6f3c2a1e-4b5d-4c7e-8f90-1a2b3c4d5e6f", job = path.join(dir, id);
+  fs.mkdirSync(job, { mode: 0o700 });
+  const running = { agent: "codex", status: "running", supervisorPid: 99999999, createdAt: new Date().toISOString(), startedAt: new Date().toISOString() };
+  fs.writeFileSync(path.join(job, "state.json"), JSON.stringify(running));
+  // The supervisor saves its terminal state and exits exactly while the status
+  // reader is checking whether it is still alive.
+  t.mock.method(process, "kill", () => {
+    fs.writeFileSync(path.join(job, "state.json"), JSON.stringify({ ...running, status: "completed", finishedAt: new Date().toISOString() }));
+    throw Object.assign(new Error("exited"), { code: "ESRCH" });
+  });
+  const status = getStatus(id);
+  assert.equal(status.state, "completed");
+  assert.equal(status.error, null);
+});

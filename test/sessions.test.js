@@ -370,6 +370,28 @@ test("late HTTP cancel preserves a settled gateway failure or completion and per
   assert.equal(completed.thread_id, threadId);
 });
 
+test("a terminal job state is its last write, after the final event", async (t) => {
+  const f = await fixture(t);
+  await f.request("/sessions/create", f.create);
+  // Whoever sees the terminal state may rely on the complete event history,
+  // or remove the job. Read the events the moment the state turns terminal.
+  for (let turn = 0; turn < 10; turn++) {
+    const started = await f.request("/agents/start", f.turn(`turn ${turn}`, `final_event_order_${String.fromCharCode(97 + turn)}`));
+    assert.equal(started.status, 202, JSON.stringify(started.body));
+    const directory = path.join(f.jobs, started.body.job_id), deadline = Date.now() + 20000;
+    for (;;) {
+      let state;
+      try { state = JSON.parse(fs.readFileSync(path.join(directory, "state.json"), "utf8")); } catch { continue; }
+      if (terminal.has(state.status)) {
+        assert.ok(fs.readFileSync(path.join(directory, "events.jsonl"), "utf8").includes('"type":"job.finished"'), `turn ${turn}`);
+        break;
+      }
+      assert.ok(Date.now() < deadline, "the job did not finish");
+    }
+    await until(started.body.job_id);
+  }
+});
+
 test("bundled job recovers a cold initialization timeout with one turn and durable phase diagnostics", async (t) => {
   const f = await fixture(t, { stallFirstInitialize: true });
   await f.request("/sessions/create", f.create);

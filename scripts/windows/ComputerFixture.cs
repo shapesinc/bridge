@@ -51,8 +51,16 @@ internal sealed class ComputerFixture : Form {
             { "clicks", clicks }, { "moves", moves }, { "wheels", wheels }, { "drags", drags },
             { "targets", new Dictionary<string, object> { { "text", Target(text) }, { "password", Target(password) }, { "button", Target(button) }, { "area", Target(area) } } }
         };
-        try { File.WriteAllText(statusPath, json.Serialize(state)); }
-        catch (IOException) { /* The test reader retries a concurrent snapshot. */ }
+        // Publish whole snapshots only. Rewriting the file in place let a
+        // reader catch it truncated and fail to parse it.
+        string temporary = statusPath + ".tmp";
+        try {
+            File.WriteAllText(temporary, json.Serialize(state));
+            if (File.Exists(statusPath)) File.Replace(temporary, statusPath, null);
+            else File.Move(temporary, statusPath);
+        }
+        catch (IOException) { /* A reader holds the file; the next tick publishes again. */ }
+        catch (UnauthorizedAccessException) { /* Same, for a sharing violation reported as access. */ }
     }
     [STAThread] public static int Main(string[] args) {
         if (args.Length != 1 || !Path.IsPathRooted(args[0])) return 2;
