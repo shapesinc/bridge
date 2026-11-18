@@ -361,9 +361,13 @@ function bounded(value, budget, tail = false) {
 
 function getStatus(id, expectedAgent) {
   const directory = jobDir(id);
-  const state = loadState(directory);
+  let state = loadState(directory);
   const agent = state.agent || "codex";
   if (expectedAgent && agent !== expectedAgent) throw new Error("This job belongs to a different local agent.");
+  // The supervisor can save its terminal state and exit between our read and
+  // the liveness check. Once it is gone its last save is complete, so read
+  // again before calling the job lost.
+  if (!TERMINAL.has(state.status) && state.supervisorPid && !alive(state.supervisorPid)) state = loadState(directory);
   if (!TERMINAL.has(state.status)) {
     let lost = false;
     if (state.supervisorPid) {
@@ -610,8 +614,10 @@ async function superviseInteractive(directory, state, request) {
     state.finishedAt = new Date().toISOString();
     if (state.status === "failed" && state.errorType === "permission_denied") state.error = "The local agent was blocked by tool permissions.";
     else if (state.status === "failed" && !state.error) Object.assign(state, failureReason({ agent: "codex", funding: state.funding, agentError: state.agentError, exitCode: state.exitCode, signal: state.signal, errorType: state.errorType }));
-    saveState(directory, state);
+    // The terminal state is the job's last write: whoever sees it can rely
+    // on the complete event history (and may remove the job directory).
     if (state.sessionId) appendJobEvent(directory, { type: "job.finished", state: state.status });
+    saveState(directory, state);
   }
 }
 
