@@ -18,7 +18,7 @@ it with its own absolute `SHAPES_BRIDGE_HOME` (never the standalone
 (`status`, `updateAccount`, `beginConnect`, `completeConnect`, `cancelConnect`,
 `disconnect`, `detach`, `requestPermission`). The standalone CLI, controls app,
 LaunchAgent and state are untouched. [embedded-native-control.md](embedded-native-control.md) holds
-the full contract and its acceptance status.
+the full contract.
 
 ## Mac app connection window
 
