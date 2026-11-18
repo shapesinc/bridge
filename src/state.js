@@ -62,7 +62,7 @@ function windowsDirectoryAcl(dir) {
   try {
     if (windowsTool("icacls.exe", [dir, "/save", file, "/q"]).status !== 0) return null;
     const raw = fs.readFileSync(file);
-    const text = (raw.length > 1 && raw[1] === 0 ? raw.toString("utf16le") : raw.toString("utf8")).replace(/^﻿/, "");
+    const text = (raw.length > 1 && raw[1] === 0 ? raw.toString("utf16le") : raw.toString("utf8")).replace(/^\uFEFF/, "");
     return text.split(/\r?\n/)[1]?.trim() || null;
   } catch { return null; }
   finally { fs.rmSync(file, { force: true }); }

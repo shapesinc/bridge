@@ -379,7 +379,10 @@ test("a terminal job state is its last write, after the final event", async (t) 
     const started = await f.request("/agents/start", f.turn(`turn ${turn}`, `final_event_order_${String.fromCharCode(97 + turn)}`));
     assert.equal(started.status, 202, JSON.stringify(started.body));
     const directory = path.join(f.jobs, started.body.job_id), deadline = Date.now() + 20000;
-    for (;;) {
+    for (let reads = 1; ; reads++) {
+      // Tight reads to catch the gap, yielding now and then so a slow runner
+      // is not starved by this process.
+      if (reads % 500 === 0) await new Promise((resolve) => setImmediate(resolve));
       let state;
       try { state = JSON.parse(fs.readFileSync(path.join(directory, "state.json"), "utf8")); } catch { continue; }
       if (terminal.has(state.status)) {
