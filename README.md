@@ -204,7 +204,11 @@ npm test
 Zero runtime dependencies — just Node's standard library. The only external
 piece is the `cloudflared` tunnel binary, fetched on first run. CI runs
 `npm test` and `npm pack --dry-run` on every push to `main` and every pull
-request. Contributor and release rules are in [AGENTS.md](AGENTS.md).
+request.
+
+Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md) for what we're
+looking for. Report security issues privately as described in
+[SECURITY.md](SECURITY.md). AI coding agents should follow [AGENTS.md](AGENTS.md).
 
 ## License
 

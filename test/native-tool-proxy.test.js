@@ -10,7 +10,7 @@ const { validateGateway, launchConfiguration } = require("../src/bundled-runtime
 const createNativeToolProxy = options => createProxy({ platform: "darwin", ...options });
 
 function grant(base = "https://example.invalid") {
-  const gateway = { base_url: base + "/v1", token: "inference-secret", model: "gpt-6-astra",
+  const gateway = { base_url: base + "/v1", token: "inference-secret", model: "test-model",
     session_id: randomUUID(), scope_id: "fixture-scope", request_key: "fixture-request-key", run_id: randomUUID(), expires_at: Date.now() / 1000 + 600 };
   gateway.tool_proxy = { version: 1, base_url: base + "/bridge/native-tools", token: "tools-secret",
     ...Object.fromEntries(["session_id", "scope_id", "request_key", "run_id", "expires_at"].map(key => [key, gateway[key]])) };

@@ -43,8 +43,7 @@ console for an interactive provider child. The compiler contract is part of the
 cache identity, so an older console binary is never reused for the same source.
 The Windows fixture probes actual console attachment after an ordinary native
 launch and uses the old console build as a positive control; installed Scheduler
-and provider interaction remain separate acceptance checks. This packaging fix
-adds no AI calls or context: incremental provider cost is $0/day.
+and provider interaction remain separate acceptance checks.
 
 ### Durable account revocation
 
@@ -76,7 +75,7 @@ then acknowledges. The observer stops on disposal. This is bounded eventual live
 observation, not instantaneous cancellation at the writer reply. A new verified
 proof with the latest token may restore an existing enabled device; an explicitly
 paused device remains paused. Device credentials, chat grants and funding are
-preserved. No AI calls/context are added by these primitives: **$0/day incremental**.
+preserved.
 
 The compositions are offline logout→later startup, live logout→owned-work cleanup,
 and fresh account verification→same-device recovery. Filesystem/writer and actual
@@ -90,40 +89,3 @@ The daemon is a private child process group with a Node IPC parent-lifetime watc
 A failed server cancellation retains the private cancellation capability for retry until expiry. Local access still stops. A restarted controller cancels orphaned approval before it can resume or start another pairing. The server's cancellation endpoint must tombstone a just-issued device during approval races; an old server without cancellation and approved-poll owner fields is not compatible with enabling this feature.
 
 Before starting a newly approved runtime, the persisted pairing receipt replaces its bare private code with the full `sbd_UUID.secret` device credential. Existing backend tool-result redaction recognizes that credential. Cancellation derives the private code in memory; the pending receipt cannot introduce an unrecognized bare secret into a computer file-read result.
-
-## Compositions and validation
-
-The original app setup composition is verify account → begin → approve in the current authenticated page → refresh verified devices → complete → explicitly request named OS permissions. Alternatives use the same primitives: reopen an enabled device after verified account sync; resume an explicitly paused existing device without a new pairing; or inspect status and disconnect without opening setup or prompting for permissions.
-
-The detach composition preserves a completed setup through repeated UI departure, then permits explicit Disconnect or same-account status/read operations. Alternative compositions cancel a pending setup and retry, or detach a connection and stop it when a different verified account attaches. Detach introduces no inference calls or prompt context: incremental provider spend is $0/day. Runtime regression tests use a real private stdio controller, owned daemon, saved state, authenticated computer HTTP API, and HTTP heartbeats; pairing responses, tunnel transport and OS permission probes are simulated. They do not establish native background registration, macOS consent attribution, login-item behavior or release readiness.
-
-Detach validation on October 30, 2026: all 180 tests passed with `node --test --test-concurrency=1`, including standalone regressions, 33 focused embedded/runtime checks, delayed begin/poll and heartbeat cancellation, failed cancellation retry, and explicit controller EOF cleanup. The runtime fixture checks the same live PID, advancing heartbeats and an authenticated computer request after two detach operations; later Disconnect, account change and EOF each stop the owned daemon. Native release acceptance remains separate.
-
-Integration with enabled-retry cancellation (#22): two added regressions failed on merged main `a04911d`, showing detach created a persistent pause for an already-enabled device. Detach now honors the attempt's original `wasEnabled` consent without ever writing `paused:false`. All 191 tests pass with bounded concurrency after the correction. The actual stdio/daemon/HTTP fixture adds a simulated 503 heartbeat outage, enabled retry → detach → controller exit → fresh verified reopen without new pairing, and cancelled paused resume → fresh reopen that stays paused. Controller regressions also verify concurrent Disconnect, device removal and revocation remain effective. These are local runtime outcomes; signed native integration, live backend/tunnel and OS consent acceptance still belong to the release candidate.
-
-Focused tests cover those compositions, cancelled/late approval, owner mismatch, removed membership, missing verification, readiness retries, lost success replies, cancelled resume, orphaned private cancellation, malformed/oversized IPC, private stdio EOF, fresh-PID status, and real child-process cleanup after controller SIGKILL. Provider responses and OS permission grants in controller tests are simulated; process lifecycle and stdio tests launch actual local Node processes. Standalone account/controller/runtime regressions are run separately.
-
-Local verification on October 29, 2026: the full bounded Node suite passed 167 tests before the final credential-storage and in-flight removal hardening; 41 focused controller/protocol/process/account/standalone-runtime tests passed after that change, including an actual authenticated local `/read` of the synthetic pending receipt. Signed universal packaging is validated separately. No permission or live AI requests were made by these tests.
-
-**NO-GO until integrated acceptance:** the exact signed native candidate must demonstrate current-session pairing, connection/permissions UI, macOS consent attributed to shapes.inc, cancellation and retry, account switch/removal, window close, Quit/reopen, and unchanged standalone behavior against the candidate backend. Passing focused tests or a signed build does not establish those outcomes. Deploy backend cancellation/owner support before enabling the native and web slices.
-
-Permission recovery follow-up: an explicit single App control action now opens
-macOS Automation settings as well as issuing the existing per-target request.
-macOS can suppress a previously denied prompt, so retry no longer appears to do
-nothing. The target list, OS consent, passive probes, and all-permissions
-standalone setup are unchanged. The 26 focused permission/controller tests pass;
-first-request and denied recovery use simulated OS transport. Actual denial →
-Settings → grant/retry on the final signed app remains required.
-
-First-heartbeat status follow-up (October 30, 2026): the installed combined
-QA85 candidate at native187dc1a/helper2adfda6 recorded a backend HTTP409
-readiness failure before any successful heartbeat and displayed unavailable
-while setup was still pending. The scope of this correction is that transient
-status; the triggering attempt's provenance was not established. Two regression
-cases failed before the fix. The final36 focused embedded controller/protocol,
-standalone controller, and runtime tests pass. Simulated transport/process-state
-cases cover retry→connected, cancellation and runtime failure→disconnected→new
-attempt, and preserved revocation/later-loss errors. Real private stdio and
-local file-read boundary tests also passed. Corrected native button/status,
-live pairing, tunnel readiness, and OS consent still require the rebuilt
-integrated candidate; this is not live connection acceptance.

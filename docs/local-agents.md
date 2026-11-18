@@ -142,34 +142,6 @@ the [desktop task link](https://learn.chatgpt.com/docs/reference/commands)
 `codex://threads/THREAD_ID` opens the saved task without granting permission or
 retrying it. The bridge never switches browser or agent to bypass a denial.
 
-Incremental provider cost, estimated October 4, 2026: approval handling and
-deterministic monitoring add no inference calls (**$0/day directly**). For
-legacy clients still polling through the model, detection itself adds
-**$0/day**, but returning the task ID in earlier status replies adds an estimated
-20–40 input tokens per receipt. Fleet traffic and the affected engine mix have
-not been measured; the two inspected incident jobs are not a traffic baseline.
-With three status reads per job and full reuse of prior receipts in later
-context (six total exposures), this is 120–240 input tokens/job. Using current
-[OpenRouter catalog](https://openrouter.ai/api/v1/models) Opus 5 rates of $5/M
-uncached or $0.50/M cached input tokens gives **$0.006–$0.12/day at 100 jobs/day**
-or **$0.06–$1.20/day at 1,000 jobs/day**. These are explicit scenarios, not an
-observed bill; more polls, other engines, or cache writes change the estimate.
-No classifier, extra report generation, retry, embedding, or retrieval is added
-by the monitoring transport; the existing source turn receives the final result.
-Avoided retries/final replies are excluded from these gross increases. Local
-agent plan usage and user credits are separate; neither rate is changed.
-Completing a formerly blocked task uses additional inference on the local
-agent account; its engine, token usage, subscription allowance and affected
-daily task volume are unknown. As a usage-priced illustration only, an
-additional 10,000 input / 2,000 output tokens at Opus 5's $5/M input and $25/M
-output would cost $0.10/task ($10/day at 100 such tasks or $100/day at 1,000),
-or $0.055/task if all input receives the $0.50/M cache-read price. Actual
-continuations can be much shorter or longer; these are not shapes.inc provider
-charges or changes to user credit pricing. Automated tests use fake agents
-($0 in evaluation inference spend). One bounded, question-only validation
-probe used the existing local Codex account and its configured gpt-6-astra
-engine; that is one-time local account usage, not recurring shapes.inc spend.
-
 Claude write jobs run with `--dangerously-skip-permissions`: no permission
 prompts and no per-command approvals for this task. Managed policy, MCP
 services, hooks, and model preferences remain in effect; the launcher changes
