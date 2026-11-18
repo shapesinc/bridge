@@ -35,7 +35,11 @@ function ensureStateDir() {
   const dir = stateDir();
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") fs.chmodSync(dir, 0o700);
-  else if (!securedWindowsDirectories.has(dir)) {
+  // A command supervisor is started by a Bridge process that has just secured
+  // this directory and says so in the environment it hands down. Repeating the
+  // ACL rewrite in every supervisor walks the whole directory, and several
+  // commands starting together then time each other out.
+  else if (!securedWindowsDirectories.has(dir) && process.env.SHAPES_BRIDGE_STATE_SECURED !== dir) {
     // POSIX modes do not restrict Windows ACLs, particularly for a custom path.
     const identity = spawnSync("whoami.exe", [], { encoding: "utf8", windowsHide: true, timeout: 1500, maxBuffer: 65536 });
     if (identity.status !== 0 || !identity.stdout?.trim()) throw Object.assign(new Error("Could not identify the Windows account to protect computer credentials."), { code: "STATE_IDENTITY_UNAVAILABLE" });

@@ -47,13 +47,5 @@ Its browser handoff passes the allowlisted URL as one literal PowerShell value;
 macOS uses LaunchServices and Linux uses its standard URL opener. Browser
 handoff never grants command/provider native authority.
 
-This adds **$0/day mandatory AI-provider spend**: no classifier, prompt-context
-or inference call is added by account discovery or login. At100/1,000/10,000
-account checks per day the added inference cost remains$0. Personal tasks use
-the explicitly selected provider account/plan; this does not make their usage
-free or measure vendor subscription limits. Auth HTTP/CPU activity is not an AI
-charge. The one-time authorized personal QA reserve is separate from recurring
-company spend.
-
 Official protocol reference: [pinned0.166 account schema](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/app-server-protocol/src/protocol/v2/account.rs)
 and [app-server account API](https://learn.chatgpt.com/docs/app-server).

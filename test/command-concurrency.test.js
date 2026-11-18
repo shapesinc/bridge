@@ -340,7 +340,12 @@ test("several Bridge processes pruning a full receipt store at once all start th
     const bodies = Array.from({ length: 8 }, (_, index) => ({ cmd: quick, timeout: 30, scope: hex(`prune ${index}`), request_key: hex(`prune key ${round} ${index}`) }));
     assert.deepEqual(await startTogether(bodies), bodies.map(() => "queued"), `round ${round}`);
     await settled();
-    for (const body of bodies) assert.equal(jobs.status(jobId(body.scope, body.request_key), body.scope).state, "completed");
+    for (const body of bodies) {
+      const id = jobId(body.scope, body.request_key), receipt = jobs.status(id, body.scope);
+      let worker = "";
+      try { worker = fs.readFileSync(path.join(jobs.root(), `${id}.worker-error`), "utf8"); } catch { /* none */ }
+      assert.equal(receipt.state, "completed", JSON.stringify({ round, receipt, worker }));
+    }
     // Top the store back up so every round prunes.
     for (let index = 0; index < 16; index++) {
       jobs.save({ job_id: hex(`old ${round} ${index}`), scope: hex("old"), fingerprint: hex("f"), command_hash: hex("c"), state: "completed",
