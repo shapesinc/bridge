@@ -78,7 +78,7 @@ async function start(name, session, { code, input, disabled = false, hang = fals
   plans.set(plan.modelToken, plan); plans.set(plan.toolToken, plan);
   const identity = { session_id: session.session_id, scope_id: session.scope_id, request_key: plan.request_key, run_id: plan.run_id, expires_at: Date.now() / 1000 + 600 };
   const base = `http://127.0.0.1:${service.address().port}`;
-  const gateway = { ...identity, token: plan.modelToken, model: "test-model", base_url: base + "/v1",
+  const gateway = { ...identity, token: plan.modelToken, model: "gpt-6-astra", base_url: base + "/v1",
     ...(!disabled ? { tool_proxy: { ...identity, version: 1, token: plan.toolToken, base_url: base + "/bridge/native-tools" } } : {}) };
   plan.job = await api("/agents/start", { session_id: session.session_id, scope_id: session.scope_id, request_key: plan.request_key, gateway,
     ...(input ? { input } : { prompt: `Synthetic ${name} fixture` }) });

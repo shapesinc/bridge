@@ -79,7 +79,7 @@ async function run(session, name, code, options = {}) {
   const body = { session_id: session.session_id, scope_id: session.scope_id,
     ...(options.input ? { input: options.input } : { prompt: name }), request_key: requestKey,
     gateway: { token, session_id: session.session_id, scope_id: session.scope_id, request_key: requestKey,
-      base_url: `http://127.0.0.1:${modelServer.address().port}/v1`, model: "test-model", run_id: randomUUID(), expires_at: new Date(Date.now() + 120000).toISOString() } };
+      base_url: `http://127.0.0.1:${modelServer.address().port}/v1`, model: "gpt-6-astra", run_id: randomUUID(), expires_at: new Date(Date.now() + 120000).toISOString() } };
   const started = await api("/agents/start", body); assert.equal(started.status, 202, JSON.stringify(started));
   jobs.push(started.value.job_id);
   const duplicate = await api("/agents/start", body); assert.equal(duplicate.value.job_id, started.value.job_id); assert.equal(duplicate.value.deduplicated, true);
@@ -209,7 +209,7 @@ function inputImages(value) {
     plans.set(cancelToken, cancelPlan);
     const cancelBody = { session_id: cancelled.session_id, scope_id: cancelled.scope_id, prompt: "Wait for a response", request_key: cancelKey,
       gateway: { token: cancelToken, session_id: cancelled.session_id, scope_id: cancelled.scope_id, request_key: cancelKey,
-        base_url: `http://127.0.0.1:${modelServer.address().port}/v1`, model: "test-model", run_id: randomUUID(), expires_at: Math.floor(Date.now() / 1000) + 120 } };
+        base_url: `http://127.0.0.1:${modelServer.address().port}/v1`, model: "gpt-6-astra", run_id: randomUUID(), expires_at: Math.floor(Date.now() / 1000) + 120 } };
     const cancelReceipt = await api("/agents/start", cancelBody);
     assert.equal(cancelReceipt.status, 202); jobs.push(cancelReceipt.value.job_id);
     await Promise.race([providerStarted, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error("Provider did not start")), 30000); timer.unref(); })]);
