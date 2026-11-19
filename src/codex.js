@@ -14,6 +14,7 @@ const { spawnOwned, signalOwned } = require("./owned-process");
 const { createNativeToolProxy } = require("./native-tool-proxy");
 const { createToolBroker } = require("./native-tool-broker");
 const { closeProcessGroup } = require("./process-close");
+const { replaceStateFile } = require("./state");
 const { normalizeSessionInput, runtimeSessionInput } = require("./session-input");
 
 const MAX_OUTPUT = 64 * 1024;
@@ -114,10 +115,17 @@ function jobDir(id) {
   return privateDir(directory);
 }
 
+// Job files are replaced whole. On Windows a status reader in another process
+// can hold the file for a moment and make the replacement fail;
+// replaceStateFile waits that out within a bounded budget. If it still fails,
+// this process's temporary file is removed so its next write (the terminal
+// receipt, say) is not refused because the temporary name is taken.
+const JOB_FILE_REPLACE_MS = 2000;
 function writePrivate(file, text) {
   const temporary = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, text, { mode: 0o600, flag: "wx" });
-  fs.renameSync(temporary, file);
+  try { replaceStateFile(temporary, file, { budgetMs: JOB_FILE_REPLACE_MS }); }
+  catch (error) { fs.rmSync(temporary, { force: true }); throw error; }
 }
 
 function saveState(directory, state) {
