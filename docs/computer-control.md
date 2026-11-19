@@ -98,7 +98,8 @@ in front:
     an app on another Space can switch to it); otherwise `activation_failed`;
   - the observed window is made the app's main window, the app is made active
     without raising any window (SkyLight's private
-    `_SLPSSetFrontProcessWithOptions`, no-windows mode), the menu item is
+    `_SLPSSetFrontProcessWithOptions`, no-windows mode, naming the observed
+    window: without it the app raised its key window for about 20 ms), the menu item is
     pressed, and the person's front app is put straight back;
   - the reply has `delivery: "brief_activation"` and
     `activation: {ms, restored}`: how long the app was active, until the

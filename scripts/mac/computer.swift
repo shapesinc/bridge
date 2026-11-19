@@ -491,11 +491,13 @@ func activateBriefly(_ app: NSRunningApplication, _ appElement: AXUIElement, win
     // A busy or hung app must not hold the person's keyboard: every
     // Accessibility call while it is active gives up after 0.25 s.
     AXUIElementSetMessagingTimeout(appElement, 0.25)
-    let noWindows: UInt32 = 0x400 // kCPSNoWindows: activate without raising a window
+    // No-windows mode, naming the observed window: with no window named, the
+    // app still raised its key window above the person's for about 20 ms.
+    let noWindows: UInt32 = 0x400 // kCPSNoWindows
     let start = DispatchTime.now().uptimeNanoseconds
     func within(_ check: () -> Bool) -> Bool { for _ in 0..<200 { if check() { return true }; usleep(1000) }; return false }
     func frontIs(_ process: ProcessSerialNumber) -> Bool { var now = ProcessSerialNumber(); return sky.front(&now) == .success && same(now, process) }
-    _ = sky.setFront(&target, 0, noWindows)
+    _ = sky.setFront(&target, UInt32(window), noWindows)
     // Asked of the app itself: its menus check against its own active state.
     let active = within { (axValue(appElement, kAXFrontmostAttribute) as Bool?) == true }
     let pressed = active ? press() : .failure
