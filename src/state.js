@@ -27,6 +27,8 @@ function replaceStateFile(temporary, destination, { platform = process.platform,
   }
 }
 
+const WINDOWS_ACL_TIMEOUT_MS = 60000;
+
 function stateDir() {
   return process.env.SHAPES_BRIDGE_HOME || path.join(os.homedir(), ".shapes-bridge");
 }
@@ -41,9 +43,13 @@ function ensureStateDir() {
   // commands starting together then time each other out.
   else if (!securedWindowsDirectories.has(dir) && process.env.SHAPES_BRIDGE_STATE_SECURED !== dir) {
     // POSIX modes do not restrict Windows ACLs, particularly for a custom path.
-    const identity = spawnSync("whoami.exe", [], { encoding: "utf8", windowsHide: true, timeout: 1500, maxBuffer: 65536 });
+    // Rewriting the ACL makes Windows reapply it to every file inside, so it
+    // takes longer the more receipts and sessions the store holds, and longer
+    // still while other Bridge processes do the same. The timeout is only a
+    // runaway guard: cutting it short refused commands on a busy store.
+    const identity = spawnSync("whoami.exe", [], { encoding: "utf8", windowsHide: true, timeout: WINDOWS_ACL_TIMEOUT_MS, maxBuffer: 65536 });
     if (identity.status !== 0 || !identity.stdout?.trim()) throw Object.assign(new Error("Could not identify the Windows account to protect computer credentials."), { code: "STATE_IDENTITY_UNAVAILABLE" });
-    const secured = spawnSync("icacls.exe", [dir, "/inheritance:r", "/grant:r", `${identity.stdout.trim()}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F"], { encoding: "utf8", windowsHide: true, timeout: 1500, maxBuffer: 65536 });
+    const secured = spawnSync("icacls.exe", [dir, "/inheritance:r", "/grant:r", `${identity.stdout.trim()}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F"], { encoding: "utf8", windowsHide: true, timeout: WINDOWS_ACL_TIMEOUT_MS, maxBuffer: 65536 });
     if (secured.status !== 0) throw Object.assign(new Error("Could not make the shapes.inc Bridge directory private. Choose a directory owned by your Windows account."), { code: "STATE_PERMISSIONS_UNAVAILABLE" });
     securedWindowsDirectories.add(dir);
   }

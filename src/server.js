@@ -183,6 +183,16 @@ async function sysinfo(readElevation = elevationStatus) {
  * @returns {Promise<import('node:http').Server>}
  */
 function startServer({ port, token, computerControl = createComputerControl(), platform = process.platform, readElevation = elevationStatus }) {
+  // A process's elevation cannot change while it runs, and on Windows each
+  // check starts PowerShell. Keep the first definite answer instead of paying
+  // for it on every discovery call; an unanswered check is asked again.
+  let elevation;
+  const knownElevation = async () => {
+    if (elevation) return elevation;
+    const result = await readElevation();
+    if (typeof result?.elevated === "boolean") elevation = result;
+    return result;
+  };
   const authed = (req) => {
     const provided = req.headers["x-token"];
     if (!token || typeof provided !== "string") return false;
@@ -369,7 +379,7 @@ function startServer({ port, token, computerControl = createComputerControl(), p
 
       if (route === "/sysinfo" && method === "GET") {
         log("sysinfo requested");
-        return sendJson(res, 200, await sysinfo(readElevation));
+        return sendJson(res, 200, await sysinfo(knownElevation));
       }
 
       if (route === "/run" && method === "POST") {
