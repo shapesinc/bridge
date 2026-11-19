@@ -43,10 +43,48 @@ person can keep using the Mac:
   screen.
 
 Observations stay single-use and scoped to the chat. Using one never voids
-another chat's observation. Whole-screen operations still run one at a time
-because they move the real pointer; app-scoped operations run in parallel.
-Password fields are never filled. Windows reports `computer_app_control`
-false for now and rejects app-scoped operations without dispatching.
+another chat's observation. App-scoped operations run in parallel. Password
+fields are never filled. Windows reports `computer_app_control` false for now
+and rejects app-scoped operations without dispatching.
+
+## The person's pointer and keyboard stay theirs (macOS)
+
+On macOS, nothing moves the person's pointer or types into whatever they have
+in front:
+
+- A whole-screen `observe` is **look-only**: its reply has `input: "look_only"`,
+  and any input that uses it returns `background_target_required` without
+  reaching the helper. To act, observe the app. Every macOS reply carries
+  `delivery: "background"`, so a server can tell this contract from an older
+  Bridge that still posts whole-screen input. (`move` and `drag` therefore have
+  no macOS path.)
+- **Keys** go to the window the app has focused. Before `type` or `press_key`,
+  the observed window is made the app's main window through Accessibility, as a
+  real click would; the app stays inactive. If that does not take,
+  `target_not_focused` is returned instead of typing into another window. A
+  `click` makes its window main the same way.
+- A `click` at a `point` in a text field or view also **places the caret
+  there**. Inactive apps ignore the mouse events that would otherwise do it.
+- **Mouse events** posted to the app's process carry its pid and window. From
+  macOS 27 they also carry the window-local point, because WindowServer no
+  longer derives it and drops the click otherwise.
+- **Typing** that falls back to key events sends line breaks and tabs as real
+  Return/Tab presses: an app drops a whole Unicode event that contains one.
+
+**The shape's pointer.** A server may send `cursor: {label}` with an app
+`observe`: up to 40 characters, display-only, and it grants nothing. Inputs
+from that observation are then shown by the agent's own pointer, labelled with
+that name:
+
+- It glides to the element or point before the input and pulses when the input
+  lands (keys, text and menus pulse in place).
+- The same signed executable draws it when started with `--cursor`. It is a
+  separate accessory process with a click-through, non-activating panel at the
+  assistive-technology window level, and it creates no app object in the
+  short-lived helper.
+- The runtime starts it on demand and feeds it one JSON line per input. It
+  hides after 20 seconds and exits after a minute idle or when the runtime exits.
+- It is kept out of whole-screen captures.
 
 The bundled `shapes.inc Bridge Computer` executable captures with ScreenCaptureKit
 and posts CoreGraphics events; it checks consent in that process and never changes

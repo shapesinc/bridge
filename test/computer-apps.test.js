@@ -2,6 +2,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createComputerControl, validateControl } = require("../src/computer");
+const { createShapeCursor } = require("../src/computer-cursor");
 const { startServer } = require("../src/server");
 
 const SCOPE = "a".repeat(64), OTHER = "b".repeat(64);
@@ -12,19 +13,21 @@ const windowCapture = (pid = 9) => ({ success: true, result: { width: 800, heigh
   element_identities: [{ index: 0, role: "AXButton", frame: { x: 26, y: 40, width: 40, height: 27 } }],
   image_base64: "fixture", image_content_type: "image/jpeg" } });
 function fixture(options = {}) {
-  const calls = [];
+  const calls = [], pointer = [];
   let hold, held = false;
-  const control = createComputerControl({ platform: "darwin", available: () => true, invoke: async (request) => {
+  const control = createComputerControl({ platform: "darwin", available: () => true, cursorLeadMs: 0,
+    cursor: { send: (command) => pointer.push(command), close() {} }, invoke: async (request) => {
     calls.push(request);
     if (options.hold && !held && request.operation !== "observe") { held = true; await new Promise((r) => { hold = r; }); }
     if (request.operation === "apps") return { success: true, result: { apps: [{ name: "Chat", windows: [] }] } };
     if (request.operation === "observe") return request.app ? windowCapture() : { success: true, result: { width: 100, height: 80,
       display_id: 1, bounds: { x: 0, y: 0, width: 100, height: 80 }, frontmost: { pid: 1, name: "Other" },
       image_base64: "fixture", image_content_type: "image/jpeg" } };
-    return { success: true, result: { dispatched: true, delivery_verified: false, method: "accessibility" } };
+    return { success: true, result: { dispatched: true, delivery_verified: false, method: "accessibility",
+      ...(request.operation === "click" ? { pointer: { x: 46, y: 53.5 } } : {}) } };
   }, ...options });
-  const run = (value, scope = SCOPE) => control.execute({ scope, control: value });
-  return { control, calls, run, release: () => hold?.() };
+  const run = (value, scope = SCOPE, extra = {}) => control.execute({ scope, control: value, ...extra });
+  return { control, calls, pointer, run, release: () => hold?.() };
 }
 
 test("app operations validate their own fields", () => {
@@ -52,12 +55,59 @@ test("an app observation binds input to that app's window and its elements, once
   assert.equal((await f.run(click)).error_type, "stale_observation");
 });
 
-test("elements and menus need an app observation; screen observations stay screen-only", async () => {
+test("on a Mac a whole-screen view is look-only: its input never reaches the helper", async () => {
   const f = fixture();
   const screen = await f.run({ operation: "observe" });
-  assert.match(screen.result.message, /frontmost app \(Other\)/);
-  assert.equal((await f.run({ operation: "menu", path: ["File"], observation_id: screen.result.observation_id })).error_type, "invalid_arguments");
+  assert.equal(screen.result.input, "look_only");
+  assert.match(screen.result.message, /^Look only/);
+  for (const input of [{ operation: "click", point: [10, 10] }, { operation: "type", text: "hi" }, { operation: "press_key", keys: ["RETURN"] },
+    { operation: "menu", path: ["File"] }]) {
+    const reply = await f.run({ ...input, observation_id: screen.result.observation_id });
+    assert.equal(reply.error_type, "background_target_required", JSON.stringify(input));
+    assert.equal(reply.dispatched, false);
+  }
+  assert.deepEqual(f.calls.map((c) => c.operation), ["observe"]);
   assert.equal((await f.run({ operation: "apps" })).result.apps[0].name, "Chat");
+});
+
+test("every Mac reply says input is background-only, so a server can tell it from an older Bridge", async () => {
+  const f = fixture();
+  for (const control of [{ operation: "apps" }, { operation: "observe", app: "Chat" }, { operation: "click", element: 9, observation_id: "0".repeat(8) + "-0000-0000-0000-" + "0".repeat(12) }])
+    assert.equal((await f.run(control)).delivery, "background");
+  assert.equal((await f.run({ operation: "apps" }, SCOPE, { delivery: "background" })).error_type, "invalid_arguments");
+});
+
+test("the shape's pointer leads to the element or point it acts on and carries its name", async () => {
+  const f = fixture();
+  const seen = await f.run({ operation: "observe", app: "Chat" }, SCOPE, { cursor: { label: "Nyx" } });
+  await f.run({ operation: "click", element: 0, observation_id: seen.result.observation_id });
+  // Element 0's global frame is (26,40) 40x27: its centre, then the helper's reported point.
+  assert.deepEqual(f.pointer, [{ op: "move", x: 46, y: 53.5, label: "Nyx" }, { op: "click", x: 46, y: 53.5 }]);
+  assert.equal(f.calls.at(-1).pointer, undefined);
+  const again = await f.run({ operation: "observe", app: "Chat" }, SCOPE, { cursor: { label: "Nyx" } });
+  await f.run({ operation: "click", point: [400, 300], observation_id: again.result.observation_id });
+  // Image (400,300) of 800x600 over the window at (25,38) 1073x805.
+  assert.deepEqual(f.pointer[2], { op: "move", x: 25 + 1073 / 2, y: 38 + 805 / 2, label: "Nyx" });
+  const third = await f.run({ operation: "observe", app: "Chat" });
+  await f.run({ operation: "type", text: "hi", observation_id: third.result.observation_id });
+  assert.deepEqual(f.pointer.at(-1), { op: "key" });
+  for (const cursor of [{ label: "x".repeat(41) }, { label: "Nyx\u202e" }, { color: "red" }, "Nyx"])
+    assert.equal((await f.run({ operation: "observe", app: "Chat" }, SCOPE, { cursor })).error_type, "invalid_arguments");
+});
+
+test("the pointer process is spawned once, fed lines, and never on other platforms", () => {
+  const spawned = [];
+  const fake = () => { const lines = []; const child = { exitCode: null, signalCode: null, lines, on() {}, unref() {},
+    stdin: { writable: true, write: (l) => lines.push(l), on() {}, unref() {}, end() { this.writable = false; } } };
+  spawned.push(child); return child; };
+  const cursor = createShapeCursor({ platform: "darwin", binary: "/bin/helper", spawnImpl: fake });
+  cursor.send({ op: "move", x: 1, y: 2 }); cursor.send({ op: "key" });
+  assert.equal(spawned.length, 1);
+  assert.deepEqual(spawned[0].lines, ['{"op":"move","x":1,"y":2}\n', '{"op":"key"}\n']);
+  cursor.close(); cursor.send({ op: "key" });
+  assert.equal(spawned.length, 2);
+  assert.equal(createShapeCursor({ platform: "win32", binary: "x", spawnImpl: fake }).send({ op: "key" }), false);
+  assert.equal(spawned.length, 2);
 });
 
 test("app work runs in parallel and does not invalidate other chats' observations", async () => {
