@@ -384,6 +384,60 @@ func observeApp(_ request: [String: Any]) async throws -> [String: Any] {
             "image_base64": jpeg.base64EncodedString(), "image_content_type": "image/jpeg"]
 }
 
+struct MenuShortcut { let path: [String]; let enabled: Bool; let system: Bool }
+
+// The menu items a key chord triggers, read through Accessibility. An app in the
+// background turns off its commands for the document and selection (Save,
+// Select All, Copy, Undo...), so their shortcuts do nothing there; app commands
+// (New, Hide) still run. The Apple menu is the Mac's, not the app's. nil when
+// the menus can't be read within the budget: the chord is then sent as before.
+func menuShortcuts(_ app: AXUIElement, key: String, code: CGKeyCode, modifiers: Set<String>, budget: Double = 0.5) -> [MenuShortcut]? {
+    guard let bar: AXUIElement = axValue(app, kAXMenuBarAttribute), let menus: [AXUIElement] = axValue(bar, kAXChildrenAttribute) else { return nil }
+    // Accessibility's menu modifier bits: shift 1, option 2, control 4, no command 8.
+    var wanted = 0
+    if modifiers.contains("SHIFT") { wanted |= 1 }
+    if modifiers.contains("ALT") { wanted |= 2 }
+    if modifiers.contains("CTRL") { wanted |= 4 }
+    if !modifiers.contains("CMD") { wanted |= 8 }
+    let character = key.count == 1 ? key : ["SPACE": " ", "TAB": "\t", "RETURN": "\r"][key]
+    let names = [kAXTitleAttribute, kAXMenuItemCmdCharAttribute, kAXMenuItemCmdVirtualKeyAttribute,
+                 kAXMenuItemCmdModifiersAttribute, kAXEnabledAttribute, kAXChildrenAttribute] as CFArray
+    let deadline = Date().addingTimeInterval(budget)
+    var found: [MenuShortcut] = [], complete = true
+    func entries(_ children: [AXUIElement]) -> [AXUIElement] {
+        if children.count == 1, (axValue(children[0], kAXRoleAttribute) as String?) == "AXMenu" { return axValue(children[0], kAXChildrenAttribute) ?? [] }
+        return children
+    }
+    func walk(_ items: [AXUIElement], _ path: [String], _ system: Bool, _ depth: Int) {
+        for item in items {
+            guard Date() < deadline else { complete = false; return }
+            var copied: CFArray?
+            guard AXUIElementCopyMultipleAttributeValues(item, names, AXCopyMultipleAttributeOptions(rawValue: 0), &copied) == .success,
+                  let values = copied as? [AnyObject], values.count == 6 else { continue }
+            let title = values[0] as? String ?? ""
+            let modifiers = (values[3] as? NSNumber)?.intValue ?? 0
+            let matched = modifiers == wanted && ((values[2] as? NSNumber).map { $0.intValue == Int(code) }
+                ?? (values[1] as? String).map { !$0.isEmpty && $0.uppercased() == character } ?? false)
+            if matched { found.append(MenuShortcut(path: path + [title], enabled: values[4] as? Bool ?? true, system: system)) }
+            if depth < 2, let children = values[5] as? [AXUIElement], !children.isEmpty { walk(entries(children), path + [title], system, depth + 1) }
+        }
+    }
+    for (index, menu) in menus.enumerated() {
+        guard Date() < deadline else { complete = false; break }
+        walk(entries(axValue(menu, kAXChildrenAttribute) ?? []), [axValue(menu, kAXTitleAttribute) ?? ""], index == 0, 1)
+    }
+    // Cut short, a turned-off match may have an enabled twin further on: only
+    // an Apple menu match is then trusted, and the chord is otherwise sent.
+    if !complete && !found.contains(where: { $0.system || $0.enabled }) { return nil }
+    return found
+}
+
+// Why a menu command is off, and what the shape can do about it.
+func turnedOff(_ app: NSRunningApplication) -> String {
+    let name = app.localizedName ?? "the app"
+    return app.isActive ? "is turned off right now" : "is turned off while \(name) is in the background. Ask the person to bring \(name) to the front first, or to do this themselves"
+}
+
 @available(macOS 12.3, *) @MainActor
 func appInput(_ request: [String: Any]) async throws -> [String: Any] {
     try consoleSession()
@@ -450,7 +504,7 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
     if ["type", "press_key"].contains(operation), !focusWindow() {
         throw fail("target_not_focused", "Keys would go to another window of this app. Click a field in the observed window first.")
     }
-    var pointer: [String: Double] = [:]
+    var pointer: [String: Double] = [:], shortcut: [String]?, focusedText: String?
     func postKey(_ code: CGKeyCode, _ down: Bool, _ flags: CGEventFlags = []) {
         guard let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else { return }
         event.flags = flags; event.postToPid(pid)
@@ -571,10 +625,45 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
         if chord == ["RETURN"], let focused: AXUIElement = axValue(target.appElement, kAXFocusedUIElementAttribute),
            axActions(focused).contains(kAXConfirmAction as String),
            AXUIElementPerformAction(focused, kAXConfirmAction as CFString) == .success { method = "accessibility"; break }
+        // A chord the app's menus own does nothing when that item is turned off,
+        // so it isn't sent: the receipt would otherwise read as done.
+        if chord.count > 1, let matches = menuShortcuts(target.appElement, key: last, code: code, modifiers: Set(chord.dropLast())), !matches.isEmpty {
+            let label = chord.joined(separator: "+")
+            if matches.contains(where: { $0.system }) {
+                throw fail("system_command", "\(label) is a Mac command from the Apple menu, not this app's. Nothing was sent.")
+            }
+            guard let item = matches.first(where: { $0.enabled }) else {
+                throw fail("shortcut_unavailable", "\(label) is \(target.app.localizedName ?? "this app")'s \(matches[0].path.map { String($0.prefix(60)) }.joined(separator: " › ")), which \(turnedOff(target.app)). Nothing was sent.")
+            }
+            shortcut = item.path.map { String($0.prefix(60)) }
+        }
+        // Whether the focused text's caret moved, read back once the app has
+        // handled the keys. A key a text view has no binding for (CMD+END on a
+        // Mac) arrives and does nothing.
+        func textState() -> (element: AXUIElement, location: Int, length: Int, characters: Int)? {
+            guard let focused: AXUIElement = axValue(target.appElement, kAXFocusedUIElementAttribute),
+                  let role: String = axValue(focused, kAXRoleAttribute), textRoles.contains(role),
+                  let selected: AXValue = axValue(focused, kAXSelectedTextRangeAttribute) else { return nil }
+            var range = CFRange()
+            guard AXValueGetValue(selected, .cfRange, &range) else { return nil }
+            return (focused, range.location, range.length, (axValue(focused, kAXNumberOfCharactersAttribute) as NSNumber?)?.intValue ?? -1)
+        }
+        // Only for moves, where "unchanged" means the key did nothing: RETURN or
+        // a menu shortcut can act without touching the text.
+        let navigation: Set<String> = ["LEFT", "RIGHT", "UP", "DOWN", "HOME", "END", "PAGEUP", "PAGEDOWN"]
+        let before = shortcut == nil && navigation.contains(last) ? textState() : nil
         var flags: CGEventFlags = []
         for name in chord.dropLast() { let (key, flag) = modifiers[name]!; flags.insert(flag); postKey(key, true, flags) }
         postKey(code, true, flags); postKey(code, false, flags)
         for name in chord.dropLast().reversed() { let (key, flag) = modifiers[name]!; flags.remove(flag); postKey(key, false, flags) }
+        if let before {
+            focusedText = "unchanged"
+            for _ in 0..<10 {
+                guard let now = textState(), CFEqual(now.element, before.element), now.location == before.location,
+                      now.length == before.length, now.characters == before.characters else { focusedText = "changed"; break }
+                pause(0.03)
+            }
+        }
     case "scroll":
         let at = try globalPoint("point")
         guard let dx = request["dx"] as? Int32, let dy = request["dy"] as? Int32, abs(Int(dx)) <= 2000, abs(Int(dy)) <= 2000 else {
@@ -612,10 +701,16 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
             // Menu bar items and menu items hold their entries inside an AXMenu child.
             if depth > 0, children.count == 1, (axValue(children[0], kAXRoleAttribute) as String?) == "AXMenu" { children = axValue(children[0], kAXChildrenAttribute) ?? [] }
             available = children.compactMap { axValue($0, kAXTitleAttribute) as String? }.filter { !$0.isEmpty }
-            guard let match = children.first(where: { norm((axValue($0, kAXTitleAttribute) as String?) ?? "") == norm(title) }) else {
+            guard let index = children.firstIndex(where: { norm((axValue($0, kAXTitleAttribute) as String?) ?? "") == norm(title) }) else {
                 throw fail("menu_item_not_found", "No menu item '\(title.prefix(60))'. Available here: \(available.prefix(40).joined(separator: ", ").prefix(600))")
             }
-            current = match
+            // The Apple menu (sleep, restart, log out...) belongs to the Mac.
+            if depth == 0, index == 0 { throw fail("system_command", "The Apple menu holds the Mac's own commands, not this app's. Nothing was pressed.") }
+            current = children[index]
+        }
+        // Pressing a turned-off item reports success and does nothing.
+        if (axValue(current, kAXEnabledAttribute) as Bool?) == false {
+            throw fail("menu_unavailable", "\(path.map { String($0.prefix(60)) }.joined(separator: " › ")) in \(target.app.localizedName ?? "this app") \(turnedOff(target.app)). Nothing was pressed.")
         }
         guard AXUIElementPerformAction(current, kAXPressAction as CFString) == .success else { throw fail("menu_unavailable", "That menu item could not be pressed. It may be disabled.") }
         method = "accessibility"
@@ -625,6 +720,8 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
     var reply: [String: Any] = ["dispatched": true, "delivery_verified": false, "source_pid": getpid(), "method": method,
                                 "message": "Sent to that app only. Observe the app again to verify the result."]
     if !pointer.isEmpty { reply["pointer"] = pointer }
+    if let shortcut { reply["shortcut"] = shortcut }
+    if let focusedText { reply["focused_text"] = focusedText }
     return reply
 }
 
