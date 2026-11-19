@@ -33,7 +33,8 @@ const { spawn } = require("node:child_process");
 const { elevationStatus } = require("./command-shell");
 const commandJobs = require("./command-jobs");
 const { URL } = require("node:url");
-const { startJob, publicStatus, listJobs, cancelJob, respondJob } = require("./codex");
+const { startJob, publicStatus, listJobs, cancelJob, respondJob, sendTurn, sessionStatus,
+  readSession: readAgentSession, stopSession, listSessions } = require("./codex");
 const { listAgents } = require("./agents");
 const { expandHome } = require("./local-workspace");
 const { bundledRuntime } = require("./bundled-runtime");
@@ -64,7 +65,25 @@ const CAPABILITIES = {
   agent_status: "wait for a local agent task and collect its result",
   agent_cancel: "stop a local agent task",
   agent_jobs: "list recent local agent tasks to find a job_id again",
+  agent_send: "send a follow-up message to a Claude Code session or Codex thread a chat started",
+  agent_session: "status of a Claude Code session or Codex thread a chat started, and whether it is open elsewhere",
+  agent_read: "recent messages of a Claude Code session or Codex thread a chat started, including the person's own",
+  agent_session_stop: "stop the running turn of a Claude Code session or Codex thread a chat started",
+  agent_sessions: "list the Claude Code sessions and Codex threads a chat started on this computer",
 };
+
+// Session routes refuse anything they don't name. A scope comes only from the
+// shapes.inc server, so a 404 never says whether another chat has the session.
+function sessionError(res, err) {
+  if (err.errorType === "agent_unavailable") return sendJson(res, 409,
+    { error: err.message, error_type: err.errorType, started: false, agents: err.agents });
+  return sendJson(res, err.statusCode || 400, { error: err.message,
+    ...(err.errorType ? { error_type: err.errorType } : {}), ...(err.jobId ? { job_id: err.jobId } : {}) });
+}
+
+function onlyKeys(value, keys) {
+  return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).every((key) => keys.includes(key));
+}
 
 const CODEX_TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"]);
 
@@ -217,7 +236,7 @@ function startServer({ port, token, computerControl = createComputerControl(), p
     }
     if (route === "/capabilities" && method === "GET") {
       return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: {
-        command_jobs: true, interactive_codex: true, idempotent_start: true, job_list: true,
+        command_jobs: true, interactive_codex: true, idempotent_start: true, job_list: true, agent_sessions: true,
         ...runtimeCapabilities(), computer_control: computerControl.available(),
         computer_app_control: Boolean(computerControl.appControlAvailable?.()),
         computer_brief_activation: Boolean(computerControl.appControlAvailable?.()) } });
@@ -295,13 +314,15 @@ function startServer({ port, token, computerControl = createComputerControl(), p
             return sendJson(res, result.deduplicated ? 200 : 202, result);
           }
           if (!body || typeof body !== "object" || Array.isArray(body)
-              || Object.keys(body).some((key) => !["prompt", "cwd", "workspace_write", "interactive", "request_key", ...(codexOnly ? [] : ["agent"])].includes(key))
+              || Object.keys(body).some((key) => !["prompt", "cwd", "workspace_write", "interactive", "request_key", ...(codexOnly ? [] : ["agent", "session_scope", "title", "started_by"])].includes(key))
               || typeof body.prompt !== "string" || !body.prompt.trim()
               || (body.cwd !== undefined && typeof body.cwd !== "string")
               || (!codexOnly && body.agent !== undefined && !["auto", "codex", "claude"].includes(body.agent))
               || (body.workspace_write !== undefined && typeof body.workspace_write !== "boolean")
               || (body.interactive !== undefined && typeof body.interactive !== "boolean")
-              || (body.request_key !== undefined && typeof body.request_key !== "string")) {
+              || (body.request_key !== undefined && typeof body.request_key !== "string")
+              || (body.title !== undefined && typeof body.title !== "string")
+              || (body.started_by !== undefined && typeof body.started_by !== "string")) {
             return sendJson(res, 400, { error: "Supply prompt text, optional absolute cwd, boolean workspace_write, and a supported agent on /agents/start." });
           }
           const cwd = body.cwd ? expandHome(body.cwd) : process.cwd();
@@ -311,6 +332,7 @@ function startServer({ port, token, computerControl = createComputerControl(), p
             prompt: body.prompt, cwd, agent,
             interactive: body.interactive === true, requestKey: body.request_key,
             sandbox: body.workspace_write ? "workspace-write" : "read-only",
+            ...(body.session_scope !== undefined ? { sessionScope: body.session_scope, title: body.title, startedBy: body.started_by } : {}),
           });
           if (result.deduplicated) log(`AGENT START deduplicated: ${result.job_id}`);
           return sendJson(res, result.deduplicated ? 200 : 202, result);
@@ -320,6 +342,46 @@ function startServer({ port, token, computerControl = createComputerControl(), p
             { error: err.message, error_type: err.errorType, started: false, agents: err.agents, ...job });
           return sendJson(res, err.statusCode || 400, { error: err.message, ...(err.jobId ? { started: false, ...job } : {}) });
         }
+      }
+
+      if (route === "/agents/send" && method === "POST") {
+        try {
+          const body = await readBody(req);
+          if (!onlyKeys(body, ["agent_session_id", "session_scope", "prompt", "request_key", "workspace_write", "agent"])
+              || typeof body.prompt !== "string" || !body.prompt.trim()
+              || (body.workspace_write !== undefined && typeof body.workspace_write !== "boolean")
+              || (body.request_key !== undefined && typeof body.request_key !== "string")) {
+            return sendJson(res, 400, { error: "Supply agent_session_id, prompt text, optional boolean workspace_write and the chat's session scope." });
+          }
+          log(`AGENT SEND: ${body.agent_session_id}`);
+          const result = await sendTurn({ agentSessionId: body.agent_session_id, sessionScope: body.session_scope, prompt: body.prompt, agent: body.agent,
+            requestKey: body.request_key, ...(body.workspace_write !== undefined ? { sandbox: body.workspace_write ? "workspace-write" : "read-only" } : {}) });
+          return sendJson(res, result.deduplicated ? 200 : 202, result);
+        } catch (err) { return sessionError(res, err); }
+      }
+
+      if (["/agents/session", "/agents/read", "/agents/sessions"].includes(route) && method === "GET") {
+        try {
+          const allowed = route === "/agents/sessions" ? ["session_scope", "limit"]
+            : route === "/agents/read" ? ["agent_session_id", "session_scope", "limit", "agent"] : ["agent_session_id", "session_scope"];
+          if ([...url.searchParams.keys()].some((key) => !allowed.includes(key))) return sendJson(res, 400, { error: `Supply only ${allowed.join(", ")}.` });
+          const scope = url.searchParams.get("session_scope"), id = url.searchParams.get("agent_session_id");
+          const limit = url.searchParams.get("limit") ?? 10;
+          if (route === "/agents/sessions") return sendJson(res, 200, listSessions({ sessionScope: scope, limit }));
+          log(`AGENT ${route === "/agents/read" ? "READ" : "SESSION"}: ${id}`);
+          return sendJson(res, 200, route === "/agents/read"
+            ? await readAgentSession({ agentSessionId: id, sessionScope: scope, limit, agent: url.searchParams.get("agent") ?? undefined })
+            : await sessionStatus({ agentSessionId: id, sessionScope: scope }));
+        } catch (err) { return sessionError(res, err); }
+      }
+
+      if (route === "/agents/session/stop" && method === "POST") {
+        try {
+          const body = await readBody(req);
+          if (!onlyKeys(body, ["agent_session_id", "session_scope"])) return sendJson(res, 400, { error: "Supply agent_session_id and the chat's session scope." });
+          log(`AGENT SESSION STOP: ${body.agent_session_id}`);
+          return sendJson(res, 200, stopSession({ agentSessionId: body.agent_session_id, sessionScope: body.session_scope }));
+        } catch (err) { return sessionError(res, err); }
       }
 
       if (["/codex/jobs", "/agents/jobs"].includes(route) && method === "GET") {

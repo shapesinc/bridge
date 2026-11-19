@@ -25,6 +25,7 @@ function normalizedItem(item) {
 // This transport never converts model text into approvals or answers a request.
 function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent = () => {},
   resumeThreadId, launchArgs, environment, model, modelProvider, usageBaseline, requiredAccountType,
+  threadName, pickAvailableModel = false,
   onServerRequest, onRequestResolved = () => {}, onDiagnostic = () => {}, onLifecycle = () => {},
   startupTimeoutMs = 30000, requestTimeoutMs = 30000, shutdownTimeoutMs = 1500,
   maxLineBytes = 1024 * 1024 } = {}) {
@@ -280,6 +281,11 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
         const account = await rpc("account/read", { refreshToken: false });
         if (account?.account?.type !== requiredAccountType) throw new Error("The selected personal account is no longer signed in.");
       }
+      // The person's own Codex: when its configured model isn't one this
+      // account offers, use the account's default, as the Codex app does,
+      // instead of failing the task. Best effort; Codex still decides.
+      let chosenModel = model;
+      if (pickAvailableModel && !chosenModel) chosenModel = await availableModel();
       enterPhase("thread_start");
       // Granting a chat this computer is the consent: no per-command approval
       // prompts. Writes run with full access; read-only stays sandboxed.
@@ -287,9 +293,14 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
       const thread = await rpc(resumeThreadId ? "thread/resume" : "thread/start", {
         ...(resumeThreadId ? { threadId: resumeThreadId } : {}),
         cwd, sandbox: sandbox === "workspace-write" ? "danger-full-access" : "read-only", approvalPolicy: "never",
-        ...(model ? { model } : {}), ...(modelProvider ? { modelProvider } : {}),
+        ...(chosenModel ? { model: chosenModel } : {}), ...(modelProvider ? { modelProvider } : {}),
       });
       rememberThread(thread.thread?.id);
+      if (!resumeThreadId && typeof threadName === "string" && threadName) {
+        // The name the person sees in their Codex thread list. Naming is
+        // cosmetic: a failure never fails the task.
+        await rpc("thread/name/set", { threadId, name: threadName }).catch(() => {});
+      }
       if (thread.approvalPolicy !== undefined && thread.approvalPolicy !== "never") throw new Error("Codex did not disable approval prompts.");
       const revision = turnRevision;
       enterPhase("turn_start");
@@ -309,6 +320,28 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
       await close();
       throw fatalError || error;
     }
+  }
+  async function availableModel() {
+    try {
+      // Bounded on its own: a slow model list delays the task by seconds at
+      // most, and then Codex keeps its configured model.
+      let timer;
+      const [config, models] = await Promise.race([
+        Promise.all([rpc("config/read", { includeLayers: false, cwd }), rpc("model/list", { includeHidden: true })]),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("model check timed out")), 5000); }),
+      ]).finally(() => clearTimeout(timer));
+      const configured = config?.config?.model;
+      // A hidden model is still one the account can use; only the fallback
+      // itself comes from the models the Codex app shows.
+      const usable = (Array.isArray(models?.data) ? models.data : [])
+        .filter((item) => item && typeof item.model === "string" && item.model);
+      const shown = usable.filter((item) => item.hidden !== true);
+      if (typeof configured !== "string" || !configured || !shown.length
+          || usable.some((item) => item.model === configured || item.id === configured)) return undefined;
+      const chosen = (shown.find((item) => item.isDefault === true) || shown[0]).model;
+      emit({ type: "model.substituted", configured: configured.slice(0, 80), model: chosen.slice(0, 80) });
+      return chosen;
+    } catch { return undefined; }
   }
   function respond(id, result) {
     if (!pending.has(id) || terminal || fatalError || closing) throw new Error("This Codex request is no longer pending.");
