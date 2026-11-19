@@ -38,7 +38,9 @@ const SYSTEM_SID = "S-1-5-18";
 // Local, domain and Microsoft Entra (S-1-12-1-…) accounts.
 const ACCOUNT_SID = /^S-1-\d+(-\d+)+$/i;
 // Rewriting an ACL makes Windows reapply it to every file inside, so it takes
-// longer the bigger the store; the timeout is only a runaway guard.
+// longer the more receipts and sessions the store holds, and longer still while
+// other Bridge processes do the same. The timeout is only a runaway guard:
+// cutting it short refused commands on a busy store.
 const windowsTool = (file, args) => spawnSync(file, args, { encoding: "utf8", windowsHide: true, timeout: WINDOWS_ACL_TIMEOUT_MS, maxBuffer: 65536 });
 
 // True only for exactly the DACL ensureStateDir grants: inheritance removed,
