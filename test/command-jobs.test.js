@@ -108,7 +108,9 @@ test("command receipts survive disconnects, deduplicate starts, isolate scopes a
         assert.equal(late.body.state, "cancelled", JSON.stringify(late));
         assert.equal(late.body.cleanup_confirmed, true);
         assert.equal(fs.existsSync(path.join(jobs.root(), `${id}.supervisor`)), false);
-        assert.deepEqual(jobs.pendingLocks(), []);
+        // The losing start leaves no lock of its own. (The cancelled command
+        // from the first subtest may still be exiting and holding its own.)
+        assert.deepEqual(jobs.pendingLocks().filter((lock) => lock.job_id === id), []);
       } finally { fs.linkSync = link; }
     });
     await t.test("protocol1 Stop ends the owned process tree before a delayed side effect", { skip: process.platform === "win32" }, async () => {

@@ -261,6 +261,8 @@ test("commands from several chats share one computer", { timeout: 120000 }, asyn
 function home(t, label) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `bridge-${label}-`)), previous = process.env.SHAPES_BRIDGE_HOME;
   process.env.SHAPES_BRIDGE_HOME = dir;
+  // A real store is secured when it is created, before it holds any receipt.
+  require("../src/state").ensureStateDir();
   t.after(() => {
     if (previous === undefined) delete process.env.SHAPES_BRIDGE_HOME; else process.env.SHAPES_BRIDGE_HOME = previous;
     fs.rmSync(dir, { recursive: true, force: true });
