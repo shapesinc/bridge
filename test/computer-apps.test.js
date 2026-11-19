@@ -147,3 +147,31 @@ test("capabilities advertise background app control separately", async () => {
     assert.equal(body.features.computer_app_control, true);
   } finally { server.closeAllConnections(); await new Promise((r) => server.close(r)); }
 });
+
+test("only the server's header lets a key chord or menu command run through a brief activation, and the reply says so", async () => {
+  const f = fixture({ invoke: async (request) => {
+    f.calls.push(request);
+    if (request.operation === "observe") return windowCapture();
+    return { success: true, result: { dispatched: true, delivery_verified: false, method: request.allow_activation ? "brief_activation" : "event",
+      ...(request.allow_activation ? { activation: { ms: 12, restored: true } } : {}) } };
+  } });
+  const server = await startServer({ port: 0, token: "synthetic-computer-token", computerControl: f.control });
+  const post = async (control, headers = {}) => (await fetch(`http://127.0.0.1:${server.address().port}/computer`, { method: "POST",
+    headers: { "x-token": "synthetic-computer-token", "content-type": "application/json", ...headers }, body: JSON.stringify({ scope: SCOPE, control }) })).json();
+  const allow = { "x-shapes-computer-activation": "brief" };
+  try {
+    const input = async (control, headers) => post({ ...control, observation_id: (await post({ operation: "observe", app: "Chat" }, headers)).result.observation_id }, headers);
+    const save = await input({ operation: "press_key", keys: ["CMD", "S"] }, allow);
+    assert.equal(save.delivery, "brief_activation");
+    assert.deepEqual(save.result.activation, { ms: 12, restored: true });
+    assert.equal((await input({ operation: "menu", path: ["File", "Save"] }, allow)).delivery, "brief_activation");
+    for (const control of [{ operation: "type", text: "hi" }, { operation: "click", element: 0 }])
+      assert.equal((await input(control, allow)).delivery, "background", JSON.stringify(control));
+    assert.equal((await input({ operation: "press_key", keys: ["CMD", "S"] })).delivery, "background");
+    assert.equal((await input({ operation: "press_key", keys: ["CMD", "S"] }, { "x-shapes-computer-activation": "yes" })).delivery, "background");
+    assert.deepEqual(f.calls.filter((c) => c.operation !== "observe").map((c) => [c.operation, c.allow_activation === true]),
+      [["press_key", true], ["menu", true], ["type", false], ["click", false], ["press_key", false], ["press_key", false]]);
+    const features = (await (await fetch(`http://127.0.0.1:${server.address().port}/capabilities`)).json()).features;
+    assert.equal(features.computer_brief_activation, true);
+  } finally { server.closeAllConnections(); await new Promise((r) => server.close(r)); }
+});

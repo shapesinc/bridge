@@ -384,7 +384,7 @@ func observeApp(_ request: [String: Any]) async throws -> [String: Any] {
             "image_base64": jpeg.base64EncodedString(), "image_content_type": "image/jpeg"]
 }
 
-struct MenuShortcut { let path: [String]; let enabled: Bool; let system: Bool }
+struct MenuShortcut { let path: [String]; let enabled: Bool; let system: Bool; let element: AXUIElement }
 
 // The menu items a key chord triggers, read through Accessibility. An app in the
 // background turns off its commands for the document and selection (Save,
@@ -418,7 +418,7 @@ func menuShortcuts(_ app: AXUIElement, key: String, code: CGKeyCode, modifiers: 
             let modifiers = (values[3] as? NSNumber)?.intValue ?? 0
             let matched = modifiers == wanted && ((values[2] as? NSNumber).map { $0.intValue == Int(code) }
                 ?? (values[1] as? String).map { !$0.isEmpty && $0.uppercased() == character } ?? false)
-            if matched { found.append(MenuShortcut(path: path + [title], enabled: values[4] as? Bool ?? true, system: system)) }
+            if matched { found.append(MenuShortcut(path: path + [title], enabled: values[4] as? Bool ?? true, system: system, element: item)) }
             if depth < 2, let children = values[5] as? [AXUIElement], !children.isEmpty { walk(entries(children), path + [title], system, depth + 1) }
         }
     }
@@ -436,6 +436,89 @@ func menuShortcuts(_ app: AXUIElement, key: String, code: CGKeyCode, modifiers: 
 func turnedOff(_ app: NSRunningApplication) -> String {
     let name = app.localizedName ?? "the app"
     return app.isActive ? "is turned off right now" : "is turned off while \(name) is in the background. Ask the person to bring \(name) to the front first, or to do this themselves"
+}
+
+// A command an app turns off in the background (Save, Copy, Undo...) runs only
+// while the app is active: no Accessibility press or posted key gets past
+// that. When the server allows it, such a command runs by making the app
+// active for a split second without raising its windows, pressing its menu
+// item and putting the person's front app straight back, and only while the
+// person isn't typing or holding a button, so none of their input lands in
+// the app. SkyLight is private API: without its calls the command is refused.
+typealias FrontProcess = @convention(c) (UnsafeMutablePointer<ProcessSerialNumber>) -> CGError
+typealias SetFrontProcess = @convention(c) (UnsafeMutablePointer<ProcessSerialNumber>, UInt32, UInt32) -> CGError
+typealias ProcessForPID = @convention(c) (pid_t, UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
+let skyLight: (front: FrontProcess, setFront: SetFrontProcess, process: ProcessForPID)? = {
+    let loaded = UnsafeMutableRawPointer(bitPattern: -2) // RTLD_DEFAULT
+    guard let sky = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY),
+          let front = dlsym(sky, "_SLPSGetFrontProcess"), let setFront = dlsym(sky, "_SLPSSetFrontProcessWithOptions"),
+          let process = dlsym(loaded, "GetProcessForPID") else { return nil }
+    return (unsafeBitCast(front, to: FrontProcess.self), unsafeBitCast(setFront, to: SetFrontProcess.self), unsafeBitCast(process, to: ProcessForPID.self))
+}()
+
+// What the person is doing with their own keyboard or mouse right now, if anything.
+func personBusy() -> String? {
+    if NSEvent.pressedMouseButtons != 0 { return "holding a mouse button" }
+    let keys = [CGEventType.keyDown, .flagsChanged].map { CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) }.min() ?? 0
+    let held: CGEventFlags = [.maskCommand, .maskShift, .maskAlternate, .maskControl]
+    if keys < 1 || !CGEventSource.flagsState(.hidSystemState).intersection(held).isEmpty { return "typing" }
+    if IsSecureEventInputEnabled() { return "entering a password" }
+    return nil
+}
+
+// Activates the app without raising a window, runs press, and puts the
+// person's front app back. ms is how long the app was active: from the
+// request until the person's app is confirmed in front again.
+@MainActor
+func activateBriefly(_ app: NSRunningApplication, _ appElement: AXUIElement, window: CGWindowID, label: String, press: () -> AXError) throws -> [String: Any] {
+    let name = app.localizedName ?? "the app"
+    guard let sky = skyLight else { throw fail("activation_failed", "\(label) could not be run: this Mac can't make \(name) active without bringing it forward. Nothing was sent.") }
+    // Activating an app whose window is on another desktop (or minimized) can
+    // switch the person's desktop to it, out of a full-screen app.
+    let listed = CGWindowListCopyWindowInfo(.optionIncludingWindow, window) as? [[String: Any]]
+    guard listed?.first?[kCGWindowIsOnscreen as String] as? Bool == true else {
+        throw fail("activation_failed", "\(label) needs \(name) active for a split second, but its window isn't on the person's current desktop, so nothing was sent. Ask the person to do it, or try again when they're back on that desktop.")
+    }
+    var previous = ProcessSerialNumber(), target = ProcessSerialNumber()
+    func same(_ a: ProcessSerialNumber, _ b: ProcessSerialNumber) -> Bool { a.highLongOfPSN == b.highLongOfPSN && a.lowLongOfPSN == b.lowLongOfPSN }
+    guard sky.front(&previous) == .success, sky.process(app.processIdentifier, &target) == noErr, !same(previous, target) else {
+        throw fail("activation_failed", "\(label) could not be run: \(name) could not be made active. Nothing was sent.")
+    }
+    // Checked last, right before the switch.
+    if let busy = personBusy() {
+        throw fail("person_active", "\(label) needs \(name) active for a split second, and the person is \(busy) right now, so nothing was sent. Try again in a few seconds.")
+    }
+    // A busy or hung app must not hold the person's keyboard: every
+    // Accessibility call while it is active gives up after 0.25 s.
+    AXUIElementSetMessagingTimeout(appElement, 0.25)
+    let noWindows: UInt32 = 0x400 // kCPSNoWindows: activate without raising a window
+    let start = DispatchTime.now().uptimeNanoseconds
+    func within(_ check: () -> Bool) -> Bool { for _ in 0..<200 { if check() { return true }; usleep(1000) }; return false }
+    func frontIs(_ process: ProcessSerialNumber) -> Bool { var now = ProcessSerialNumber(); return sky.front(&now) == .success && same(now, process) }
+    _ = sky.setFront(&target, 0, noWindows)
+    // Asked of the app itself: its menus check against its own active state.
+    let active = within { (axValue(appElement, kAXFrontmostAttribute) as Bool?) == true }
+    let pressed = active ? press() : .failure
+    var restored = false
+    for _ in 0..<2 where !restored { _ = sky.setFront(&previous, 0, noWindows); restored = within { frontIs(previous) } }
+    // An activation that lands after the wait above must not keep the front.
+    if !active { usleep(150_000); if frontIs(target) { _ = sky.setFront(&previous, 0, noWindows); restored = within { frontIs(previous) } } }
+    let ms = Int((DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
+    let back = restored ? "" : " The person's app could not be put back in front, so \(name) is the active app now: tell them."
+    guard active else { throw fail("activation_failed", "\(name) did not become active, so \(label) was not run.\(back)") }
+    guard pressed == .success else { throw fail("menu_unavailable", "\(label) could not be pressed in \(name).\(back)") }
+    return ["ms": ms, "restored": restored]
+}
+
+// Save's shortcut is CMD+S in every language.
+func savesDocument(_ item: AXUIElement) -> Bool {
+    (axValue(item, kAXMenuItemCmdCharAttribute) as String?)?.uppercased() == "S" && (axValue(item, kAXMenuItemCmdModifiersAttribute) as NSNumber?)?.intValue == 0
+}
+
+// When the file behind a document window last changed, to confirm a save.
+func documentModified(_ window: AXUIElement) -> Date? {
+    guard let link: String = axValue(window, kAXDocumentAttribute), let url = URL(string: link), url.isFileURL else { return nil }
+    return (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
 }
 
 @available(macOS 12.3, *) @MainActor
@@ -505,6 +588,21 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
         throw fail("target_not_focused", "Keys would go to another window of this app. Click a field in the observed window first.")
     }
     var pointer: [String: Double] = [:], shortcut: [String]?, focusedText: String?
+    // Server-owned: whether a command the app turns off in the background may
+    // run through a split-second activation (see activateBriefly).
+    let mayActivate = request["allow_activation"] as? Bool == true && skyLight != nil && !target.app.isActive
+    var activation: [String: Any]?, documentSaved: Bool?
+    func runBriefly(_ item: AXUIElement, _ label: String) throws {
+        let before = savesDocument(item) ? documentModified(target.window) : nil
+        AXUIElementSetMessagingTimeout(item, 0.25)
+        activation = try activateBriefly(target.app, target.appElement, window: CGWindowID(windowID), label: label) { AXUIElementPerformAction(item, kAXPressAction as CFString) }
+        guard let before else { return }
+        documentSaved = false
+        for _ in 0..<30 {
+            if let now = documentModified(target.window), now != before { documentSaved = true; break }
+            pause(0.05)
+        }
+    }
     func postKey(_ code: CGKeyCode, _ down: Bool, _ flags: CGEventFlags = []) {
         guard let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else { return }
         event.flags = flags; event.postToPid(pid)
@@ -632,10 +730,17 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
             if matches.contains(where: { $0.system }) {
                 throw fail("system_command", "\(label) is a Mac command from the Apple menu, not this app's. Nothing was sent.")
             }
-            guard let item = matches.first(where: { $0.enabled }) else {
-                throw fail("shortcut_unavailable", "\(label) is \(target.app.localizedName ?? "this app")'s \(matches[0].path.map { String($0.prefix(60)) }.joined(separator: " › ")), which \(turnedOff(target.app)). Nothing was sent.")
+            if let item = matches.first(where: { $0.enabled }) {
+                shortcut = item.path.map { String($0.prefix(60)) }
+            } else {
+                let item = matches[0], titled = item.path.map { String($0.prefix(60)) }
+                guard mayActivate else {
+                    throw fail("shortcut_unavailable", "\(label) is \(target.app.localizedName ?? "this app")'s \(titled.joined(separator: " › ")), which \(turnedOff(target.app)). Nothing was sent.")
+                }
+                shortcut = titled
+                try runBriefly(item.element, "\(label) (\(titled.joined(separator: " › ")))")
+                method = "brief_activation"; break
             }
-            shortcut = item.path.map { String($0.prefix(60)) }
         }
         // Whether the focused text's caret moved, read back once the app has
         // handled the keys. A key a text view has no binding for (CMD+END on a
@@ -710,7 +815,14 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
         }
         // Pressing a turned-off item reports success and does nothing.
         if (axValue(current, kAXEnabledAttribute) as Bool?) == false {
-            throw fail("menu_unavailable", "\(path.map { String($0.prefix(60)) }.joined(separator: " › ")) in \(target.app.localizedName ?? "this app") \(turnedOff(target.app)). Nothing was pressed.")
+            let titled = path.map { String($0.prefix(60)) }.joined(separator: " › ")
+            guard mayActivate else {
+                throw fail("menu_unavailable", "\(titled) in \(target.app.localizedName ?? "this app") \(turnedOff(target.app)). Nothing was pressed.")
+            }
+            // Save and the like act on the app's main window: make it the observed one.
+            guard focusWindow() else { throw fail("target_not_focused", "\(titled) would act on another window of this app. Click in the observed window first.") }
+            try runBriefly(current, titled)
+            method = "brief_activation"; break
         }
         guard AXUIElementPerformAction(current, kAXPressAction as CFString) == .success else { throw fail("menu_unavailable", "That menu item could not be pressed. It may be disabled.") }
         method = "accessibility"
@@ -722,6 +834,8 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
     if !pointer.isEmpty { reply["pointer"] = pointer }
     if let shortcut { reply["shortcut"] = shortcut }
     if let focusedText { reply["focused_text"] = focusedText }
+    if let activation { reply["activation"] = activation }
+    if let documentSaved { reply["document_saved"] = documentSaved }
     return reply
 }
 

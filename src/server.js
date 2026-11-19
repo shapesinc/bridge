@@ -219,7 +219,8 @@ function startServer({ port, token, computerControl = createComputerControl(), p
       return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: {
         command_jobs: true, interactive_codex: true, idempotent_start: true, job_list: true,
         ...runtimeCapabilities(), computer_control: computerControl.available(),
-        computer_app_control: Boolean(computerControl.appControlAvailable?.()) } });
+        computer_app_control: Boolean(computerControl.appControlAvailable?.()),
+        computer_brief_activation: Boolean(computerControl.appControlAvailable?.()) } });
     }
 
     // Everything below requires the token.
@@ -265,7 +266,8 @@ function startServer({ port, token, computerControl = createComputerControl(), p
         } catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message, error_type: error.errorType }); }
       }
       if (route === "/computer" && method === "POST") {
-        const result = await computerControl.execute(await readBody(req, 32768));
+        const result = await computerControl.execute(await readBody(req, 32768),
+          { allowActivation: req.headers["x-shapes-computer-activation"] === "brief" });
         return sendJson(res, result.success ? 200 : 409, result);
       }
       if (route === "/sessions/create" && method === "POST") {
