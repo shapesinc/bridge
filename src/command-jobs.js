@@ -238,20 +238,29 @@ function claim(id, scope, metadata) {
   return true;
 }
 
+// Another Bridge process pruning the same store can be removing a receipt at
+// the same moment. On Windows a file that is being deleted can be neither read
+// nor deleted again (EPERM), and a scanner can hold one briefly (EBUSY).
+const IN_USE = new Set(["EPERM", "EACCES", "EBUSY"]);
 function prune() {
   const kept = [];
   for (const name of fs.readdirSync(root())) {
     if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
     let record;
-    // Another Bridge process pruning the same store can remove it first.
     try { record = load(name.slice(0, -5)); }
-    catch (cause) { if (cause.errorType === "command_not_found") continue; throw cause; }
+    catch (cause) { if (cause.errorType === "command_not_found" || IN_USE.has(cause.code)) continue; throw cause; }
     const finished = TERMINAL.has(record.state);
-    if (finished && record.state !== "interrupted" && Date.now() - record.finished_at > RETENTION_MS) forget(record.job_id);
+    if (finished && record.state !== "interrupted" && Date.now() - record.finished_at > RETENTION_MS) dropReceipt(record.job_id);
     else kept.push({ id: record.job_id, finished, at: record.finished_at || record.created_at || 0 });
   }
+  // Making room is housekeeping: a receipt that cannot be dropped right now
+  // is left for a later prune, and the next oldest is dropped instead.
   const droppable = kept.filter((entry) => entry.finished).sort((a, b) => a.at - b.at);
-  for (let extra = kept.length - MAX_RECEIPTS + 1; extra > 0 && droppable.length; extra--) forget(droppable.shift().id);
+  for (let extra = kept.length - MAX_RECEIPTS + 1; extra > 0 && droppable.length;) if (dropReceipt(droppable.shift().id)) extra--;
+}
+function dropReceipt(id) {
+  try { forget(id); return true; }
+  catch (cause) { if (IN_USE.has(cause.code)) return false; throw cause; }
 }
 function forget(id) {
   for (const suffix of [".json", ".claimed", ".cancel", ".supervisor", ".worker-error"]) fs.rmSync(path.join(root(), id + suffix), { force: true });
