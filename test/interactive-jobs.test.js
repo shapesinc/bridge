@@ -34,6 +34,8 @@ let turns=0;
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
  const value=JSON.parse(line);
  if(value.method==='initialize') send({id:value.id,result:{userAgent:'test'}});
+ // Like a Codex that predates model listing: a JSON-RPC error, not silence.
+ if(value.method==='config/read'||value.method==='model/list') send({id:value.id,error:{code:-32601,message:'method not found'}});
  if(value.method==='thread/start') {fs.appendFileSync(${JSON.stringify(path.join(directory, "starts"))},'start\\n');send({id:value.id,result:{thread:{id:threadId},approvalPolicy:'never'}});}
  if(value.method==='turn/start') {
    turns++;

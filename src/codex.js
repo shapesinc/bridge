@@ -16,6 +16,7 @@ const { createToolBroker } = require("./native-tool-broker");
 const { closeProcessGroup } = require("./process-close");
 const { replaceStateFile } = require("./state");
 const { normalizeSessionInput, runtimeSessionInput } = require("./session-input");
+const sessions = require("./agent-sessions");
 
 const MAX_OUTPUT = 64 * 1024;
 const MAX_PROMPT = 64 * 1024;
@@ -107,6 +108,8 @@ function privateDir(directory) {
 function root() {
   return privateDir(path.resolve(process.env.SHAPES_CODEX_JOB_DIR || path.join(os.homedir(), ".shapes-bridge", "codex-jobs")));
 }
+
+function sessionsDirectory() { return privateDir(path.join(root(), "sessions")); }
 
 function jobDir(id) {
   if (!UUID.test(id)) throw new Error("Invalid job ID.");
@@ -225,13 +228,45 @@ function claimRequest(requestKey, id, fingerprint) {
   }
 }
 
+// The Bridge's record of a session this chat started: which scope may use it,
+// its folder and its latest turn. The vendor keeps the conversation itself.
+function saveSessionRecord({ agent, id, scope, cwd, sandbox, title, startedBy, jobId, executable }) {
+  const directory = sessionsDirectory();
+  const existing = sessions.readRecord(directory, agent, id);
+  if (existing && existing.scope !== scope) throw Object.assign(new Error("Unknown session for this chat."), { statusCode: 404 });
+  const now = new Date().toISOString();
+  writePrivate(sessions.recordPath(directory, agent, id), JSON.stringify({
+    agent, agent_session_id: id, scope, cwd, sandbox, title: existing?.title || title || null,
+    started_by: existing ? existing.started_by ?? null : startedBy ?? null,
+    created_at: existing?.created_at || now, updated_at: now, last_job_id: jobId,
+    turns: (existing?.turns || 0) + 1, ...(executable ? { executable } : {}),
+  }));
+}
+
+function sessionReceipt(agent, id, title) {
+  if (!id) return {};
+  return { agent_session_id: id, ...(title ? { session_title: title } : {}), open: sessions.openLinks(agent, id) };
+}
+
 function publicStatus(id, expectedAgent) {
   const { diagnostics_directory, diagnostics_available, ...receipt } = getStatus(id, expectedAgent);
   return receipt;
 }
 
-async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInput, deliveredInputContext, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex", interactive = false, requestKey, builtIn, resumeThreadId, usageBaseline }) {
+async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInput, deliveredInputContext, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex", interactive = false, requestKey, builtIn, resumeThreadId, usageBaseline,
+  sessionScope, title, startedBy, resumeSessionId, preselected }) {
   if (!["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
+  // A session start or turn: the same Claude Code session or Codex thread the
+  // person sees in their own apps, bound to the chat's server-derived scope.
+  if (sessionScope !== undefined) {
+    sessions.sessionScope(sessionScope);
+    if (builtIn) throw new Error("Built-in sessions have their own continuation.");
+  }
+  if (resumeSessionId !== undefined && (sessionScope === undefined || sessions.sessionId(resumeSessionId) !== resumeSessionId)) {
+    throw new Error("A session turn needs its session id and scope.");
+  }
+  if (title !== undefined && (typeof title !== "string" || title.length > 400)) throw new Error("title must be short text.");
+  if (startedBy !== undefined && (typeof startedBy !== "string" || startedBy.length > 80)) throw new Error("started_by must be short text.");
   cwd = validateCwd(cwd, sandbox);
   const timeout = Number(timeoutSeconds);
   if (!Number.isInteger(timeout) || timeout < 1 || timeout > 86400) throw new Error("Timeout must be between 1 and 86400 seconds.");
@@ -249,10 +284,12 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
   const input = suppliedInput === undefined ? undefined : normalizeSessionInput(suppliedInput);
   if (typeof interactive !== "boolean") throw new Error("interactive must be boolean.");
   validRequestKey(requestKey);
+  const sessionTitle = sessionScope && !resumeSessionId ? sessions.sessionTitle(title, prompt) : undefined;
   const fingerprint = requestKey && crypto.createHash("sha256")
     .update(JSON.stringify([prompt, cwd, sandbox, timeout, agent, interactive,
       ...(builtIn ? [builtIn.sessionId, builtIn.scopeId, builtIn.gateway.model] : []),
-      ...(input ? [input] : [])])).digest("hex");
+      ...(input ? [input] : []),
+      ...(sessionScope ? [sessionScope, resumeSessionId || null, sessionTitle || null] : [])])).digest("hex");
   if (requestKey && fs.existsSync(root())) {
     const existing = existingRequest(requestKey, fingerprint);
     if (existing) return { ...publicStatus(existing), deduplicated: true };
@@ -265,22 +302,32 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     const runtime = bundledRuntime();
     if (!runtime.available) throw new Error("The built-in runtime is unavailable. Update shapes.inc on this computer.");
     selected = { ...runtime, id: "codex" };
-  } else selected = await selectAgent(agent, cwd);
+  } else selected = preselected || await selectAgent(agent, cwd);
   agent = selected.id;
-  interactive = (interactive || selected.transport === "bundled_personal") && agent === "codex";
+  // Session Codex threads always use the app-server: `codex exec` threads are
+  // left out of the Codex app's thread list and can't be continued here.
+  interactive = (interactive || selected.transport === "bundled_personal" || Boolean(sessionScope)) && agent === "codex";
   if (interactive && !builtIn) await verifyInteractiveCodex(selected, cwd);
   const executable = selected.executable;
   const id = crypto.randomUUID();
+  // Claude Code takes the session id up front, so the session is bound before
+  // it runs; a Codex thread id is known once the app-server starts it.
+  const agentSessionId = resumeSessionId || (sessionScope && agent === "claude" ? crypto.randomUUID() : undefined);
   const directory = privateDir(path.join(root(), id));
   const state = { id, status: "queued", cwd, sandbox, agent, interactive, createdAt: new Date().toISOString(),
     ...(selected.transport === "bundled_personal" ? { funding: "personal", runtimeVersion: selected.version, personalTransport: selected.transport } : {}),
     ...(builtIn ? { sessionId: builtIn.sessionId, scopeId: builtIn.scopeId, funding: "shapes_credits", runtimeVersion: selected.version,
       ...(usageBaseline ? { runtimeUsageTotal: usageBaseline } : {}) } : {}),
+    ...(sessionScope ? { sessionScope, ...(agentSessionId ? { agentSessionId } : {}), ...(resumeSessionId ? { resumedSession: true } : {}) } : {}),
     promptPreview: prompt.trim().replace(/\s+/g, " ").slice(0, 160) };
   writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable, agent, interactive,
     ...(input ? { input, ...preparedInput } : {}),
     ...(selected.transport === "bundled_personal" ? { personalProfile: selected.profile } : {}),
-    ...(builtIn ? { gateway: builtIn.gateway, resumeThreadId, usageBaseline } : {}) }));
+    ...(builtIn ? { gateway: builtIn.gateway, resumeThreadId, usageBaseline } : {}),
+    // The person's own Codex picks a model this account offers.
+    ...(!builtIn && agent === "codex" && selected.transport !== "bundled_personal" ? { pickAvailableModel: true } : {}),
+    ...(sessionScope ? { sessionScope, title: sessionTitle, startedBy, agentSessionId, resumeSessionId,
+      ...(agent === "claude" && selected.nameFlag ? { nameFlag: true } : {}) } : {}) }));
   saveState(directory, state);
   if (requestKey) {
     let existing;
@@ -289,6 +336,14 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     if (existing) {
       fs.rmSync(directory, { recursive: true, force: true });
       return { ...publicStatus(existing), deduplicated: true };
+    }
+  }
+  if (sessionScope && agentSessionId) {
+    try { saveSessionRecord({ agent, id: agentSessionId, scope: sessionScope, cwd, sandbox, title: sessionTitle, startedBy, jobId: id, executable }); }
+    catch (error) {
+      Object.assign(state, { status: "failed", error: error.message, errorType: "session_unavailable", finishedAt: new Date().toISOString() });
+      saveState(directory, state);
+      throw Object.assign(error, { jobId: id });
     }
   }
   // The job is durably queued and listable from here on; a launch failure is
@@ -312,6 +367,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
   }
   return { job_id: id, state: "queued", cwd, sandbox, agent, interactive, created_at: state.createdAt,
     ...(builtIn ? { session_id: builtIn.sessionId, funding: "shapes_credits", runtime_version: selected.version } : {}),
+    ...(sessionScope ? sessionReceipt(agent, agentSessionId, resumeSessionId ? sessions.readRecord(sessionsDirectory(), agent, agentSessionId)?.title : sessionTitle) : {}),
     ...(agent === "claude" ? { permission_scope: sandbox === "read-only" ? "read-only-tools" : "full-access" } : {}) };
 }
 
@@ -339,6 +395,7 @@ function listJobs({ requestKey, limit = 10, agent } = {}) {
         job_id: id, state: status.state, agent: status.agent, interactive: status.interactive, cwd: status.cwd,
         sandbox: status.sandbox, created_at: status.created_at, finished_at: status.finished_at,
         error: status.error, error_type: status.error_type, thread_id: status.thread_id,
+        ...(status.agent_session_id ? { agent_session_id: status.agent_session_id } : {}),
         task_preview: typeof state.promptPreview === "string" ? state.promptPreview : null,
       });
     } catch { /* A partially written or removed job is not listable. */ }
@@ -399,6 +456,8 @@ function getStatus(id, expectedAgent) {
     ...(state.sessionId ? { session_id: state.sessionId, funding: state.funding, runtime_version: state.runtimeVersion, usage: state.usage || null } : {}),
     final: finalResult, error: state.error ? bounded(state.error, 1000) : null,
     cwd: state.cwd, sandbox: state.sandbox, thread_id: typeof state.threadId === "string" ? bounded(state.threadId, 512) : null,
+    ...(state.sessionScope ? sessionReceipt(agent, state.agentSessionId) : {}),
+    ...(typeof state.modelNote === "string" ? { model_note: state.modelNote } : {}),
     created_at: state.createdAt, finished_at: state.finishedAt || null,
     exit_code: state.exitCode ?? null,
     error_type: state.errorType || null,
@@ -447,6 +506,155 @@ function cancelJob(id, expectedAgent) {
   const state = getStatus(id, expectedAgent);
   if (!TERMINAL.has(state.state)) writePrivate(path.join(directory, "cancel"), "cancel\n");
   return { job_id: id, state: state.state, agent: state.agent, cancel_requested: !TERMINAL.has(state.state) || state.cancel_requested };
+}
+
+// --- Sessions: the person's own Claude Code sessions and Codex threads -----
+// Each operation names a session by its vendor id plus the scope the server
+// derived for this chat. A record from another scope is "unknown", the same
+// answer as no record, so a chat can't probe for another chat's sessions.
+
+function scopedRecord(agentSessionId, sessionScope, expectedAgent) {
+  const id = sessions.sessionId(agentSessionId);
+  const scope = sessions.sessionScope(sessionScope);
+  if (expectedAgent !== undefined && !["claude", "codex"].includes(expectedAgent)) throw new Error("agent must be codex or claude.");
+  const record = sessions.findRecord(sessionsDirectory(), id);
+  if (!record || record.scope !== scope) {
+    throw Object.assign(new Error("No session with that id was started from this chat on this computer."), { statusCode: 404, errorType: "unknown_session" });
+  }
+  // A task bound to one agent (say, the person's saved Codex) never reaches the other's session.
+  if (expectedAgent && record.agent !== expectedAgent) {
+    throw Object.assign(new Error("That session belongs to the other local agent."), { statusCode: 409, errorType: "session_agent_mismatch" });
+  }
+  return record;
+}
+
+function lastTurn(record) {
+  if (!UUID.test(record.last_job_id || "")) return null;
+  try { return publicStatus(record.last_job_id, record.agent); } catch { return null; }
+}
+
+// The executable that ran the session, if it is still there; otherwise the
+// current install. Reads and checks never need a fresh sign-in probe.
+async function sessionExecutable(record) {
+  try {
+    if (record.executable && fs.statSync(record.executable).isFile()) return record.executable;
+  } catch {}
+  return (await selectAgent(record.agent, record.cwd)).executable;
+}
+
+// One turn at a time per session, inside this Bridge process.
+const sessionLocks = new Map();
+async function withSessionLock(id, work) {
+  const previous = sessionLocks.get(id) || Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => { release = resolve; });
+  const chained = previous.then(() => current);
+  sessionLocks.set(id, chained);
+  await previous;
+  try { return await work(); }
+  finally { release(); if (sessionLocks.get(id) === chained) sessionLocks.delete(id); }
+}
+
+// Is the person (or anything else) running this Claude Code session right now,
+// outside the turn this Bridge runs? null means Claude Code couldn't say.
+async function claudeOpenElsewhere(record, running) {
+  const active = await sessions.claudeActiveSessions(await sessionExecutable(record));
+  if (!active) return null;
+  const ours = running && Number.isInteger(running.agentPid) ? running.agentPid : null;
+  return active.some((entry) => entry.session_id === record.agent_session_id && (ours === null || entry.pid !== ours));
+}
+
+async function sendTurn({ agentSessionId, sessionScope, prompt, requestKey, sandbox, agent }) {
+  const record = scopedRecord(agentSessionId, sessionScope, agent);
+  if (sandbox !== undefined && !["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
+  return withSessionLock(record.agent_session_id, async () => {
+    const fresh = scopedRecord(record.agent_session_id, sessionScope);
+    const previous = lastTurn(fresh);
+    if (previous && !TERMINAL.has(previous.state)) {
+      // A retry of the turn already running returns it instead of a refusal.
+      if (requestKey) {
+        const mapped = readRequest(validRequestKey(requestKey));
+        if (mapped?.job_id === previous.job_id) return { ...previous, deduplicated: true };
+      }
+      throw Object.assign(new Error("This session is still working on its last message. Wait for it, or stop it, before sending another."),
+        { statusCode: 409, errorType: "session_busy", jobId: previous.job_id });
+    }
+    const selected = await selectAgent(fresh.agent, fresh.cwd);
+    if (fresh.agent === "claude" && await claudeOpenElsewhere({ ...fresh, executable: selected.executable }, null)) {
+      throw Object.assign(new Error("This Claude Code session is open on this computer right now (in the Claude app or a terminal). Continue it there, or close it there first."),
+        { statusCode: 409, errorType: "session_open_elsewhere" });
+    }
+    return startJob({ prompt, cwd: fresh.cwd, sandbox: sandbox || fresh.sandbox, agent: fresh.agent,
+      interactive: fresh.agent === "codex", requestKey, sessionScope, resumeSessionId: fresh.agent_session_id, preselected: selected });
+  });
+}
+
+async function sessionStatus({ agentSessionId, sessionScope }) {
+  const record = scopedRecord(agentSessionId, sessionScope);
+  const turn = lastTurn(record);
+  const running = turn && !TERMINAL.has(turn.state);
+  let openElsewhere = null;
+  if (record.agent === "claude") {
+    const state = running ? loadState(jobDir(turn.job_id)) : null;
+    try { openElsewhere = await claudeOpenElsewhere(record, state); } catch { openElsewhere = null; }
+  }
+  return {
+    agent_session_id: record.agent_session_id, agent: record.agent, title: record.title, cwd: record.cwd,
+    sandbox: record.sandbox, started_by: record.started_by, created_at: record.created_at, updated_at: record.updated_at,
+    turns: record.turns || 0,
+    state: running ? (turn.state === "waiting_on_user" ? "waiting_on_user" : "running") : "idle",
+    last_turn: turn ? { job_id: turn.job_id, state: turn.state, final: turn.final, error: turn.error, error_type: turn.error_type,
+      created_at: turn.created_at, finished_at: turn.finished_at, ...(turn.model_note ? { model_note: turn.model_note } : {}) } : null,
+    // Claude Code only: the session is running in the person's Claude app or a
+    // terminal, beyond this Bridge's own turn. Codex can't report this.
+    open_elsewhere: openElsewhere,
+    open: sessions.openLinks(record.agent, record.agent_session_id),
+  };
+}
+
+async function readSession({ agentSessionId, sessionScope, limit = 10, agent }) {
+  const record = scopedRecord(agentSessionId, sessionScope, agent);
+  const count = Number(limit);
+  if (!Number.isInteger(count) || count < 1 || count > 30) throw new Error("limit must be between 1 and 30.");
+  let read;
+  if (record.agent === "claude") {
+    const file = sessions.claudeTranscriptFile(record.agent_session_id, record.cwd);
+    read = file ? sessions.claudeTranscriptMessages(file, count) : { messages: [], truncated: false, not_saved_yet: true };
+  } else {
+    try { read = await sessions.codexThreadMessages(await sessionExecutable(record), record.agent_session_id, { cwd: record.cwd, limit: count }); }
+    catch (error) {
+      throw Object.assign(new Error("Codex could not read this thread right now. Check that Codex is installed and signed in, then retry."),
+        { statusCode: 502, errorType: "session_read_failed" });
+    }
+  }
+  return { agent_session_id: record.agent_session_id, agent: record.agent, title: record.title,
+    source: record.agent === "claude" ? "claude_code_session" : "codex_thread", ...read,
+    open: sessions.openLinks(record.agent, record.agent_session_id) };
+}
+
+function stopSession({ agentSessionId, sessionScope }) {
+  const record = scopedRecord(agentSessionId, sessionScope);
+  const turn = lastTurn(record);
+  if (!turn || TERMINAL.has(turn.state)) {
+    return { agent_session_id: record.agent_session_id, agent: record.agent, stopped: false, state: "idle",
+      ...(turn ? { job_id: turn.job_id } : {}) };
+  }
+  const cancelled = cancelJob(turn.job_id, record.agent);
+  return { agent_session_id: record.agent_session_id, agent: record.agent, stopped: cancelled.cancel_requested === true,
+    job_id: turn.job_id, state: cancelled.state, cancel_requested: cancelled.cancel_requested };
+}
+
+function listSessions({ sessionScope, limit = 10 }) {
+  const scope = sessions.sessionScope(sessionScope);
+  const count = Number(limit);
+  if (!Number.isInteger(count) || count < 1 || count > 30) throw new Error("limit must be between 1 and 30.");
+  return { sessions: sessions.listRecords(sessionsDirectory(), scope, count).map((record) => {
+    const turn = lastTurn(record);
+    return { agent_session_id: record.agent_session_id, agent: record.agent, title: record.title, cwd: record.cwd,
+      started_by: record.started_by, updated_at: record.updated_at, turns: record.turns || 0,
+      state: turn && !TERMINAL.has(turn.state) ? "running" : "idle", last_job_id: turn?.job_id || null,
+      open: sessions.openLinks(record.agent, record.agent_session_id) };
+  }) };
 }
 
 async function superviseInteractive(directory, state, request) {
@@ -499,7 +707,10 @@ async function superviseInteractive(directory, state, request) {
     session = createCodexRpcSession({
       executable: request.executable, cwd: request.cwd, sandbox: request.sandbox,
       ...(request.personalProfile ? require("./personal-codex").personalConfiguration(request.personalProfile) : {}),
-      ...(request.gateway ? { ...runtimeConfig, resumeThreadId: request.resumeThreadId, usageBaseline: request.usageBaseline } : {}),
+      ...(request.gateway ? { ...runtimeConfig, resumeThreadId: request.resumeThreadId, usageBaseline: request.usageBaseline } : {
+        ...(request.resumeSessionId ? { resumeThreadId: request.resumeSessionId } : { threadName: request.title }),
+        pickAvailableModel: request.pickAvailableModel === true,
+      }),
       startupRetries: request.gateway ? 1 : 0,
       onLifecycle(value) {
         state.runtimeStartup = { ...value, at: new Date().toISOString() };
@@ -512,7 +723,15 @@ async function superviseInteractive(directory, state, request) {
         if (request.gateway) value = redactRuntimeValue(value);
         if (state.sessionId) appendJobEvent(directory, value);
         if (value.type === "usage.updated") { state.usage = value.usage; state.runtimeUsageTotal = value.total_usage; persist(); }
-        if (value.type === "thread.started") { state.threadId = value.thread_id; persist(); }
+        if (value.type === "thread.started") {
+          state.threadId = value.thread_id;
+          if (request.sessionScope) bindSession(state, request, value.thread_id);
+          persist();
+        }
+        if (value.type === "model.substituted") {
+          state.modelNote = `Codex's configured model ${value.configured} isn't offered on this account, so this turn used ${value.model}, the account's default.`;
+          persist();
+        }
         if (value.type === "input.delivered" && request.input) {
           state.inputDelivered = true;
           state.inputDeliveredThreadId = value.thread_id;
@@ -665,6 +884,21 @@ function resumeContext(id) {
     inputContext: state.inputDelivered ? state.inputContext || {} : {} };
 }
 
+// The vendor reported its session id. A new Codex thread registers here; if a
+// resumed Claude Code session continued under a new id, the record follows it
+// so later turns keep reaching the conversation the person sees.
+function bindSession(state, request, reported) {
+  const id = typeof reported === "string" ? reported.toLowerCase() : "";
+  if (!sessions.SESSION_ID.test(id) || state.agentSessionId === id) return;
+  const previous = state.agentSessionId;
+  state.agentSessionId = id;
+  try {
+    const record = previous ? sessions.readRecord(sessionsDirectory(), state.agent, previous) : null;
+    saveSessionRecord({ agent: state.agent, id, scope: request.sessionScope, cwd: request.cwd, sandbox: request.sandbox,
+      title: record?.title || request.title, startedBy: record?.started_by ?? request.startedBy, jobId: state.id, executable: request.executable });
+  } catch { /* The receipt still carries the vendor id. */ }
+}
+
 async function supervise(id) {
   const directory = jobDir(id);
   // A second supervisor invocation must never start the same task twice.
@@ -715,7 +949,10 @@ async function supervise(id) {
     try {
       const value = JSON.parse(line);
       if (agent === "claude") {
-        if (value.type === "system" && value.subtype === "init" && typeof value.session_id === "string") state.threadId = value.session_id;
+        if (value.type === "system" && value.subtype === "init" && typeof value.session_id === "string") {
+          state.threadId = value.session_id;
+          if (request.sessionScope) bindSession(state, request, value.session_id);
+        }
         if (value.type === "system" && value.subtype === "permission_denied") {
           state.permissionDenials = (state.permissionDenials || 0) + 1;
           state.errorType = "permission_denied";
@@ -769,6 +1006,7 @@ async function supervise(id) {
     if (fs.existsSync(path.join(directory, "cancel"))) { finish("cancelled"); return; }
     child = spawnOwned(request.executable, argumentsFor(agent, request),
       { cwd: request.cwd, env: localEnvironment(), detached: true, cleanupReceipt: true, stdio: ["pipe", "pipe", "pipe"] });
+    if (child.pid) { state.agentPid = child.pid; saveState(directory, state); }
     child.stdin.on("error", () => {}); // Early CLI exits can close stdin before the prompt is consumed.
     child.stdin.end(request.prompt);
     child.stdout.on("data", (chunk) => {
@@ -820,4 +1058,5 @@ async function supervise(id) {
   }
 }
 
-module.exports = { startJob, getStatus, publicStatus, listJobs, cancelJob, respondJob, supervise, validateCwd, failureReason, jobEvents, resumeContext, MAX_OUTPUT };
+module.exports = { startJob, getStatus, publicStatus, listJobs, cancelJob, respondJob, supervise, validateCwd, failureReason, jobEvents, resumeContext, MAX_OUTPUT,
+  sendTurn, sessionStatus, readSession, stopSession, listSessions };

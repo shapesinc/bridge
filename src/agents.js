@@ -111,6 +111,8 @@ async function inspectCandidate(id, executable, cwd) {
   }
   return {
     ...base, authenticated, available: authenticated, status: authenticated ? "ready" : "auth_required",
+    // Private like executable: whether `--name` can label a session in Claude Code's own lists.
+    ...(id === "claude" && /(?:^|\s)--name\b/.test(help.output) ? { nameFlag: true } : {}),
     reason: authenticated ? "Installed and signed in. Provider availability is verified when a task runs."
       : `Sign in to ${id === "claude" ? "Claude Code" : "Codex"} locally, then retry.`,
     // Kept private by publicAgent; the native host also needs a compatible,
@@ -143,7 +145,7 @@ async function inspectAgent(id, cwd = process.cwd()) {
     status: "not_installed", reason: `Install ${id === "claude" ? "Claude Code" : "Codex"} on this computer.` };
 }
 
-function publicAgent({ executable, transport, profile, ...agent }) { return agent; }
+function publicAgent({ executable, transport, profile, nameFlag, ...agent }) { return agent; }
 
 async function listAgents(cwd) {
   const agents = await Promise.all(IDS.map((id) => inspectAgent(id, cwd)));
@@ -183,6 +185,14 @@ function argumentsFor(agent, request) {
     "-c", "sandbox_workspace_write.writable_roots=[]", "--skip-git-repo-check", "--cd", request.cwd, "-",
   ];
   const args = ["--print", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"];
+  // A session the person can open: a new one under the id Bridge chose, or the
+  // same session continued. The name is joined to its flag so a title can't
+  // be read as another option.
+  if (request.resumeSessionId) args.push("--resume", request.resumeSessionId);
+  else if (request.agentSessionId) {
+    args.push("--session-id", request.agentSessionId);
+    if (request.nameFlag && request.title) args.push(`--name=${request.title}`);
+  }
   if (request.sandbox === "read-only") {
     // --tools restricts built-ins; it does not remove MCP services. Disable
     // those explicitly. This restricts agent tools, not user hooks or the OS.
