@@ -48,7 +48,7 @@ const MAX_FILE_READ = 100000;
 const MAX_DIRECTORY_ENTRIES = 2000;
 
 const CAPABILITIES = {
-  computer: "observe the desktop screen or send one keyboard/mouse action (requires computer_control capability)",
+  computer: "observe the desktop screen or one app's window and send one keyboard/mouse action (requires computer_control; app-scoped background control requires computer_app_control)",
   run: "run a shell command",
   write: "create or replace a file",
   read: "read a file",
@@ -208,7 +208,8 @@ function startServer({ port, token, computerControl = createComputerControl(), p
     if (route === "/capabilities" && method === "GET") {
       return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: {
         command_jobs: true, interactive_codex: true, idempotent_start: true, job_list: true,
-        ...runtimeCapabilities(), computer_control: computerControl.available() } });
+        ...runtimeCapabilities(), computer_control: computerControl.available(),
+        computer_app_control: Boolean(computerControl.appControlAvailable?.()) } });
     }
 
     // Everything below requires the token.
