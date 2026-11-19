@@ -70,6 +70,29 @@ in front:
   longer derives it and drops the click otherwise.
 - **Typing** that falls back to key events sends line breaks and tabs as real
   Return/Tab presses: an app drops a whole Unicode event that contains one.
+- **Menu shortcuts.** An app in the background turns off its menu commands for
+  the document and selection (Save, Select All, Copy, Paste, Undo...) and keeps
+  app commands on (New, Hide). A shortcut for a turned-off command does nothing,
+  so before posting a chord with modifiers the helper looks it up in the app's
+  menus (within 0.5 s):
+  - If its item is turned off, nothing is sent: `shortcut_unavailable`, naming
+    the item, e.g. "CMD+S is TextEdit's File › Save, which is turned off while
+    TextEdit is in the background".
+  - If it's an Apple menu command (log out, lock, force quit), `system_command`.
+  - Otherwise it's sent, and the receipt's `shortcut` names the menu item.
+
+  `menu` refuses a turned-off item (`menu_unavailable`) and the Apple menu
+  (`system_command`) the same way, instead of reporting a press that did
+  nothing. Apps that keep their items on in the background (Electron apps do)
+  are unaffected.
+- **Moving in text.** For an arrow, HOME, END, PAGEUP or PAGEDOWN chord that no
+  menu owns, sent while a text field or view has focus, the `press_key` receipt
+  has `focused_text`: `changed` if its caret, selection or length changed within
+  0.3 s, else `unchanged`. A chord a Mac text view has no
+  binding for arrives and does nothing: on a Mac, CMD+UP/CMD+DOWN go to the
+  start/end of a document and CMD+LEFT/CMD+RIGHT to the start/end of a line;
+  HOME, END, PAGEUP and PAGEDOWN only scroll. `unchanged` is not proof that a
+  key was dropped: observe before repeating it.
 
 **The shape's pointer.** A server may send `cursor: {label}` with an app
 `observe`: up to 40 characters, display-only, and it grants nothing. Inputs
