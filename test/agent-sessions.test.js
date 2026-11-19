@@ -192,7 +192,8 @@ test("Codex uses the account's default model when the configured one isn't offer
     { id: "gpt-reserve", model: "gpt-reserve", hidden: true, isDefault: false }];
   const cases = [
     { name: "unavailable model", configured: "gpt-6.1-sol", expect: "gpt-6-luna" },
-    { name: "hidden model counts as not offered", configured: "gpt-reserve", expect: "gpt-6-luna" },
+    { name: "a hidden model the account can use is kept", configured: "gpt-reserve", expect: undefined },
+    { name: "a model missing from the list is replaced", configured: "gpt-9-gone", expect: "gpt-6-luna" },
     { name: "offered model is kept", configured: "gpt-5.6-terra", expect: undefined },
     { name: "no configured model is Codex's choice", configured: null, expect: undefined },
   ];
@@ -239,4 +240,36 @@ test("a Codex thread reads back as its messages, the person's own turns included
   assert.equal(read.last_turn_status, "failed");
   assert.equal(read.vendor_title, "Tod: docs");
   await assert.rejects(codexThreadMessages(f.executable, "019a0000-0000-7000-8000-0000000000cc", { cwd: f.dir, limit: 10 }), /different thread/);
+});
+
+test("session routes take only their own fields and answer refusals with typed errors", async (t) => {
+  const f = claudeFixture(t);
+  const { startServer } = require("../src/server");
+  const token = "route-test-token";
+  const server = await startServer({ port: 0, token });
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const call = async (method, route, body) => {
+    const response = await fetch(base + route, { method, headers: { "x-token": token, "content-type": "application/json" },
+      ...(body ? { body: JSON.stringify(body) } : {}) });
+    return { status: response.status, body: await response.json() };
+  };
+  const capabilities = await (await fetch(`${base}/capabilities`)).json();
+  assert.equal(capabilities.features.agent_sessions, true);
+  const start = await call("POST", "/agents/start", { prompt: "Add TODO.md", cwd: f.work, agent: "claude", session_scope: SCOPE_A, title: "Tod: todos", started_by: "Tod" });
+  assert.equal(start.status, 202);
+  const id = start.body.agent_session_id;
+  await finished(f.codex, start.body.job_id);
+  const q = (scope, extra = "") => `?agent_session_id=${id}&session_scope=${scope}${extra}`;
+
+  assert.equal((await call("GET", `/agents/read${q(SCOPE_A, "&limit=5&agent=claude")}`)).body.messages.length, 2);
+  assert.deepEqual((await call("GET", `/agents/read${q(SCOPE_A, "&cwd=/")}`)).status, 400);
+  const other = await call("GET", `/agents/session${q(SCOPE_B)}`);
+  assert.deepEqual([other.status, other.body.error_type], [404, "unknown_session"]);
+  const mismatch = await call("POST", "/agents/send", { agent_session_id: id, session_scope: SCOPE_A, prompt: "x", agent: "codex" });
+  assert.deepEqual([mismatch.status, mismatch.body.error_type], [409, "session_agent_mismatch"]);
+  assert.equal((await call("POST", "/agents/send", { agent_session_id: id, session_scope: SCOPE_A, prompt: "x", cwd: "/" })).status, 400);
+  const idle = await call("POST", "/agents/session/stop", { agent_session_id: id, session_scope: SCOPE_A });
+  assert.deepEqual([idle.status, idle.body.stopped], [200, false]);
+  assert.equal(f.runs().length, 1, "no refused route ran the agent");
 });

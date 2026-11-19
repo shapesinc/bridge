@@ -557,11 +557,12 @@ async function withSessionLock(id, work) {
 
 // Is the person (or anything else) running this Claude Code session right now,
 // outside the turn this Bridge runs? null means Claude Code couldn't say.
-async function claudeOpenElsewhere(record, running) {
+// Asked only when this Bridge runs no turn of the session, so any running
+// process with this session id is the person's (or another tool's).
+async function claudeOpenElsewhere(record) {
   const active = await sessions.claudeActiveSessions(await sessionExecutable(record));
   if (!active) return null;
-  const ours = running && Number.isInteger(running.agentPid) ? running.agentPid : null;
-  return active.some((entry) => entry.session_id === record.agent_session_id && (ours === null || entry.pid !== ours));
+  return active.some((entry) => entry.session_id === record.agent_session_id);
 }
 
 async function sendTurn({ agentSessionId, sessionScope, prompt, requestKey, sandbox, agent }) {
@@ -580,7 +581,7 @@ async function sendTurn({ agentSessionId, sessionScope, prompt, requestKey, sand
         { statusCode: 409, errorType: "session_busy", jobId: previous.job_id });
     }
     const selected = await selectAgent(fresh.agent, fresh.cwd);
-    if (fresh.agent === "claude" && await claudeOpenElsewhere({ ...fresh, executable: selected.executable }, null)) {
+    if (fresh.agent === "claude" && await claudeOpenElsewhere({ ...fresh, executable: selected.executable })) {
       throw Object.assign(new Error("This Claude Code session is open on this computer right now (in the Claude app or a terminal). Continue it there, or close it there first."),
         { statusCode: 409, errorType: "session_open_elsewhere" });
     }
@@ -594,9 +595,10 @@ async function sessionStatus({ agentSessionId, sessionScope }) {
   const turn = lastTurn(record);
   const running = turn && !TERMINAL.has(turn.state);
   let openElsewhere = null;
-  if (record.agent === "claude") {
-    const state = running ? loadState(jobDir(turn.job_id)) : null;
-    try { openElsewhere = await claudeOpenElsewhere(record, state); } catch { openElsewhere = null; }
+  // While this Bridge's own turn runs, the session is busy either way; only
+  // an idle session needs Claude Code's list of open sessions.
+  if (record.agent === "claude" && !running) {
+    try { openElsewhere = await claudeOpenElsewhere(record); } catch { openElsewhere = null; }
   }
   return {
     agent_session_id: record.agent_session_id, agent: record.agent, title: record.title, cwd: record.cwd,

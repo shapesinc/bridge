@@ -327,15 +327,18 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
       // most, and then Codex keeps its configured model.
       let timer;
       const [config, models] = await Promise.race([
-        Promise.all([rpc("config/read", { includeLayers: false, cwd }), rpc("model/list", {})]),
+        Promise.all([rpc("config/read", { includeLayers: false, cwd }), rpc("model/list", { includeHidden: true })]),
         new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("model check timed out")), 5000); }),
       ]).finally(() => clearTimeout(timer));
       const configured = config?.config?.model;
-      const offered = (Array.isArray(models?.data) ? models.data : [])
-        .filter((item) => item && item.hidden !== true && typeof item.model === "string" && item.model);
-      if (typeof configured !== "string" || !configured || !offered.length
-          || offered.some((item) => item.model === configured || item.id === configured)) return undefined;
-      const chosen = (offered.find((item) => item.isDefault === true) || offered[0]).model;
+      // A hidden model is still one the account can use; only the fallback
+      // itself comes from the models the Codex app shows.
+      const usable = (Array.isArray(models?.data) ? models.data : [])
+        .filter((item) => item && typeof item.model === "string" && item.model);
+      const shown = usable.filter((item) => item.hidden !== true);
+      if (typeof configured !== "string" || !configured || !shown.length
+          || usable.some((item) => item.model === configured || item.id === configured)) return undefined;
+      const chosen = (shown.find((item) => item.isDefault === true) || shown[0]).model;
       emit({ type: "model.substituted", configured: configured.slice(0, 80), model: chosen.slice(0, 80) });
       return chosen;
     } catch { return undefined; }
