@@ -154,8 +154,8 @@ function createComputerControl({ platform = process.platform, binary = nativePat
     const pointing = background && expected?.mode === "app" && Boolean(cursor);
     const target = pointing ? inputPoint(expected, control) : null;
     if (target) {
-      cursor.send({ op: "move", ...target, ...(label ? { label } : {}) });
-      if (cursorLeadMs) await new Promise((resolve) => setTimeout(resolve, cursorLeadMs));
+      const shown = cursor.send({ op: "move", ...target, ...(label ? { label } : {}) });
+      if (shown && cursorLeadMs) await new Promise((resolve) => setTimeout(resolve, cursorLeadMs));
     }
     try {
       const { observation_id: _unused, ...request } = control;
