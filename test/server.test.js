@@ -91,3 +91,18 @@ test("large reads are bounded before loading the whole file", async () => {
   }
 });
 
+
+test("discovery checks elevation once, and asks again only while the answer is unknown", async (t) => {
+  for (const [answer, calls] of [[false, 1], [true, 1], [null, 3]]) {
+    let asked = 0;
+    const server = await startServer({ port: 0, token: TOKEN, readElevation: async () => { asked++; return { elevated: answer }; } });
+    t.after(() => server.close());
+    const base = `http://127.0.0.1:${server.address().port}`;
+    for (let round = 0; round < 3; round++) {
+      const reply = await fetch(`${base}/sysinfo`, { headers: { "x-token": TOKEN } });
+      assert.equal(reply.status, 200);
+      assert.equal((await reply.json()).elevated, answer);
+    }
+    assert.equal(asked, calls, String(answer));
+  }
+});
