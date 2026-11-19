@@ -493,8 +493,19 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
                 var point = at, range: AnyObject?, caret = CFRange()
                 if request["point"] != nil, let position = AXValueCreate(.cgPoint, &point),
                    AXUIElementCopyParameterizedAttributeValue(e, kAXRangeForPositionParameterizedAttribute as CFString, position, &range) == .success,
-                   let range, CFGetTypeID(range) == AXValueGetTypeID(), AXValueGetValue(range as! AXValue, .cfRange, &caret), caret.location >= 0 {
-                    var empty = CFRange(location: caret.location, length: 0)
+                   let range, CFGetTypeID(range) == AXValueGetTypeID(), AXValueGetValue(range as! AXValue, .cfRange, &caret), caret.location >= 0, caret.length > 0 {
+                    // An empty range means no text under the point: keep the caret.
+                    // Otherwise that is the character under it. A click on its right
+                    // half puts the caret after it, except at a line break.
+                    var location = caret.location, one = CFRange(location: caret.location, length: 1)
+                    var bounds: AnyObject?, glyph: AnyObject?, box = CGRect.zero
+                    if let character = AXValueCreate(.cfRange, &one),
+                       AXUIElementCopyParameterizedAttributeValue(e, kAXStringForRangeParameterizedAttribute as CFString, character, &glyph) == .success,
+                       let text = glyph as? String, text != "\n", text != "\r",
+                       AXUIElementCopyParameterizedAttributeValue(e, kAXBoundsForRangeParameterizedAttribute as CFString, character, &bounds) == .success,
+                       let bounds, CFGetTypeID(bounds) == AXValueGetTypeID(), AXValueGetValue(bounds as! AXValue, .cgRect, &box),
+                       at.x > box.midX { location += 1 }
+                    var empty = CFRange(location: location, length: 0)
                     if let value = AXValueCreate(.cfRange, &empty) { AXUIElementSetAttributeValue(e, kAXSelectedTextRangeAttribute as CFString, value) }
                 }
                 method = "accessibility_focus"; break
