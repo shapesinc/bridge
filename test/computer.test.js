@@ -5,12 +5,15 @@ const { createComputerControl } = require("../src/computer");
 const { startServer } = require("../src/server");
 
 const SCOPE = "a".repeat(64), OTHER = "b".repeat(64);
+// Whole-screen input exists only where it is not background-only (Windows);
+// on a Mac a whole-screen view is look-only (computer-apps.test.js).
 const screen = () => ({ success: true, result: { width: 1200, height: 800, display_id: 42,
-  bounds: { x: -1440, y: 0, width: 1440, height: 960 }, frontmost: { pid: 123 },
+  bounds: { x: -1440, y: 0, width: 1440, height: 960 }, display_device: "\\\\.\\DISPLAY1",
+  frontmost: { pid: 123, window_id: "123456", process_started: "638650000000000000" },
   image_base64: "fixture", image_content_type: "image/jpeg" } });
 function fixture(options = {}) {
   const calls = [];
-  const control = createComputerControl({ platform: "darwin", available: () => true,
+  const control = createComputerControl({ platform: "win32", available: () => true,
     invoke: async (request) => { calls.push(request); return request.operation === "observe" ? screen()
       : { success: true, result: { dispatched: true, delivery_verified: false } }; }, ...options });
   const run = (value, scope = SCOPE) => control.execute({ scope, control: value });
@@ -25,7 +28,8 @@ test("observations are actor/chat scoped, one-use, and preserve display geometry
   assert.equal(f.calls.length, 1);
   assert.equal((await f.run(click)).result.delivery_verified, false);
   assert.deepEqual(f.calls[1].expected, { pid: 123, display_id: 42,
-    bounds: { x: -1440, y: 0, width: 1440, height: 960 }, width: 1200, height: 800 });
+    bounds: { x: -1440, y: 0, width: 1440, height: 960 }, width: 1200, height: 800,
+    window_id: "123456", process_started: "638650000000000000", display_device: "\\\\.\\DISPLAY1" });
   assert.equal((await f.run(click)).error_type, "stale_observation");
   assert.equal(f.calls.length, 2);
 });

@@ -48,7 +48,7 @@ const MAX_FILE_READ = 100000;
 const MAX_DIRECTORY_ENTRIES = 2000;
 
 const CAPABILITIES = {
-  computer: "observe the desktop screen or one app's window and send one keyboard/mouse action (requires computer_control; app-scoped background control requires computer_app_control)",
+  computer: "observe the desktop screen or one app's window and send one keyboard/mouse action to that app (requires computer_control; app-scoped background control requires computer_app_control; on macOS a whole-screen view is look-only)",
   run: "run a shell command",
   write: "create or replace a file",
   read: "read a file",

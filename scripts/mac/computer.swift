@@ -72,7 +72,12 @@ func observe(_ request: [String: Any]) async throws -> [String: Any] {
     config.showsCursor = true; config.queueDepth = 1
     config.pixelFormat = kCVPixelFormatType_32BGRA
     let receiver = FrameReceiver()
-    let filter = SCContentFilter(display: display, excludingWindows: [])
+    let filter = SCContentFilter(display: display, excludingWindows: content.windows.filter { window in
+        // The shape's own pointer is drawn by this executable's --cursor process.
+        window.owningApplication.map { owner in
+            NSRunningApplication(processIdentifier: owner.processID)?.executableURL?.resolvingSymlinksInPath()
+                == Bundle.main.executableURL?.resolvingSymlinksInPath() } ?? false
+    })
     let stream = SCStream(filter: filter, configuration: config, delegate: nil)
     try stream.addStreamOutput(receiver, type: .screen, sampleHandlerQueue: DispatchQueue(label: "shapes.computer.frame"))
     try await stream.startCapture()
@@ -93,108 +98,11 @@ func observe(_ request: [String: Any]) async throws -> [String: Any] {
             "image_base64": jpeg.base64EncodedString(), "image_content_type": "image/jpeg"]
 }
 
-@MainActor
-func input(_ request: [String: Any]) throws -> [String: Any] {
-    guard AXIsProcessTrusted(), CGPreflightPostEventAccess() else { throw fail("accessibility_denied", "Allow Keyboard and mouse in the Mac app's computer setup.") }
-    guard CGPreflightScreenCaptureAccess() else { throw fail("screen_recording_denied", "Screen Recording is required to observe the target before input.") }
-    guard !IsSecureEventInputEnabled() else { throw fail("secure_input", "Secure input is active. The person must complete that interaction.") }
-    let app = try activeApp()
-    guard let expected = request["expected"] as? [String: Any],
-          let pid = expected["pid"] as? Int32, app.processIdentifier == pid,
-          let displayID = (expected["display_id"] as? NSNumber)?.uint32Value,
-          let bounds = expected["bounds"] as? [String: Double], bounds == rectangle(CGDisplayBounds(displayID)),
-          CGDisplayIsActive(displayID) != 0,
-          let width = expected["width"] as? Double, let height = expected["height"] as? Double, width > 0, height > 0 else {
-        throw fail("desktop_changed", "The observed app or display changed. Observe again before input.")
-    }
-    let rect = CGDisplayBounds(displayID)
-    func point(_ name: String) throws -> CGPoint {
-        guard let p = request[name] as? [Double], p.count == 2, p.allSatisfy({ $0.isFinite }),
-              p[0] >= 0, p[0] < width, p[1] >= 0, p[1] < height else {
-            throw fail("invalid_arguments", "Use coordinates inside the observed image.")
-        }
-        return CGPoint(x: rect.minX + p[0] * rect.width / width, y: rect.minY + p[1] * rect.height / height)
-    }
-    let source = CGEventSource(stateID: .privateState)
-    func postKey(_ code: CGKeyCode, _ down: Bool, _ flags: CGEventFlags = []) {
-        let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down)!
-        event.flags = flags; event.post(tap: .cghidEventTap)
-        // Give WindowServer a distinct key transition before releasing it.
-        Thread.sleep(forTimeInterval: 0.02)
-    }
-    func mouse(_ type: CGEventType, _ point: CGPoint, _ button: CGMouseButton = .left, count: Int64 = 1) {
-        let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button)!
-        event.setIntegerValueField(.mouseEventClickState, value: count); event.post(tap: .cghidEventTap)
-    }
-    switch request["operation"] as? String {
-    case "click":
-        let p = try point("point"), right = request["button"] as? String == "right"
-        let count = request["click_count"] as? Int ?? 1
-        guard (1...2).contains(count) else { throw fail("invalid_arguments", "Use one or two clicks.") }
-        for i in 1...count {
-            mouse(right ? .rightMouseDown : .leftMouseDown, p, right ? .right : .left, count: Int64(i))
-            Thread.sleep(forTimeInterval: 0.04)
-            mouse(right ? .rightMouseUp : .leftMouseUp, p, right ? .right : .left, count: Int64(i))
-            Thread.sleep(forTimeInterval: 0.04)
-        }
-    case "move": mouse(.mouseMoved, try point("point"))
-    case "drag":
-        let start = try point("point"), end = try point("to")
-        mouse(.leftMouseDown, start)
-        defer { mouse(.leftMouseUp, end) }
-        for i in 1...20 {
-            let t = Double(i) / 20
-            mouse(.leftMouseDragged, CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t))
-            Thread.sleep(forTimeInterval: 0.015)
-        }
-    case "scroll":
-        let p = try point("point")
-        guard let dx = request["dx"] as? Int32, let dy = request["dy"] as? Int32, abs(Int(dx)) <= 2000, abs(Int(dy)) <= 2000 else {
-            throw fail("invalid_arguments", "Scroll deltas must be between -2000 and 2000 pixels.")
-        }
-        mouse(.mouseMoved, p)
-        let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)!
-        // The preceding move is asynchronous; creation can inherit the old
-        // cursor location. Route the wheel event to the requested image point.
-        event.location = p
-        event.post(tap: .cghidEventTap)
-    case "type":
-        guard let text = request["text"] as? String, !text.isEmpty, text.utf16.count <= 4096 else { throw fail("invalid_arguments", "Supply at most 4096 UTF-16 units of text.") }
-        // Unicode events do not overwrite the person's clipboard. Split on
-        // Characters so surrogate pairs/graphemes are never split between events.
-        var chunk: [UniChar] = []
-        func send() {
-            for down in [true, false] {
-                let e = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)!
-                chunk.withUnsafeBufferPointer { e.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: $0.baseAddress!) }
-                e.post(tap: .cghidEventTap)
-            }
-            chunk.removeAll(); Thread.sleep(forTimeInterval: 0.01)
-        }
-        for character in text {
-            let units = Array(String(character).utf16)
-            guard units.count <= 20 else { throw fail("invalid_arguments", "A text character exceeds the event size limit.") }
-        }
-        for character in text { let units = Array(String(character).utf16); if chunk.count + units.count > 20 { send() }; chunk += units }
-        if !chunk.isEmpty { send() }
-    case "press_key":
-        let keys: [String: CGKeyCode] = ["A":0,"S":1,"D":2,"F":3,"H":4,"G":5,"Z":6,"X":7,"C":8,"V":9,"B":11,"Q":12,"W":13,"E":14,"R":15,"Y":16,"T":17,"1":18,"2":19,"3":20,"4":21,"6":22,"5":23,"9":25,"7":26,"8":28,"0":29,"O":31,"U":32,"I":34,"P":35,"RETURN":36,"L":37,"J":38,"K":40,"N":45,"M":46,"TAB":48,"SPACE":49,"BACKSPACE":51,"ESCAPE":53,"HOME":115,"PAGEUP":116,"DELETE":117,"END":119,"PAGEDOWN":121,"LEFT":123,"RIGHT":124,"DOWN":125,"UP":126,"F1":122,"F2":120,"F3":99,"F4":118,"F5":96,"F6":97,"F7":98,"F8":100,"F9":101,"F10":109,"F11":103,"F12":111]
-        let modifiers: [String: (CGKeyCode, CGEventFlags)] = ["CMD":(55,.maskCommand),"SHIFT":(56,.maskShift),"ALT":(58,.maskAlternate),"CTRL":(59,.maskControl)]
-        guard let chord = request["keys"] as? [String], let last = chord.last, let code = keys[last], chord.count <= 5,
-              Set(chord).count == chord.count, chord.dropLast().allSatisfy({ modifiers[$0] != nil }) else { throw fail("invalid_arguments", "Use modifiers CMD/CTRL/ALT/SHIFT followed by one supported key.") }
-        var flags: CGEventFlags = []
-        for name in chord.dropLast() { let (key, flag) = modifiers[name]!; flags.insert(flag); postKey(key, true, flags) }
-        postKey(code, true, flags); postKey(code, false, flags)
-        for name in chord.dropLast().reversed() { let (key, flag) = modifiers[name]!; flags.remove(flag); postKey(key, false, flags) }
-    default: throw fail("invalid_arguments", "Unsupported computer operation.")
-    }
-    // CGEvent posting is asynchronous. A short-lived helper must not exit while
-    // WindowServer is still accepting its final events (short key actions were
-    // lost in signed acceptance). This grace period is not delivery verification;
-    // callers must still observe the intended effect and must never replay input.
-    Thread.sleep(forTimeInterval: 0.1)
-    return ["dispatched": true, "delivery_verified": false, "source_pid": getpid(),
-            "message": "Events were posted. Observe again to verify the result; this receipt alone does not prove the intended effect."]
+// Whole-screen input is not available on a Mac: it would move the person's
+// pointer and type into whatever they have in front. Input goes to one
+// observed app's window instead (appInput), in the background.
+func wholeScreenInputRefused() -> ControlError {
+    fail("background_target_required", "A whole-screen view is look-only on a Mac. Observe the app to act in it; the person's pointer and keyboard stay theirs.")
 }
 
 
@@ -340,6 +248,20 @@ func fullyCovered(_ windowID: CGWindowID, _ frame: CGRect) -> Bool {
         if screens.contains(where: { $0.contains(p) }) && !covers.contains(where: { $0.contains(p) }) { return false }
     } }
     return true
+}
+
+typealias WindowLocationStamp = @convention(c) (CGEvent, CGPoint) -> Void
+// From macOS 27, WindowServer reads a process-posted mouse event's window
+// location as window-local; earlier releases derive it from the screen point.
+// Without it a background click is dropped. The setter is not in the public
+// SDK, so it is optional.
+let windowLocationStamp: WindowLocationStamp? = {
+    guard ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27,
+          let symbol = dlsym(dlopen(nil, RTLD_NOW), "CGEventSetWindowLocation") else { return nil }
+    return unsafeBitCast(symbol, to: WindowLocationStamp.self)
+}()
+func sameFrame(_ a: CGRect, _ b: CGRect) -> Bool {
+    abs(a.minX - b.minX) < 2 && abs(a.minY - b.minY) < 2 && abs(a.width - b.width) < 2 && abs(a.height - b.height) < 2
 }
 
 struct AppWindow { let app: NSRunningApplication; let appElement: AXUIElement; let window: AXUIElement; let frame: CGRect; let windowID: CGWindowID }
@@ -502,13 +424,33 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
         return CGPoint(x: frame.minX + p[0] * frame.width / width, y: frame.minY + p[1] * frame.height / height)
     }
     let source = CGEventSource(stateID: .privateState)
+    // WindowServer does not route events posted to a process, so each carries
+    // its target process and window, and from macOS 27 its window-local point.
+    func route(_ event: CGEvent, _ at: CGPoint) {
+        event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid))
+        event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowID))
+        event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowID))
+        windowLocationStamp?(event, CGPoint(x: at.x - frame.minX, y: at.y - frame.minY))
+    }
     func postMouse(_ type: CGEventType, _ at: CGPoint, _ button: CGMouseButton, _ count: Int64) {
         guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: at, mouseButton: button) else { return }
         event.setIntegerValueField(.mouseEventClickState, value: count)
-        event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowID))
-        event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowID))
+        route(event, at)
         event.postToPid(pid)
     }
+    // Keys go to the window this app has focused, which is not necessarily the
+    // observed one. Make the observed window the app's main window, as a real
+    // click would; the app stays inactive and the person's front app keeps focus.
+    func focusWindow() -> Bool {
+        if let focused: AXUIElement = axValue(target.appElement, kAXFocusedWindowAttribute), let f = axFrame(focused), sameFrame(f, frame) { return true }
+        AXUIElementSetAttributeValue(target.window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        guard let focused: AXUIElement = axValue(target.appElement, kAXFocusedWindowAttribute), let f = axFrame(focused) else { return false }
+        return sameFrame(f, frame)
+    }
+    if ["type", "press_key"].contains(operation), !focusWindow() {
+        throw fail("target_not_focused", "Keys would go to another window of this app. Click a field in the observed window first.")
+    }
+    var pointer: [String: Double] = [:]
     func postKey(_ code: CGKeyCode, _ down: Bool, _ flags: CGEventFlags = []) {
         guard let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else { return }
         event.flags = flags; event.postToPid(pid)
@@ -539,11 +481,33 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
             var found: AXUIElement?
             if AXUIElementCopyElementAtPosition(target.appElement, Float(at.x), Float(at.y), &found) == .success { hit = found }
         }
+        pointer = ["x": at.x, "y": at.y]
+        _ = focusWindow()
         if count == 1, let e = hit {
             if right, axActions(e).contains(kAXShowMenuAction as String),
                AXUIElementPerformAction(e, kAXShowMenuAction as CFString) == .success { method = "accessibility"; break }
             let role: String = axValue(e, kAXRoleAttribute) ?? ""
             if !right, textRoles.contains(role), AXUIElementSetAttributeValue(e, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success {
+                // A click at a point in text puts the caret there; inactive apps
+                // ignore the mouse events that would otherwise do it.
+                var point = at, range: AnyObject?, caret = CFRange()
+                if request["point"] != nil, let position = AXValueCreate(.cgPoint, &point),
+                   AXUIElementCopyParameterizedAttributeValue(e, kAXRangeForPositionParameterizedAttribute as CFString, position, &range) == .success,
+                   let range, CFGetTypeID(range) == AXValueGetTypeID(), AXValueGetValue(range as! AXValue, .cfRange, &caret), caret.location >= 0, caret.length > 0 {
+                    // An empty range means no text under the point: keep the caret.
+                    // Otherwise that is the character under it. A click on its right
+                    // half puts the caret after it, except at a line break.
+                    var location = caret.location, one = CFRange(location: caret.location, length: 1)
+                    var bounds: AnyObject?, glyph: AnyObject?, box = CGRect.zero
+                    if let character = AXValueCreate(.cfRange, &one),
+                       AXUIElementCopyParameterizedAttributeValue(e, kAXStringForRangeParameterizedAttribute as CFString, character, &glyph) == .success,
+                       let text = glyph as? String, text != "\n", text != "\r",
+                       AXUIElementCopyParameterizedAttributeValue(e, kAXBoundsForRangeParameterizedAttribute as CFString, character, &bounds) == .success,
+                       let bounds, CFGetTypeID(bounds) == AXValueGetTypeID(), AXValueGetValue(bounds as! AXValue, .cgRect, &box),
+                       at.x > box.midX { location += 1 }
+                    var empty = CFRange(location: location, length: 0)
+                    if let value = AXValueCreate(.cfRange, &empty) { AXUIElementSetAttributeValue(e, kAXSelectedTextRangeAttribute as CFString, value) }
+                }
                 method = "accessibility_focus"; break
             }
             if !right, let p = pressable(e), AXUIElementPerformAction(p, kAXPressAction as CFString) == .success { method = "accessibility"; break }
@@ -585,7 +549,19 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
             }
             chunk.removeAll(); pause(0.01)
         }
-        for character in text { let units = Array(String(character).utf16); if chunk.count + units.count > 20 { send() }; chunk += units }
+        // An app drops a whole Unicode event that carries a line break or tab,
+        // so those go as real Return/Tab presses between text chunks.
+        for character in text {
+            if character == "\n" || character == "\r\n" || character == "\r" || character == "\t" {
+                if !chunk.isEmpty { send() }
+                let code: CGKeyCode = character == "\t" ? 48 : 36
+                postKey(code, true); postKey(code, false)
+                continue
+            }
+            let units = Array(String(character).utf16)
+            if chunk.count + units.count > 20 { send() }
+            chunk += units
+        }
         if !chunk.isEmpty { send() }
     case "press_key":
         let keys: [String: CGKeyCode] = ["A":0,"S":1,"D":2,"F":3,"H":4,"G":5,"Z":6,"X":7,"C":8,"V":9,"B":11,"Q":12,"W":13,"E":14,"R":15,"Y":16,"T":17,"1":18,"2":19,"3":20,"4":21,"6":22,"5":23,"9":25,"7":26,"8":28,"0":29,"O":31,"U":32,"I":34,"P":35,"RETURN":36,"L":37,"J":38,"K":40,"N":45,"M":46,"TAB":48,"SPACE":49,"BACKSPACE":51,"ESCAPE":53,"HOME":115,"PAGEUP":116,"DELETE":117,"END":119,"PAGEDOWN":121,"LEFT":123,"RIGHT":124,"DOWN":125,"UP":126,"F1":122,"F2":120,"F3":99,"F4":118,"F5":96,"F6":97,"F7":98,"F8":100,"F9":101,"F10":109,"F11":103,"F12":111]
@@ -622,9 +598,10 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
         }
         if method != "accessibility", let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) {
             event.location = at
-            event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowID))
+            route(event, at)
             event.postToPid(pid)
         }
+        pointer = ["x": at.x, "y": at.y]
     case "menu":
         guard let path = request["path"] as? [String], !path.isEmpty, path.count <= 6 else { throw fail("invalid_arguments", "Give the menu path, e.g. [\"File\", \"New Window\"].") }
         func norm(_ s: String) -> String { s.lowercased().replacingOccurrences(of: "…", with: "").replacingOccurrences(of: "...", with: "").trimmingCharacters(in: .whitespaces) }
@@ -645,12 +622,16 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
     default: throw fail("invalid_arguments", "Unsupported app operation.")
     }
     pause(0.1)
-    return ["dispatched": true, "delivery_verified": false, "source_pid": getpid(), "method": method,
-            "message": "Sent to that app only. Observe the app again to verify the result."]
+    var reply: [String: Any] = ["dispatched": true, "delivery_verified": false, "source_pid": getpid(), "method": method,
+                                "message": "Sent to that app only. Observe the app again to verify the result."]
+    if !pointer.isEmpty { reply["pointer"] = pointer }
+    return reply
 }
 
 @main struct ComputerMain {
     @MainActor static func main() async {
+        // The shape's pointer is its own long-lived process (see cursor.swift).
+        if CommandLine.arguments.dropFirst().first == "--cursor" { runShapeCursor() }
         var reply: [String: Any]
         // Window capture needs a WindowServer connection. Open it with a
         // display query: creating NSApplication here would make this helper
@@ -669,7 +650,7 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
             } else if operation == "observe" {
                 guard #available(macOS 12.3, *) else { throw fail("unsupported", "Screen control requires macOS 12.3 or newer.") }
                 reply = ["success": true, "result": try await observe(request)]
-            } else { reply = ["success": true, "result": try input(request)] }
+            } else { throw wholeScreenInputRefused() }
         } catch let error as ControlError { reply = ["success": false, "error_type": error.code, "error": error.message, "dispatched": false] }
         catch { reply = ["success": false, "error_type": "native_control_failed", "error": "Computer control failed. Observe again or check the Mac app's permissions."] }
         let out = try! JSONSerialization.data(withJSONObject: reply, options: [.sortedKeys])
