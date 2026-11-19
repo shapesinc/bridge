@@ -652,9 +652,10 @@ func appInput(_ request: [String: Any]) async throws -> [String: Any] {
 @main struct ComputerMain {
     @MainActor static func main() async {
         var reply: [String: Any]
-        // Window capture and accessibility hit-testing need a WindowServer
-        // connection; creating the shared application opens one without UI.
-        _ = NSApplication.shared
+        // Window capture needs a WindowServer connection. Open it with a
+        // display query: creating NSApplication here would make this helper
+        // an app of its own, which changes how macOS checks its permissions.
+        _ = CGMainDisplayID()
         do {
             let data = FileHandle.standardInput.readData(ofLength: 32769)
             guard data.count <= 32768, let request = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw fail("invalid_arguments", "Invalid computer request.") }
