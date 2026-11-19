@@ -48,7 +48,7 @@ const MAX_FILE_READ = 100000;
 const MAX_DIRECTORY_ENTRIES = 2000;
 
 const CAPABILITIES = {
-  computer: "observe the desktop screen or send one keyboard/mouse action (requires computer_control capability)",
+  computer: "observe the desktop screen or one app's window and send one keyboard/mouse action (requires computer_control; app-scoped background control requires computer_app_control)",
   run: "run a shell command",
   write: "create or replace a file",
   read: "read a file",
@@ -183,6 +183,16 @@ async function sysinfo(readElevation = elevationStatus) {
  * @returns {Promise<import('node:http').Server>}
  */
 function startServer({ port, token, computerControl = createComputerControl(), platform = process.platform, readElevation = elevationStatus }) {
+  // A process's elevation cannot change while it runs, and on Windows each
+  // check starts PowerShell. Keep the first definite answer instead of paying
+  // for it on every discovery call; an unanswered check is asked again.
+  let elevation;
+  const knownElevation = async () => {
+    if (elevation) return elevation;
+    const result = await readElevation();
+    if (typeof result?.elevated === "boolean") elevation = result;
+    return result;
+  };
   const authed = (req) => {
     const provided = req.headers["x-token"];
     if (!token || typeof provided !== "string") return false;
@@ -208,7 +218,8 @@ function startServer({ port, token, computerControl = createComputerControl(), p
     if (route === "/capabilities" && method === "GET") {
       return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: {
         command_jobs: true, interactive_codex: true, idempotent_start: true, job_list: true,
-        ...runtimeCapabilities(), computer_control: computerControl.available() } });
+        ...runtimeCapabilities(), computer_control: computerControl.available(),
+        computer_app_control: Boolean(computerControl.appControlAvailable?.()) } });
     }
 
     // Everything below requires the token.
@@ -368,7 +379,7 @@ function startServer({ port, token, computerControl = createComputerControl(), p
 
       if (route === "/sysinfo" && method === "GET") {
         log("sysinfo requested");
-        return sendJson(res, 200, await sysinfo(readElevation));
+        return sendJson(res, 200, await sysinfo(knownElevation));
       }
 
       if (route === "/run" && method === "POST") {

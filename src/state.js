@@ -28,6 +28,8 @@ function replaceStateFile(temporary, destination, { platform = process.platform,
   }
 }
 
+const WINDOWS_ACL_TIMEOUT_MS = 60000;
+
 function stateDir() {
   return process.env.SHAPES_BRIDGE_HOME || path.join(os.homedir(), ".shapes-bridge");
 }
@@ -35,7 +37,9 @@ function stateDir() {
 const SYSTEM_SID = "S-1-5-18";
 // Local, domain and Microsoft Entra (S-1-12-1-…) accounts.
 const ACCOUNT_SID = /^S-1-\d+(-\d+)+$/i;
-const windowsTool = (file, args) => spawnSync(file, args, { encoding: "utf8", windowsHide: true, timeout: 1500, maxBuffer: 65536 });
+// Rewriting an ACL makes Windows reapply it to every file inside, so it takes
+// longer the bigger the store; the timeout is only a runaway guard.
+const windowsTool = (file, args) => spawnSync(file, args, { encoding: "utf8", windowsHide: true, timeout: WINDOWS_ACL_TIMEOUT_MS, maxBuffer: 65536 });
 
 // True only for exactly the DACL ensureStateDir grants: inheritance removed,
 // full control for this account and SYSTEM, inherited by everything inside,
@@ -48,7 +52,11 @@ function isPrivateWindowsAcl(sddl, sid) {
     const [type, flags, rights, object, inherited, trustee, ...extra] = ace.split(";");
     if (type !== "A" || object || inherited || extra.length || !["fa", "0x1f01ff"].includes(String(rights).toLowerCase())) return false;
     if (typeof flags !== "string" || flags.length !== 4 || (flags.match(/../g) || []).sort().join() !== "CI,OI") return false;
-    const who = trustee === "SY" ? SYSTEM_SID : trustee?.toUpperCase();
+    // SDDL names a few well-known accounts by alias: the built-in
+    // Administrator (RID 500) is LA and the built-in Guest (RID 501) is LG.
+    const who = trustee === "SY" ? SYSTEM_SID
+      : (trustee === "LA" && /-500$/.test(sid)) || (trustee === "LG" && /-501$/.test(sid)) ? sid.toUpperCase()
+        : trustee?.toUpperCase();
     if (who !== SYSTEM_SID && who !== sid.toUpperCase()) return false;
     trustees.add(who);
   }

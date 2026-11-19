@@ -377,6 +377,34 @@ test("a marker that cannot be read right now is counted as running and left alon
   assert.equal(fs.existsSync(file), false);
 });
 
+test("a receipt another Bridge process is removing does not stop a full store from starting a command", { timeout: 60000 }, async (t) => {
+  home(t, "concurrency-receipts-in-use");
+  fs.mkdirSync(jobs.root(), { recursive: true });
+  const now = Date.now(), scope = hex("chat in use");
+  const receipt = (index, extra) => jobs.save({ job_id: hex(`in use ${index}`), scope, fingerprint: hex("f"), command_hash: hex("c"), state: "completed",
+    created_at: now - 100000 + index, finished_at: now - 90000 + index, result: { exit_code: 0, stdout: "", stderr: "", cleanup_confirmed: true }, ...extra });
+  for (let index = 0; index < jobs.MAX_RECEIPTS; index++) receipt(index);
+  receipt("running", { state: "running", created_at: now - 200000, finished_at: undefined, supervisor_pid: process.pid, command: { timeout: 600 } });
+  // On Windows a receipt that another process is deleting can be neither read
+  // nor deleted again: both fail with EPERM until the deletion completes.
+  const deleting = path.join(jobs.root(), `${hex("in use 0")}.json`), unreadable = path.join(jobs.root(), `${hex("in use 1")}.json`);
+  const pending = () => Object.assign(new Error("EPERM: operation not permitted"), { code: "EPERM" });
+  const rm = fs.rmSync, read = fs.readFileSync;
+  t.mock.method(fs, "rmSync", (target, ...rest) => { if (target === deleting) throw pending(); return rm.call(fs, target, ...rest); });
+  t.mock.method(fs, "readFileSync", (target, ...rest) => { if (target === unreadable) throw pending(); return read.call(fs, target, ...rest); });
+  const started = await jobs.start({ cmd: hold, timeout: 30, scope, request_key: hex("key in use") });
+  t.mock.restoreAll();
+  assert.equal(started.state, "queued");
+  // The oldest could not be dropped yet, so the next oldest made room instead.
+  assert.equal(jobs.load(hex("in use 0")).state, "completed");
+  assert.equal(jobs.load(hex("in use 1")).state, "completed");
+  assert.throws(() => jobs.load(hex("in use 2")), /not found/);
+  assert.equal(jobs.load(hex("in use 3")).state, "completed");
+  jobs.cancel(started.job_id, scope);
+  for (const deadline = Date.now() + 15000; jobs.pendingLocks().length && Date.now() < deadline;) await sleep(50);
+  assert.deepEqual(jobs.pendingLocks(), []);
+});
+
 test("a full receipt store drops its oldest finished receipts instead of refusing commands", { timeout: 60000 }, async (t) => {
   home(t, "concurrency-receipts");
   fs.mkdirSync(jobs.root(), { recursive: true });
