@@ -75,7 +75,8 @@ in front:
   app commands on (New, Hide). A shortcut for a turned-off command does nothing,
   so before posting a chord with modifiers the helper looks it up in the app's
   menus (within 0.5 s):
-  - If its item is turned off, nothing is sent: `shortcut_unavailable`, naming
+  - If its item is turned off (and brief activation, below, doesn't apply),
+    nothing is sent: `shortcut_unavailable`, naming
     the item, e.g. "CMD+S is TextEdit's File › Save, which is turned off while
     TextEdit is in the background".
   - If it's an Apple menu command (log out, lock, force quit), `system_command`.
@@ -85,6 +86,30 @@ in front:
   (`system_command`) the same way, instead of reporting a press that did
   nothing. Apps that keep their items on in the background (Electron apps do)
   are unaffected.
+- **Brief activation.** No Accessibility press or posted key runs a turned-off
+  command: the app has no key or main window while it is inactive. When the
+  server sends the header `x-shapes-computer-activation: brief` (older Bridges
+  ignore it; leaving it out is the kill switch), a `press_key` chord or `menu`
+  item that is turned off only because the app is in the background is run
+  instead:
+  - only if the person hasn't pressed a key for 1 s, holds no modifier or mouse
+    button and isn't entering a password; otherwise `person_active`, nothing sent;
+  - only if the observed window is on the person's current desktop (activating
+    an app on another Space can switch to it); otherwise `activation_failed`;
+  - the observed window is made the app's main window, the app is made active
+    without raising any window (SkyLight's private
+    `_SLPSSetFrontProcessWithOptions`, no-windows mode, naming the observed
+    window: without it the app raised its key window for about 20 ms), the menu item is
+    pressed, and the person's front app is put straight back;
+  - the reply has `delivery: "brief_activation"` and
+    `activation: {ms, restored}`: how long the app was active, until the
+    person's app was confirmed in front again, and whether it was;
+  - for Save (CMD+S), `document_saved` says whether the document's file was
+    written within 1.5 s.
+
+  Typing, clicks and anything that already works in the background never use it,
+  and the pointer is never moved. If the private calls are missing (a future
+  macOS), the command is refused as before.
 - **Moving in text.** For an arrow, HOME, END, PAGEUP or PAGEDOWN chord that no
   menu owns, sent while a text field or view has focus, the `press_key` receipt
   has `focused_text`: `changed` if its caret, selection or length changed within

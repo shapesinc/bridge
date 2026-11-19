@@ -97,9 +97,14 @@ function createComputerControl({ platform = process.platform, binary = nativePat
   let busy = false;
   // Every macOS reply says so, so a server can tell this contract from an
   // older Bridge that still posts whole-screen input.
-  async function execute(body) {
-    const reply = await run(body);
-    return background ? { ...reply, delivery: "background" } : reply;
+  // allowActivation is the server's say-so (a request header, so older
+  // Bridges ignore it) for a menu command or shortcut the app turns off in the
+  // background to run through a split-second activation. Turning it off on the
+  // server restores the plain refusal without a Mac release.
+  async function execute(body, { allowActivation = false } = {}) {
+    const reply = await run(body, allowActivation === true);
+    if (!background) return reply;
+    return { ...reply, delivery: reply.success && reply.result?.activation ? "brief_activation" : "background" };
   }
   // Where an app input lands, in global display points, for the pointer.
   function inputPoint(expected, control) {
@@ -111,7 +116,7 @@ function createComputerControl({ platform = process.platform, binary = nativePat
     return object(frame) && ["x", "y", "width", "height"].every((k) => Number.isFinite(frame[k]))
       ? { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 } : null;
   }
-  async function run(body) {
+  async function run(body, allowActivation) {
     if (!object(body) || Object.keys(body).some((k) => !["scope", "control", "cursor"].includes(k)) || !validCursor(body.cursor)
         || typeof body.scope !== "string" || !/^[a-f0-9]{64}$/.test(body.scope) || !validateControl(body.control)) {
       return failure("invalid_arguments", "Supply a supported computer operation and its documented arguments.", { dispatched: false });
@@ -159,7 +164,9 @@ function createComputerControl({ platform = process.platform, binary = nativePat
     }
     try {
       const { observation_id: _unused, ...request } = control;
-      const reply = await invoke({ ...request, ...(expected ? { expected } : {}) });
+      // Only a key chord or menu command in one observed app, never typing or clicks.
+      const activation = allowActivation && background && expected?.mode === "app" && ["press_key", "menu"].includes(control.operation);
+      const reply = await invoke({ ...request, ...(expected ? { expected } : {}), ...(activation ? { allow_activation: true } : {}) });
       if (!object(reply) || typeof reply.success !== "boolean") throw new Error("Invalid native receipt");
       if (!reply.success) return { ...reply, retryable: false };
       const value = reply.result;
