@@ -12,6 +12,9 @@ using System.Windows.Forms;
 internal sealed class ComputerFixture : Form {
     [DllImport("user32.dll")] private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+    // One rename that replaces the destination: the name never goes missing.
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern bool MoveFileEx(string existing, string replacement, int flags);
+    private const int MOVEFILE_REPLACE_EXISTING = 0x1;
     private readonly string statusPath;
     private readonly TextBox text = new TextBox { Multiline = true, Location = new Point(20, 20), Size = new Size(500, 100), Name = "Test input" };
     private readonly TextBox password = new TextBox { UseSystemPasswordChar = true, Location = new Point(20, 140), Size = new Size(200, 32), Name = "Protected test input" };
@@ -51,16 +54,18 @@ internal sealed class ComputerFixture : Form {
             { "clicks", clicks }, { "moves", moves }, { "wheels", wheels }, { "drags", drags },
             { "targets", new Dictionary<string, object> { { "text", Target(text) }, { "password", Target(password) }, { "button", Target(button) }, { "area", Target(area) } } }
         };
-        // Publish whole snapshots only. Rewriting the file in place let a
-        // reader catch it truncated and fail to parse it.
+        // Publish whole snapshots only, with one atomic rename. Rewriting the
+        // file in place let a reader catch it truncated, and File.Replace
+        // (ReplaceFile) moves the old file aside first, so a reader could find
+        // no file at all. If a reader holds the old snapshot the rename fails
+        // and the next tick publishes again; the old one stays complete.
         string temporary = statusPath + ".tmp";
         try {
             File.WriteAllText(temporary, json.Serialize(state));
-            if (File.Exists(statusPath)) File.Replace(temporary, statusPath, null);
-            else File.Move(temporary, statusPath);
+            MoveFileEx(temporary, statusPath, MOVEFILE_REPLACE_EXISTING);
         }
-        catch (IOException) { /* A reader holds the file; the next tick publishes again. */ }
-        catch (UnauthorizedAccessException) { /* Same, for a sharing violation reported as access. */ }
+        catch (IOException) { /* The temporary file is busy; the next tick writes it again. */ }
+        catch (UnauthorizedAccessException) { /* Same, reported as access. */ }
     }
     [STAThread] public static int Main(string[] args) {
         if (args.Length != 1 || !Path.IsPathRooted(args[0])) return 2;
