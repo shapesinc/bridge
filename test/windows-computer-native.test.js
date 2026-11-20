@@ -17,9 +17,11 @@ const skipped = process.platform !== "win32" ? "requires the actual Windows desk
 const pause = () => new Promise(resolve => setTimeout(resolve, 80));
 async function until(read, check, message) {
   const deadline = Date.now() + 7000;
-  let value;
-  do { try { value = await read(); if (check(value)) return value; } catch {} await pause(); } while (Date.now() < deadline);
-  assert.fail(`${message}; no matching state before deadline`);
+  let value, error, reads = 0;
+  do { try { value = await read(); reads++; error = undefined; if (check(value)) return value; } catch (caught) { error = caught; } await pause(); } while (Date.now() < deadline);
+  // Say what was last seen, so a failure tells input that never arrived from a stale or unreadable status file.
+  const { targets: _targets, ...seen } = value || {};
+  assert.fail(`${message}; no matching state before deadline (${reads} reads; last ${JSON.stringify(seen)}${error ? `; last read error ${error.code || error.message}` : ""})`);
 }
 function native(request) {
   return new Promise((resolve, reject) => {

@@ -1,0 +1,53 @@
+# TEMPORARY (remove before merge): repeats the native Windows observe/input test
+# to measure the drag flake before and after the fix.
+name: windows-native-repeat
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repeat:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Compile helper, fixture and process owners
+        shell: pwsh
+        run: |
+          $compiler = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+          $jobHost = Join-Path $env:RUNNER_TEMP 'shapes.inc Bridge Job.exe'
+          & $compiler /nologo /optimize+ /target:winexe /platform:x64 "/out:$jobHost" (Join-Path $PWD 'scripts\windows\JobHost.cs')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $helper = Join-Path $env:RUNNER_TEMP 'shapes.inc Bridge Computer.exe'
+          ./scripts/windows/build-computer.ps1 -OutputPath $helper
+          $fixture = Join-Path $env:RUNNER_TEMP 'ComputerFixture.exe'
+          & $compiler /nologo /target:exe /platform:x64 /reference:System.Drawing.dll /reference:System.Windows.Forms.dll /reference:System.Web.Extensions.dll "/out:$fixture" (Join-Path $PWD 'scripts\windows\ComputerFixture.cs')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $medium = Join-Path $env:RUNNER_TEMP 'MediumProcess.exe'
+          & $compiler /nologo /target:exe /platform:x64 "/out:$medium" (Join-Path $PWD 'test\fixtures\windows\MediumProcess.cs')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "SHAPES_TEST_JOB_HOST=$jobHost" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SHAPES_TEST_COMPUTER_HELPER=$helper" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SHAPES_TEST_COMPUTER_FIXTURE=$fixture" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SHAPES_TEST_MEDIUM_PROCESS=$medium" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Repeat the native observe/input test
+        shell: pwsh
+        run: |
+          $pass = 0; $fail = 0
+          for ($i = 1; $i -le 25; $i++) {
+            $out = node -e "const r=require('node:child_process').spawnSync(process.env.SHAPES_TEST_JOB_HOST,['--parent-pid',String(process.pid),'--',process.env.SHAPES_TEST_MEDIUM_PROCESS,'--',process.execPath,'--test','--test-concurrency=1','test/windows-computer-native.test.js'],{encoding:'utf8',windowsHide:true});process.stdout.write((r.stdout||'')+(r.stderr||''));process.exit(r.status===null?1:r.status)" 2>&1 | Out-String
+            if ($LASTEXITCODE -eq 0) { $pass++ } else { $fail++; Write-Host "=== iteration $i failed"; ($out -split "`n") | Select-String -Pattern "not ok|error:|no matching state|duration_ms" | ForEach-Object { Write-Host $_ } }
+          }
+          Write-Host "shard ${{ matrix.shard }}: $pass passed, $fail failed"
+          "shard ${{ matrix.shard }}: $pass passed, $fail failed" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

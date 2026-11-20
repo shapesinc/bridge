@@ -20,7 +20,8 @@ internal sealed class ComputerFixture : Form {
     private readonly TextBox password = new TextBox { UseSystemPasswordChar = true, Location = new Point(20, 140), Size = new Size(200, 32), Name = "Protected test input" };
     private readonly Button button = new Button { Text = "Count", Location = new Point(20, 190), Size = new Size(130, 50) };
     private readonly InputArea area = new InputArea { Location = new Point(180, 190), Size = new Size(340, 180), BackColor = Color.LightBlue, TabStop = true };
-    private int clicks, moves, wheels, drags;
+    private int clicks, moves, wheels, drags, downs, ups, captureLost, saves, saveFailures;
+    private string lastSaveError = "";
     private bool dragging;
     private readonly JavaScriptSerializer json = new JavaScriptSerializer();
     private readonly Timer timer = new Timer { Interval = 80 };
@@ -36,9 +37,10 @@ internal sealed class ComputerFixture : Form {
         AutoScaleMode = AutoScaleMode.None;
         Controls.AddRange(new Control[] { text, password, button, area });
         button.Click += delegate { clicks++; };
-        area.MouseDown += delegate { dragging = true; };
+        area.MouseDown += delegate { downs++; dragging = true; };
+        area.MouseCaptureChanged += delegate { if (dragging) captureLost++; };
         area.MouseMove += delegate { moves++; };
-        area.MouseUp += delegate { if (dragging) drags++; dragging = false; };
+        area.MouseUp += delegate { ups++; if (dragging) drags++; dragging = false; };
         area.MouseWheel += delegate(object sender, MouseEventArgs value) { wheels += value.Delta; };
         Shown += delegate { Activate(); SetForegroundWindow(Handle); text.Focus(); Save(); timer.Start(); };
         timer.Tick += delegate { Save(); };
@@ -52,6 +54,8 @@ internal sealed class ComputerFixture : Form {
         var state = new Dictionary<string, object> {
             { "pid", Process.GetCurrentProcess().Id }, { "text", text.Text }, { "passwordLength", password.Text.Length },
             { "clicks", clicks }, { "moves", moves }, { "wheels", wheels }, { "drags", drags },
+            // Diagnostics for a failed wait: which input arrived and whether snapshots are publishing.
+            { "downs", downs }, { "ups", ups }, { "captureLost", captureLost }, { "saves", saves }, { "saveFailures", saveFailures }, { "lastSaveError", lastSaveError },
             { "targets", new Dictionary<string, object> { { "text", Target(text) }, { "password", Target(password) }, { "button", Target(button) }, { "area", Target(area) } } }
         };
         // Publish whole snapshots only, with one atomic rename. Rewriting the
@@ -62,10 +66,11 @@ internal sealed class ComputerFixture : Form {
         string temporary = statusPath + ".tmp";
         try {
             File.WriteAllText(temporary, json.Serialize(state));
-            MoveFileEx(temporary, statusPath, MOVEFILE_REPLACE_EXISTING);
+            if (MoveFileEx(temporary, statusPath, MOVEFILE_REPLACE_EXISTING)) saves++;
+            else { saveFailures++; lastSaveError = "MoveFileEx " + Marshal.GetLastWin32Error(); }
         }
-        catch (IOException) { /* The temporary file is busy; the next tick writes it again. */ }
-        catch (UnauthorizedAccessException) { /* Same, reported as access. */ }
+        catch (IOException error) { saveFailures++; lastSaveError = error.GetType().Name + " " + error.HResult; /* The next tick writes it again. */ }
+        catch (UnauthorizedAccessException) { saveFailures++; lastSaveError = "UnauthorizedAccess"; }
     }
     [STAThread] public static int Main(string[] args) {
         if (args.Length != 1 || !Path.IsPathRooted(args[0])) return 2;
