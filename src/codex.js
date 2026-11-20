@@ -6,7 +6,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
 const { StringDecoder } = require("node:string_decoder");
-const { selectAgent, argumentsFor, verifyInteractiveCodex } = require("./agents");
+const { selectAgent, argumentsFor, verifyInteractiveCodex, claudeSettingsMode } = require("./agents");
 const { normalizeRequest, nativeResponse } = require("./approvals");
 const { localEnvironment } = require("./local-workspace");
 const { bundledRuntime, launchConfiguration } = require("./bundled-runtime");
@@ -308,6 +308,11 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
   // left out of the Codex app's thread list and can't be continued here.
   interactive = (interactive || selected.transport === "bundled_personal" || Boolean(sessionScope)) && agent === "codex";
   if (interactive && !builtIn) await verifyInteractiveCodex(selected, cwd);
+  // Claude Code write runs ask the person through this Bridge instead of
+  // skipping permissions; read-only runs stay limited to read-only tools.
+  const claudeHost = agent === "claude" && sandbox === "workspace-write" && selected.hostPrompts === true;
+  const permissionMode = claudeHost && !claudeSettingsMode(cwd) && selected.autoMode ? "auto" : undefined;
+  if (claudeHost) interactive = true;
   const executable = selected.executable;
   const id = crypto.randomUUID();
   // Claude Code takes the session id up front, so the session is bound before
@@ -315,6 +320,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
   const agentSessionId = resumeSessionId || (sessionScope && agent === "claude" ? crypto.randomUUID() : undefined);
   const directory = privateDir(path.join(root(), id));
   const state = { id, status: "queued", cwd, sandbox, agent, interactive, createdAt: new Date().toISOString(),
+    ...(claudeHost ? { claudeHost: true } : {}),
     ...(selected.transport === "bundled_personal" ? { funding: "personal", runtimeVersion: selected.version, personalTransport: selected.transport } : {}),
     ...(builtIn ? { sessionId: builtIn.sessionId, scopeId: builtIn.scopeId, funding: "shapes_credits", runtimeVersion: selected.version,
       ...(usageBaseline ? { runtimeUsageTotal: usageBaseline } : {}) } : {}),
@@ -326,6 +332,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     ...(builtIn ? { gateway: builtIn.gateway, resumeThreadId, usageBaseline } : {}),
     // The person's own Codex picks a model this account offers.
     ...(!builtIn && agent === "codex" && selected.transport !== "bundled_personal" ? { pickAvailableModel: true } : {}),
+    ...(claudeHost ? { claudeHost: true, ...(permissionMode ? { permissionMode } : {}) } : {}),
     ...(sessionScope ? { sessionScope, title: sessionTitle, startedBy, agentSessionId, resumeSessionId,
       ...(agent === "claude" && selected.nameFlag ? { nameFlag: true } : {}) } : {}) }));
   saveState(directory, state);
@@ -368,7 +375,14 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
   return { job_id: id, state: "queued", cwd, sandbox, agent, interactive, created_at: state.createdAt,
     ...(builtIn ? { session_id: builtIn.sessionId, funding: "shapes_credits", runtime_version: selected.version } : {}),
     ...(sessionScope ? sessionReceipt(agent, agentSessionId, resumeSessionId ? sessions.readRecord(sessionsDirectory(), agent, agentSessionId)?.title : sessionTitle) : {}),
-    ...(agent === "claude" ? { permission_scope: sandbox === "read-only" ? "read-only-tools" : "full-access" } : {}) };
+    ...(agent === "claude" ? { permission_scope: claudeScope(sandbox, claudeHost) } : {}) };
+}
+
+// Read-only tools; the person's own Claude Code permissions with approvals
+// asked in chat; or (older Claude Code) skipped permissions.
+function claudeScope(sandbox, host) {
+  if (sandbox === "read-only") return "read-only-tools";
+  return host ? "ask-in-chat" : "full-access";
 }
 
 function listJobs({ requestKey, limit = 10, agent } = {}) {
@@ -458,13 +472,16 @@ function getStatus(id, expectedAgent) {
     cwd: state.cwd, sandbox: state.sandbox, thread_id: typeof state.threadId === "string" ? bounded(state.threadId, 512) : null,
     ...(state.sessionScope ? sessionReceipt(agent, state.agentSessionId) : {}),
     ...(typeof state.modelNote === "string" ? { model_note: state.modelNote } : {}),
+    ...(state.activity?.text ? { activity: { text: bounded(state.activity.text, 400), at: state.activity.at } } : {}),
+    ...(Array.isArray(state.deniedActions) && state.deniedActions.length ? { denied_actions: state.deniedActions.slice(0, 10) } : {}),
+    started_at: state.startedAt || null,
     created_at: state.createdAt, finished_at: state.finishedAt || null,
     exit_code: state.exitCode ?? null,
     error_type: state.errorType || null,
     permission_denials: state.permissionDenials || 0,
     ...(state.errorType === "permission_denied" && state.status === "failed"
       ? { needs_user_action: true } : {}),
-    ...(agent === "claude" ? { permission_scope: state.sandbox === "read-only" ? "read-only-tools" : "full-access" } : {}),
+    ...(agent === "claude" ? { permission_scope: claudeScope(state.sandbox, state.claudeHost) } : {}),
     cancel_requested: fs.existsSync(path.join(directory, "cancel")),
     diagnostics_available: fs.existsSync(path.join(directory, "stdout.log")) || fs.existsSync(path.join(directory, "stderr.log")),
     diagnostics_directory: directory,
@@ -723,6 +740,7 @@ async function superviseInteractive(directory, state, request) {
       },
       onEvent(value) {
         if (request.gateway) value = redactRuntimeValue(value);
+        if (!request.gateway) noteActivity(directory, state, value);
         if (state.sessionId) appendJobEvent(directory, value);
         if (value.type === "usage.updated") { state.usage = value.usage; state.runtimeUsageTotal = value.total_usage; persist(); }
         if (value.type === "thread.started") {
@@ -886,6 +904,64 @@ function resumeContext(id) {
     inputContext: state.inputDelivered ? state.inputContext || {} : {} };
 }
 
+// "What it's doing now" for the chat's task card: one short line from the
+// agent's own stream (a step it named, a command, a file), never its private
+// reasoning. Saved at most every two seconds.
+// A command's program name only ("Running git"): commands can carry secrets
+// and the line can reach a group chat.
+function commandName(command) {
+  let text = Array.isArray(command) ? command.join(" ") : String(command || "");
+  text = text.replace(/^\s*(?:\S*[\\/])?(?:ba|z|da)?sh(?:\.exe)?\s+-\w*c\s+['"]?/i, "");
+  const token = text.trim().split(/\s+/).find((part) => part && !part.includes("=")) || "";
+  const name = path.basename(token.replace(/['"`]/g, ""));
+  return /^[A-Za-z0-9._+-]{1,40}$/.test(name) ? `Running ${name}` : "Running a command";
+}
+
+// How a denied action is named in receipts: the agent's own description of a
+// command, or the file's name; never the raw command or full path.
+function deniedSummary(tool, input) {
+  const value = input && typeof input === "object" ? input : {};
+  if (typeof value.description === "string" && value.description.trim()) return value.description;
+  if (tool === "Bash") return commandName(value.command);
+  const file = value.file_path || value.notebook_path;
+  if (typeof file === "string" && file) return `Editing ${path.basename(file)}`;
+  return "";
+}
+
+function activityLine(value) {
+  const short = (text, limit = 160) => String(text || "").replace(/\s+/g, " ").trim().slice(0, limit);
+  const base = (file) => path.basename(String(file || ""));
+  if (value?.type === "system" && value.subtype === "task_started") return short(value.description);
+  // API errors the CLI streams as synthetic assistant messages are not a step.
+  if (value?.type === "assistant" && Array.isArray(value.message?.content) && !value.error && value.message?.model !== "<synthetic>") {
+    for (const block of [...value.message.content].reverse()) {
+      if (block?.type === "tool_use") {
+        const input = block.input || {};
+        if (block.name === "Bash") return short(input.description || commandName(input.command));
+        if (["Edit", "MultiEdit", "Write", "NotebookEdit"].includes(block.name)) return short(`Editing ${base(input.file_path || input.notebook_path)}`);
+        if (block.name === "Read") return short(`Reading ${base(input.file_path)}`);
+        if (["Grep", "Glob"].includes(block.name)) return "Searching the code";
+        if (block.name === "Task" || block.name === "Agent") return short(input.description || "Working on a subtask");
+        return short(`Using ${block.name}`);
+      }
+      if (block?.type === "text" && block.text?.trim()) return short(block.text.split(/(?<=[.!?])\s/)[0]);
+    }
+  }
+  const item = value?.item;
+  if (value?.type === "item.started" && item?.type === "command_execution") return commandName(item.command);
+  if (value?.type === "item.started" && item?.type === "file_change") return "Editing files";
+  if (value?.type === "item.completed" && item?.type === "agent_message" && item.text?.trim()) return short(item.text.split(/(?<=[.!?])\s/)[0]);
+  return "";
+}
+
+function noteActivity(directory, state, value) {
+  const text = activityLine(value);
+  if (!text || state.activity?.text === text) return;
+  state.activity = { text, at: new Date().toISOString() };
+  const now = Date.now();
+  if (!state.activitySavedAt || now - state.activitySavedAt > 2000) { state.activitySavedAt = now; saveState(directory, state); }
+}
+
 // The vendor reported its session id. A new Codex thread registers here; if a
 // resumed Claude Code session continued under a new id, the record follows it
 // so later turns keep reaching the conversation the person sees.
@@ -926,6 +1002,60 @@ async function supervise(id) {
   let lineBuffer = "";
   const decoder = new StringDecoder("utf8");
   const logs = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  // Claude Code approvals (`can_use_tool`) waiting for the person in the chat.
+  const pending = new Map();
+  const persistPending = () => {
+    state.pendingRequests = [...pending.values()].map((entry) => entry.display);
+    if (!stopped) state.status = pending.size ? "waiting_on_user" : "running";
+    saveState(directory, state);
+  };
+  let inputClosed = false;
+  const sendControl = (value) => { if (inputClosed) return; try { child.stdin.write(JSON.stringify(value) + "\n"); } catch {} };
+  const addDenied = ({ tool, summary, by }) => {
+    const entry = { tool: String(tool || "tool").slice(0, 80), summary: String(summary || "").replace(/\s+/g, " ").trim().slice(0, 300),
+      ...(by ? { by } : {}) };
+    const list = state.deniedActions || [];
+    if (!list.some((item) => item.tool === entry.tool && item.summary === entry.summary) && list.length < 10) state.deniedActions = [...list, entry];
+  };
+  function clearHostRequest(id) {
+    if (!pending.delete(id)) return;
+    fs.rmSync(path.join(directory, `${id}.request.json`), { force: true });
+    fs.rmSync(path.join(directory, `${id}.response.json`), { force: true });
+    persistPending();
+  }
+  function hostRequest(value) {
+    const ask = value.request || {};
+    // After the turn's result stdin is closed: an answer could never arrive, so never show the request.
+    if (inputClosed) return;
+    if (ask.subtype !== "can_use_tool" || typeof value.request_id !== "string") {
+      sendControl({ type: "control_response", response: { subtype: "error", request_id: value.request_id, error: "Not supported here." } });
+      return;
+    }
+    const native = { method: "claude/canUseTool", params: { tool_name: ask.tool_name, input: ask.input, description: ask.description, cwd: request.cwd } };
+    let display;
+    try {
+      if (stopped || pending.size >= 16) throw new Error("No room for another approval.");
+      display = normalizeRequest(native);
+    } catch {
+      // Never approve what the chat can't show; the agent hears why.
+      sendControl({ type: "control_response", response: { subtype: "success", request_id: value.request_id,
+        response: { behavior: "deny", message: "This approval couldn't be shown in the shapes.inc chat. Continue without it, or say what you need." } } });
+      addDenied({ tool: ask.tool_name, summary: deniedSummary(ask.tool_name, ask.input) });
+      try { saveState(directory, state); } catch {}
+      return;
+    }
+    try {
+      pending.set(display.id, { native, display, requestId: value.request_id });
+      writePrivate(path.join(directory, `${display.id}.request.json`), JSON.stringify({ native, display }));
+      persistPending();
+    } catch {
+      // Unsaved means nobody can answer it: deny now rather than leave Claude Code waiting.
+      pending.delete(display.id);
+      sendControl({ type: "control_response", response: { subtype: "success", request_id: value.request_id,
+        response: { behavior: "deny", message: "This approval couldn't be shown in the shapes.inc chat. Continue without it, or say what you need." } } });
+      addDenied({ tool: ask.tool_name, summary: deniedSummary(ask.tool_name, ask.input) });
+    }
+  }
   const killGroup = (signal) => {
     if (child && child.pid) {
       signalOwned(child, signal);
@@ -938,7 +1068,12 @@ async function supervise(id) {
   };
   const finish = (status, detail = {}) => {
     clearInterval(poll); clearTimeout(deadline);
-    Object.assign(state, detail, { status, finishedAt: new Date().toISOString() });
+    for (const id of pending.keys()) {
+      fs.rmSync(path.join(directory, `${id}.request.json`), { force: true });
+      fs.rmSync(path.join(directory, `${id}.response.json`), { force: true });
+    }
+    pending.clear();
+    Object.assign(state, detail, { status, pendingRequests: [], finishedAt: new Date().toISOString() });
     saveState(directory, state);
   };
   function capture(kind, chunk) {
@@ -951,25 +1086,48 @@ async function supervise(id) {
     try {
       const value = JSON.parse(line);
       if (agent === "claude") {
+        if (value.type === "control_request" && request.claudeHost) { hostRequest(value); return; }
+        if (value.type === "control_cancel_request" && request.claudeHost) {
+          for (const [id, entry] of pending) if (entry.requestId === value.request_id) clearHostRequest(id);
+          return;
+        }
+        noteActivity(directory, state, value);
         if (value.type === "system" && value.subtype === "init" && typeof value.session_id === "string") {
           state.threadId = value.session_id;
           if (request.sessionScope) bindSession(state, request, value.session_id);
         }
+        // A denied action is a fact about the run, not its outcome: the agent
+        // often works around it and finishes. The result decides.
         if (value.type === "system" && value.subtype === "permission_denied") {
           state.permissionDenials = (state.permissionDenials || 0) + 1;
-          state.errorType = "permission_denied";
-          turnFailed = true;
+        }
+        if (value.type === "assistant" && !turnCompleted && !value.parent_tool_use_id && !value.error
+            && value.message?.model !== "<synthetic>") {
+          // The latest thing it said (its own words, not a subagent's or an API error)
+          // survives a stop, a crash or a lost result.
+          const text = (value.message?.content || []).filter((part) => part?.type === "text").map((part) => part.text).join("\n").trim();
+          if (text) {
+            const bytes = Buffer.from(text);
+            state.resultTruncated = bytes.length > MAX_OUTPUT;
+            writePrivate(path.join(directory, "result.txt"), bytes.subarray(0, MAX_OUTPUT));
+          }
         }
         if (value.type !== "result") return;
+        if (request.claudeHost) { inputClosed = true; try { child.stdin.end(); } catch {} } // The session's turn is over.
         if (typeof value.session_id === "string") state.threadId = value.session_id;
-        state.permissionDenials = Math.max(state.permissionDenials || 0, Array.isArray(value.permission_denials) ? value.permission_denials.length : 0);
-        const denied = state.permissionDenials > 0;
+        const denials = Array.isArray(value.permission_denials) ? value.permission_denials : [];
+        state.permissionDenials = Math.max(state.permissionDenials || 0, denials.length);
+        // Named by the agent's own description, never the raw command or path:
+        // receipts can reach a group chat.
+        for (const denial of denials) addDenied({ tool: denial?.tool_name, summary: deniedSummary(denial?.tool_name, denial?.tool_input) });
         const success = value.subtype === "success" && value.is_error === false && typeof value.result === "string" && Boolean(value.result.trim());
-        if (!success || denied) {
+        if (!success) {
           turnFailed = true;
-          state.errorType = denied ? "permission_denied" : "agent_error";
-          if (!denied && typeof value.result === "string" && value.result.trim()) state.agentError = value.result.slice(0, 4000);
-          else if (!denied && Array.isArray(value.errors) && typeof value.errors[0] === "string") state.agentError = value.errors[0].slice(0, 4000);
+          if (typeof value.result === "string" && value.result.trim()) state.agentError = value.result.slice(0, 4000);
+          else if (Array.isArray(value.errors) && typeof value.errors[0] === "string") state.agentError = value.errors[0].slice(0, 4000);
+          // A denial it worked around doesn't explain a usage limit, sign-in or network failure.
+          const known = typeof state.agentError === "string" && FAILURE_HINTS.some(([, pattern]) => pattern.test(state.agentError));
+          state.errorType = state.permissionDenials > 0 && !known ? "permission_denied" : "agent_error";
           return;
         }
         turnCompleted = true;
@@ -1010,7 +1168,9 @@ async function supervise(id) {
       { cwd: request.cwd, env: localEnvironment(), detached: true, cleanupReceipt: true, stdio: ["pipe", "pipe", "pipe"] });
     if (child.pid) { state.agentPid = child.pid; saveState(directory, state); }
     child.stdin.on("error", () => {}); // Early CLI exits can close stdin before the prompt is consumed.
-    child.stdin.end(request.prompt);
+    // Host approvals keep stdin open for answers; the session's result ends it.
+    if (request.claudeHost) child.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: request.prompt } }) + "\n");
+    else child.stdin.end(request.prompt);
     child.stdout.on("data", (chunk) => {
       capture("stdout", chunk);
       lineBuffer += decoder.write(chunk);
@@ -1024,8 +1184,23 @@ async function supervise(id) {
     process.once("SIGTERM", () => stop("cancelled"));
     process.once("SIGINT", () => stop("cancelled"));
     poll = setInterval(() => {
-      if (fs.existsSync(path.join(directory, "cancel"))) stop("cancelled");
+      if (fs.existsSync(path.join(directory, "cancel"))) { stop("cancelled"); return; }
+      for (const [id, entry] of pending) {
+        const file = path.join(directory, `${id}.response.json`);
+        if (!fs.existsSync(file)) continue;
+        let answer;
+        try { answer = JSON.parse(fs.readFileSync(file, "utf8")); } catch { continue; }
+        if (answer.cancel) { stop("cancelled"); return; }
+        try { answerHost(id, entry, answer); } catch { /* State is saved again on the next change or at the end. */ }
+      }
     }, 250);
+    function answerHost(id, entry, answer) {
+      sendControl({ type: "control_response", response: { subtype: "success", request_id: entry.requestId, response: answer.result } });
+      if (answer.result?.behavior === "deny") {
+        addDenied({ tool: entry.native.params.tool_name, summary: deniedSummary(entry.native.params.tool_name, entry.native.params.input), by: "person" });
+      }
+      clearHostRequest(id); // Removed from pending first, so a failed save never answers twice.
+    }
     deadline = setTimeout(() => stop("timed_out"), request.timeout * 1000);
     const exit = await new Promise((resolve, reject) => {
       finishExit = resolve;
@@ -1045,7 +1220,9 @@ async function supervise(id) {
       ...exit,
       ...(!stopped && !success ? {
         ...(state.errorType === "permission_denied" ? {
-          error: "The local agent was blocked by tool permissions. This background runner cannot handle interactive approval; review access in the local agent before continuing.",
+          error: request.claudeHost
+            ? "Claude Code couldn't finish: an action it needed was denied."
+            : "The local agent was blocked by tool permissions. This background runner cannot handle interactive approval; review access in the local agent before continuing.",
           errorType: "permission_denied",
         } : failureReason({ agent, agentError: state.agentError, exitCode: exit.exitCode, signal: exit.signal,
           errorType: state.errorType || (exit.exitCode === 0 ? undefined : "process_error") })),

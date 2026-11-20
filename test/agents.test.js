@@ -198,7 +198,7 @@ test("Claude write mode requires a Git worktree and enables per-run edits withou
   assert.equal(fs.readFileSync(settings, "utf8"), rules);
 });
 
-test("Claude requires an explicit successful result, exit zero, and no permission denial", async (t) => {
+test("Claude requires an explicit successful result and exit zero; a denied action alone doesn't fail a run", async (t) => {
   for (const [name, body, errorType] of [
     ["assistant text only", `console.log(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'Done'}]}}));`, "missing_completion"],
     ["tool events only", `console.log(JSON.stringify({type:'assistant',message:{content:[{type:'tool_use',name:'Read',input:{file_path:'private'}}]}}));`, "missing_completion"],
@@ -206,9 +206,11 @@ test("Claude requires an explicit successful result, exit zero, and no permissio
     ["error flag", `console.log(JSON.stringify({type:'result',subtype:'success',is_error:true,result:'private error'}));`, "agent_error"],
     ["error subtype", `console.log(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:false,result:'private error'}));`, "agent_error"],
     ["nonzero exit", `${COMPLETE}process.exitCode=2;`, "process_error"],
-    ["permission array", `console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:'private partial output',permission_denials:[{tool_name:'Bash',tool_input:{command:'private command'}}]}));`, "permission_denied"],
-    ["permission event", `console.log(JSON.stringify({type:'system',subtype:'permission_denied',tool_name:'Bash'}));${COMPLETE}`, "permission_denied"],
-    ["late permission event", `${COMPLETE}console.log(JSON.stringify({type:'system',subtype:'permission_denied',tool_name:'Bash'}));`, "permission_denied"],
+    ["denied, then an error result", `console.log(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,result:'private error',permission_denials:[{tool_name:'Bash',tool_input:{command:'private command'}}]}));`, "permission_denied"],
+    // A denial it worked around doesn't hide the real failure.
+    ["denied, then a usage limit", `console.log(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,result:'private error: usage limit reached',permission_denials:[{tool_name:'Bash',tool_input:{command:'private command'}}]}));`, "agent_error"],
+    // An API error the CLI streams as a synthetic assistant message is never the result.
+    ["API error as assistant text", `console.log(JSON.stringify({type:'assistant',message:{model:'<synthetic>',content:[{type:'text',text:'private error'}]}}));console.log(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,result:''}));`, "agent_error"],
   ]) await t.test(name, async (t) => {
     const f = fixture(t, { claude: { body } });
     const result = await done((await f.start()).job_id);
@@ -218,6 +220,18 @@ test("Claude requires an explicit successful result, exit zero, and no permissio
     assert.ok(!JSON.stringify(result).includes("private error"));
     assert.ok(!JSON.stringify(result).includes("private command"));
     assert.ok(!JSON.stringify(result).includes("private partial output"));
+  });
+  // The agent worked around a denial and finished: the run is done, the
+  // denial is a listed fact, and the raw command never reaches the receipt.
+  for (const [name, body] of [
+    ["permission array", `console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:'Built it',permission_denials:[{tool_name:'Bash',tool_input:{command:'private command',description:'Commit it'}}]}));`],
+    ["permission event", `console.log(JSON.stringify({type:'system',subtype:'permission_denied',tool_name:'Bash'}));${COMPLETE}`],
+    ["late permission event", `${COMPLETE}console.log(JSON.stringify({type:'system',subtype:'permission_denied',tool_name:'Bash'}));`],
+  ]) await t.test(`${name} on a successful run`, async (t) => {
+    const f = fixture(t, { claude: { body } });
+    const result = await done((await f.start()).job_id);
+    assert.deepEqual([result.state, result.error_type, result.permission_denials], ["completed", null, 1]);
+    assert.ok(!JSON.stringify(result).includes("private command"));
   });
 });
 

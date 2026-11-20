@@ -196,6 +196,16 @@ started. While a Claude Code session is open in your Claude app or a terminal, s
 won't send to it. If your Codex config names a model your account doesn't offer, the
 shape's turn uses your account's default model and says so.
 
+Claude Code keeps your own permission settings: your allow, ask and deny rules,
+additional directories and default permission mode (auto when you haven't set
+one, as in the Claude app). When it needs your OK, the chat shows the exact
+command or file and its folder with **Approve once** and **Deny**; only you, as
+this computer's owner, can answer, and the same session carries on. Nothing is
+approved for you, and a folder outside the task's folder is reached only through
+such an approval. A run that finishes its work is reported as done, with anything
+that was denied listed alongside its result. The chat's task card shows what the
+agent is doing right now and has Stop.
+
 ## Documentation
 
 | Topic | |
