@@ -325,8 +325,10 @@ internal static class Computer {
         throw Fail("invalid_arguments", "Use modifiers CMD/CTRL/ALT/SHIFT followed by one supported key.");
     }
 
-    internal static List<INPUT> BuildInput(Dictionary<string, object> request, Rectangle bounds, Rectangle desktop, int width, int height) {
-        var events = new List<INPUT>(); string operation = Text(request, "operation");
+    // The input for one request, as batches sent in order. A drag is three:
+    // press, moves, release (see Input).
+    internal static List<List<INPUT>> BuildInput(Dictionary<string, object> request, Rectangle bounds, Rectangle desktop, int width, int height) {
+        var events = new List<INPUT>(); var phases = new List<List<INPUT>> { events }; string operation = Text(request, "operation");
         if (operation == "click" || operation == "move" || operation == "drag" || operation == "scroll") {
             Point point = ImagePoint(request, "point", bounds, width, height);
             events.Add(Mouse(point, desktop, MOVE | NO_COALESCE));
@@ -338,8 +340,10 @@ internal static class Computer {
             } else if (operation == "drag") {
                 Point end = ImagePoint(request, "to", bounds, width, height);
                 events.Add(Mouse(point, desktop, LEFT_DOWN));
-                for (int i = 1; i <= 20; i++) events.Add(Mouse(new Point(point.X + (end.X - point.X) * i / 20, point.Y + (end.Y - point.Y) * i / 20), desktop, MOVE | NO_COALESCE));
-                events.Add(Mouse(end, desktop, LEFT_UP));
+                var moves = new List<INPUT>();
+                for (int i = 1; i <= 20; i++) moves.Add(Mouse(new Point(point.X + (end.X - point.X) * i / 20, point.Y + (end.Y - point.Y) * i / 20), desktop, MOVE | NO_COALESCE));
+                phases.Add(moves);
+                phases.Add(new List<INPUT> { Mouse(end, desktop, LEFT_UP) });
             } else if (operation == "scroll") {
                 int dx = Integer(Value(request, "dx"), -2000, 2000), dy = Integer(Value(request, "dy"), -2000, 2000);
                 if (dy != 0) events.Add(Mouse(point, desktop, WHEEL, dy));
@@ -365,7 +369,23 @@ internal static class Computer {
             events.Add(Key(final, true)); events.Add(Key(final, false));
             for (int i = keys.Length - 2; i >= 0; i--) events.Add(Key(KeyCode(keys[i], true), false));
         } else throw Fail("invalid_arguments", "Unsupported computer operation.");
-        return events;
+        return phases;
+    }
+
+    // Whether Windows' input thread has a mouse button down, and a bounded
+    // wait for that state: it reflects input once Windows has applied it.
+    private static bool Held(int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; }
+    private static bool Within(Func<bool> done) {
+        var watch = Stopwatch.StartNew();
+        do { if (done()) return true; Thread.Sleep(5); } while (watch.ElapsedMilliseconds < 500);
+        return done();
+    }
+    private static void Send(List<INPUT> events, bool earlier) {
+        uint inserted = SendInput((uint)events.Count, events.ToArray(), Marshal.SizeOf(typeof(INPUT)));
+        if (inserted != events.Count) throw new ControlFailure("input_blocked", "Windows did not accept all input. Observe its effect before continuing; do not repeat it.", earlier || inserted > 0, earlier || inserted > 0);
+    }
+    private static INPUT ButtonUp(uint flag) {
+        return new INPUT { type = INPUT_MOUSE, data = new INPUTUNION { mouse = new MOUSEINPUT { flags = flag, extraInfo = UIntPtr.Zero } } };
     }
 
     private static Dictionary<string, object> Input(Dictionary<string, object> request) {
@@ -378,7 +398,7 @@ internal static class Computer {
             throw Fail("desktop_changed", "The observed display changed. Observe again before input.");
         int width = Integer(Value(expected, "width"), 1, 1600), height = Integer(Value(expected, "height"), 1, 1600);
         Rectangle desktop = SystemInformation.VirtualScreen;
-        var events = BuildInput(request, display.Bounds, desktop, width, height);
+        var phases = BuildInput(request, display.Bounds, desktop, width, height);
         InputAuthority(app);
         // UI Automation calls can block while focus/topology changes. Recheck
         // immediately before the one atomic insertion into the input stream.
@@ -386,20 +406,34 @@ internal static class Computer {
         if (!SameApp(app, ActiveApp()) || latestDisplay.Bounds != display.Bounds || latestDisplay.Device != display.Device || SystemInformation.VirtualScreen != desktop)
             throw Fail("desktop_changed", "The observed app or display changed. Observe again before input.");
         attemptedInput = true;
-        uint inserted = SendInput((uint)events.Count, events.ToArray(), Marshal.SizeOf(typeof(INPUT)));
-        if (inserted != events.Count) throw new ControlFailure("input_blocked", "Windows did not accept all input. Observe its effect before continuing; do not repeat it.", inserted > 0, inserted > 0);
-        Thread.Sleep(100);
-        // DIAGNOSTIC (temporary): how long until Windows reports the left button released after a click or drag.
-        int released = -1;
-        string op = Text(request, "operation");
-        if (op == "drag" || (op == "click" && (Text(request, "button") ?? "left") == "left")) {
-            var watch = Stopwatch.StartNew();
-            while (watch.ElapsedMilliseconds < 2000) { if ((GetAsyncKeyState(1) & 0x8000) == 0) { released = (int)watch.ElapsedMilliseconds; break; } Thread.Sleep(5); }
+        // Sent as one batch, a drag sometimes lost its tail after the press
+        // (hosted CI: 2 to 7 drags in 150): the release never reached Windows,
+        // which left the person's left button held and refused all later input
+        // as input_busy. So the press must be applied before the moves go, and
+        // the release goes on its own.
+        string operation = Text(request, "operation");
+        int button = operation == "drag" ? 1 : operation == "click" ? ((Text(request, "button") ?? "left") == "left" ? 1 : 2) : 0;
+        for (int phase = 0; phase < phases.Count; phase++) {
+            Send(phases[phase], phase > 0);
+            if (operation == "drag" && phase == 0 && !Within(() => Held(1))) {
+                Send(new List<INPUT> { ButtonUp(LEFT_UP) }, true);
+                throw new ControlFailure("input_blocked", "Windows did not apply the drag's button press, so the drag stopped. Observe before continuing; do not repeat it.", true, true);
+            }
         }
+        // A button this helper pressed is never left held for the person.
+        bool repeated = false;
+        if (button != 0 && !Within(() => !Held(button))) {
+            repeated = true;
+            Send(new List<INPUT> { ButtonUp(button == 1 ? LEFT_UP : RIGHT_UP) }, true);
+            if (!Within(() => !Held(button)))
+                throw new ControlFailure("input_blocked", "Windows still reports the mouse button held after this input. Ask the person to click once, then observe again.", true, true);
+        }
+        Thread.Sleep(100);
         var result = Map("dispatched", true, "delivery_verified", false, "source_pid", Process.GetCurrentProcess().Id,
             "message", "Events were posted. Observe again to verify the result; this receipt alone does not prove the intended effect.");
-        if (Text(request, "operation") == "scroll") result["scroll_delta_unit"] = "Windows wheel units (120 per detent)";
-        if (op == "drag" || op == "click") result["left_released_ms"] = released;
+        if (operation == "scroll") result["scroll_delta_unit"] = "Windows wheel units (120 per detent)";
+        // Windows dropped this input's button release and it was sent again.
+        if (repeated) result["button_release_repeated"] = true;
         return result;
     }
 

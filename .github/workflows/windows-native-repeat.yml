@@ -48,10 +48,9 @@ jobs:
       - name: Repeat the native observe/input test
         shell: pwsh
         run: |
-          $pass = 0; $fail = 0; $env:SHAPES_TEST_LOG_RECEIPTS = '1'
+          $pass = 0; $fail = 0
           for ($i = 1; $i -le 25; $i++) {
             $out = node -e "const r=require('node:child_process').spawnSync(process.env.SHAPES_TEST_JOB_HOST,['--parent-pid',String(process.pid),'--',process.env.SHAPES_TEST_MEDIUM_PROCESS,'--',process.execPath,'--test','--test-concurrency=1','test/windows-computer-native.test.js'],{encoding:'utf8',windowsHide:true});process.stdout.write((r.stdout||'')+(r.stderr||''));process.exit(r.status===null?1:r.status)" 2>&1 | Out-String
-            ($out -split "`n") | Select-String -Pattern "receipt drag" | ForEach-Object { Write-Host "iteration ${i}: $_" }
             if ($LASTEXITCODE -eq 0) { $pass++ } else {
               $fail++; Write-Host "=== iteration $i failed"
               ($out -split "`n") | Select-String -Pattern "error:" -Context 0,3 | ForEach-Object { Write-Host $_ }
