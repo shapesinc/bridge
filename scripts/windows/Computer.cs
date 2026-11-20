@@ -401,7 +401,8 @@ internal static class Computer {
         var phases = BuildInput(request, display.Bounds, desktop, width, height);
         InputAuthority(app);
         // UI Automation calls can block while focus/topology changes. Recheck
-        // immediately before the one atomic insertion into the input stream.
+        // immediately before the first insertion into the input stream; a
+        // drag's later batches go to the window holding its press.
         var latestDisplay = SelectDisplay(Displays(), display.Id);
         if (!SameApp(app, ActiveApp()) || latestDisplay.Bounds != display.Bounds || latestDisplay.Device != display.Device || SystemInformation.VirtualScreen != desktop)
             throw Fail("desktop_changed", "The observed app or display changed. Observe again before input.");
