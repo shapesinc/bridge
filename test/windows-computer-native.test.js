@@ -17,9 +17,11 @@ const skipped = process.platform !== "win32" ? "requires the actual Windows desk
 const pause = () => new Promise(resolve => setTimeout(resolve, 80));
 async function until(read, check, message) {
   const deadline = Date.now() + 7000;
-  let value;
-  do { try { value = await read(); if (check(value)) return value; } catch {} await pause(); } while (Date.now() < deadline);
-  assert.fail(`${message}; no matching state before deadline`);
+  let value, error, reads = 0;
+  do { try { value = await read(); reads++; error = undefined; if (check(value)) return value; } catch (caught) { error = caught; } await pause(); } while (Date.now() < deadline);
+  // Say what was last seen, so a failure tells input that never arrived from a stale or unreadable status file.
+  const { targets: _targets, ...seen } = value || {};
+  assert.fail(`${message}; no matching state before deadline (${reads} reads; last ${JSON.stringify(seen)}${error ? `; last read error ${error.code || error.message}` : ""})`);
 }
 function native(request) {
   return new Promise((resolve, reject) => {
@@ -70,6 +72,8 @@ test("Windows actual screenshot and one-use mouse/Unicode/key actions affect onl
     assert.equal(reply.success, true, `${reply.error_type || ""}: ${reply.error || ""}`);
     assert.equal(reply.result.dispatched, true); assert.equal(reply.result.delivery_verified, false);
     assert.equal((await run(request)).error_type, "stale_observation");
+    // The release is sent on its own; Windows must not have dropped it.
+    assert.equal(reply.result.button_release_repeated, undefined, `${operation}: Windows dropped the button release`);
     return reply;
   };
   const initial = await observe();
