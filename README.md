@@ -118,6 +118,7 @@ On Windows (Command Prompt):
 Replace `status` with any of these commands. No shell profile changes are made.
 
 - `status`: show connection, version and native permission status.
+- `version` (also `--version` or `-v`): print the version, even before pairing.
 - `restart`: restart the background connection. Opening the macOS app or the
   Linux launcher entry does the same.
 - `open`: the same as opening the app: restart the connection, or resume it
