@@ -389,9 +389,17 @@ internal static class Computer {
         uint inserted = SendInput((uint)events.Count, events.ToArray(), Marshal.SizeOf(typeof(INPUT)));
         if (inserted != events.Count) throw new ControlFailure("input_blocked", "Windows did not accept all input. Observe its effect before continuing; do not repeat it.", inserted > 0, inserted > 0);
         Thread.Sleep(100);
+        // DIAGNOSTIC (temporary): how long until Windows reports the left button released after a click or drag.
+        int released = -1;
+        string op = Text(request, "operation");
+        if (op == "drag" || (op == "click" && (Text(request, "button") ?? "left") == "left")) {
+            var watch = Stopwatch.StartNew();
+            while (watch.ElapsedMilliseconds < 2000) { if ((GetAsyncKeyState(1) & 0x8000) == 0) { released = (int)watch.ElapsedMilliseconds; break; } Thread.Sleep(5); }
+        }
         var result = Map("dispatched", true, "delivery_verified", false, "source_pid", Process.GetCurrentProcess().Id,
             "message", "Events were posted. Observe again to verify the result; this receipt alone does not prove the intended effect.");
         if (Text(request, "operation") == "scroll") result["scroll_delta_unit"] = "Windows wheel units (120 per detent)";
+        if (op == "drag" || op == "click") result["left_released_ms"] = released;
         return result;
     }
 

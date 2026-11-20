@@ -72,6 +72,7 @@ test("Windows actual screenshot and one-use mouse/Unicode/key actions affect onl
     assert.equal(reply.success, true, `${reply.error_type || ""}: ${reply.error || ""}`);
     assert.equal(reply.result.dispatched, true); assert.equal(reply.result.delivery_verified, false);
     assert.equal((await run(request)).error_type, "stale_observation");
+    if (process.env.SHAPES_TEST_LOG_RECEIPTS && reply.result.left_released_ms !== undefined) console.log(`receipt ${operation} left_released_ms=${reply.result.left_released_ms}`);
     return reply;
   };
   const initial = await observe();

@@ -20,7 +20,7 @@ internal sealed class ComputerFixture : Form {
     private readonly TextBox password = new TextBox { UseSystemPasswordChar = true, Location = new Point(20, 140), Size = new Size(200, 32), Name = "Protected test input" };
     private readonly Button button = new Button { Text = "Count", Location = new Point(20, 190), Size = new Size(130, 50) };
     private readonly InputArea area = new InputArea { Location = new Point(180, 190), Size = new Size(340, 180), BackColor = Color.LightBlue, TabStop = true };
-    private int clicks, moves, wheels, drags, downs, ups, captureLost, saves, saveFailures;
+    private int clicks, moves, wheels, drags, downs, ups, captureLost, saves, saveFailures, movesAtDown;
     private string lastSaveError = "";
     private bool dragging;
     private readonly JavaScriptSerializer json = new JavaScriptSerializer();
@@ -37,7 +37,7 @@ internal sealed class ComputerFixture : Form {
         AutoScaleMode = AutoScaleMode.None;
         Controls.AddRange(new Control[] { text, password, button, area });
         button.Click += delegate { clicks++; };
-        area.MouseDown += delegate { downs++; dragging = true; };
+        area.MouseDown += delegate { downs++; movesAtDown = moves; dragging = true; };
         area.MouseCaptureChanged += delegate { if (dragging) captureLost++; };
         area.MouseMove += delegate { moves++; };
         area.MouseUp += delegate { ups++; if (dragging) drags++; dragging = false; };
@@ -55,7 +55,7 @@ internal sealed class ComputerFixture : Form {
             { "pid", Process.GetCurrentProcess().Id }, { "text", text.Text }, { "passwordLength", password.Text.Length },
             { "clicks", clicks }, { "moves", moves }, { "wheels", wheels }, { "drags", drags },
             // Diagnostics for a failed wait: which input arrived and whether snapshots are publishing.
-            { "downs", downs }, { "ups", ups }, { "captureLost", captureLost }, { "saves", saves }, { "saveFailures", saveFailures }, { "lastSaveError", lastSaveError },
+            { "downs", downs }, { "ups", ups }, { "movesSinceDown", moves - movesAtDown }, { "captureLost", captureLost }, { "saves", saves }, { "saveFailures", saveFailures }, { "lastSaveError", lastSaveError },
             { "targets", new Dictionary<string, object> { { "text", Target(text) }, { "password", Target(password) }, { "button", Target(button) }, { "area", Target(area) } } }
         };
         // Publish whole snapshots only, with one atomic rename. Rewriting the
