@@ -41,13 +41,22 @@ jobs:
           "SHAPES_TEST_COMPUTER_HELPER=$helper" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "SHAPES_TEST_COMPUTER_FIXTURE=$fixture" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "SHAPES_TEST_MEDIUM_PROCESS=$medium" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $state = Join-Path $env:RUNNER_TEMP 'MouseState.exe'
+          & $compiler /nologo /target:exe /platform:x64 "/out:$state" (Join-Path $PWD 'test\fixtures\windows\MouseState.cs')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "SHAPES_TEST_MOUSE_STATE=$state" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Repeat the native observe/input test
         shell: pwsh
         run: |
           $pass = 0; $fail = 0
           for ($i = 1; $i -le 25; $i++) {
             $out = node -e "const r=require('node:child_process').spawnSync(process.env.SHAPES_TEST_JOB_HOST,['--parent-pid',String(process.pid),'--',process.env.SHAPES_TEST_MEDIUM_PROCESS,'--',process.execPath,'--test','--test-concurrency=1','test/windows-computer-native.test.js'],{encoding:'utf8',windowsHide:true});process.stdout.write((r.stdout||'')+(r.stderr||''));process.exit(r.status===null?1:r.status)" 2>&1 | Out-String
-            if ($LASTEXITCODE -eq 0) { $pass++ } else { $fail++; Write-Host "=== iteration $i failed"; ($out -split "`n") | Select-String -Pattern "not ok|error:|no matching state|duration_ms" | ForEach-Object { Write-Host $_ } }
+            if ($LASTEXITCODE -eq 0) { $pass++ } else {
+              $fail++; Write-Host "=== iteration $i failed"
+              ($out -split "`n") | Select-String -Pattern "error:" -Context 0,3 | ForEach-Object { Write-Host $_ }
+              # Is Windows left holding the left button? Release it once so later iterations show whether that was the cause.
+              & $env:SHAPES_TEST_MOUSE_STATE release | ForEach-Object { Write-Host "  mouse: $_" }
+            }
           }
           Write-Host "shard ${{ matrix.shard }}: $pass passed, $fail failed"
           "shard ${{ matrix.shard }}: $pass passed, $fail failed" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
