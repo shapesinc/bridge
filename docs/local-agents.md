@@ -78,8 +78,8 @@ actual task result. Codex browser/app permission rejections produce `failed`
 with `error_type: "permission_denied"`, a positive `permission_denials` count,
 and `needs_user_action: true`, even if the CLI exits zero after explaining the
 blocker. Cancellation and timeout retain their own states. Claude requires an
-explicit successful result, a nonempty final answer, exit code zero, and no
-reported permission denials. Assistant text or tool activity alone never
+explicit successful result, a nonempty final answer and exit code zero; denied
+actions on a successful run are reported, not a failure. Assistant text or tool activity alone never
 counts as completion. Error details remain in private local diagnostics.
 
 ## Permissions and task lifetime
@@ -142,14 +142,35 @@ the [desktop task link](https://learn.chatgpt.com/docs/reference/commands)
 `codex://threads/THREAD_ID` opens the saved task without granting permission or
 retrying it. The bridge never switches browser or agent to bypass a denial.
 
-Claude write jobs run with `--dangerously-skip-permissions`: no permission
-prompts and no per-command approvals for this task. Managed policy, MCP
-services, hooks, and model preferences remain in effect; the launcher changes
-no saved settings. The worktree check validates the starting directory only: it
-does not make Claude an OS sandbox. Read-only jobs keep `--permission-prompts
-none`, so a request that would need interactive permission fails with
-`error_type: "permission_denied"` instead of waiting. The write receipt says
-`permission_scope: "full-access"`.
+Claude write jobs ask the person instead of skipping permissions when the CLI
+supports host prompts (`--permission-prompt-tool`): they run with
+`--input-format stream-json --permission-prompts host --permission-prompt-tool
+stdio`, under the person's own settings (allow/ask/deny rules, additional
+directories) and their `permissions.defaultMode` from managed settings (including
+`managed-settings.d/` drop-ins), user, project or local settings, or
+`--permission-mode auto` when none is set. Each `can_use_tool`
+request becomes a `waiting_on_user` job with one pending request ("Allow this
+command?" with the folder and exact command or path; Approve once, Deny, Stop
+task). Approve answers `allow` and the same session continues; Deny answers
+`deny` with a note not to retry; nothing is auto-approved. The receipt says
+`permission_scope: "ask-in-chat"`. A run that ends in success is `completed`;
+actions denied along the way (by the person, or by Claude Code's own auto-mode
+check) are listed in `denied_actions` as `{tool, summary, by}` with the agent's
+own description or the program's name, never the raw command; the live
+`activity` line names a command's program the same way. `permission_denied` is only for a run
+that did not succeed because of a denial. The final assistant message is kept
+in the job's result file regardless of the log cap, and status adds
+`activity {text, at}` (the current step) and `started_at`.
+
+Older Claude Code without host prompts keeps the previous contract:
+`--dangerously-skip-permissions`, no per-command approvals, and
+`permission_scope: "full-access"`. Managed policy, MCP services, hooks, and
+model preferences remain in effect; the launcher changes no saved settings. The
+worktree check validates the starting directory only: it does not make Claude an
+OS sandbox. Read-only jobs keep `--permission-prompts none`, so an action that
+would need interactive permission is denied instead of waiting: a run that still
+finishes is `completed` with the denial in `denied_actions`, and one that doesn't is
+`permission_denied`.
 See the official [CLI reference](https://code.claude.com/docs/en/cli-reference),
 [headless guide](https://code.claude.com/docs/en/headless), and
 [permission modes](https://code.claude.com/docs/en/permission-modes).

@@ -113,6 +113,10 @@ async function inspectCandidate(id, executable, cwd) {
     ...base, authenticated, available: authenticated, status: authenticated ? "ready" : "auth_required",
     // Private like executable: whether `--name` can label a session in Claude Code's own lists.
     ...(id === "claude" && /(?:^|\s)--name\b/.test(help.output) ? { nameFlag: true } : {}),
+    // Private too: whether write runs can ask the person through this Bridge
+    // (`--permission-prompt-tool stdio`) and run in Claude Code's auto mode.
+    ...(id === "claude" && /"host"/.test(optionHelp(help.output, "--permission-prompts")) ? { hostPrompts: true } : {}),
+    ...(id === "claude" && /"auto"/.test(optionHelp(help.output, "--permission-mode")) ? { autoMode: true } : {}),
     reason: authenticated ? "Installed and signed in. Provider availability is verified when a task runs."
       : `Sign in to ${id === "claude" ? "Claude Code" : "Codex"} locally, then retry.`,
     // Kept private by publicAgent; the native host also needs a compatible,
@@ -121,8 +125,36 @@ async function inspectCandidate(id, executable, cwd) {
   };
 }
 
-async function inspectAgent(id, cwd = process.cwd()) {
+// One option's own help text: from its flag to the next option.
+function optionHelp(help, flag) {
+  const lines = String(help || "").split(/\r?\n/);
+  const start = lines.findIndex((line) => new RegExp(`^\\s*(?:-\\w,\\s*)?${flag}\\b`).test(line));
+  if (start < 0) return "";
+  // Options start near the margin; wrapped description lines are indented far deeper.
+  const end = lines.findIndex((line, index) => index > start && /^\s{0,6}-/.test(line));
+  return lines.slice(start, end < 0 ? undefined : end).join(" ");
+}
+
+// A ready agent is reused for a minute: starting or messaging a session no
+// longer re-probes version, flags and sign-in each time. Anything not ready
+// is checked again on every call, so signing in takes effect at once.
+const READY_TTL_MS = 60_000;
+const readyCache = new Map();
+
+async function inspectAgent(id, cwd = process.cwd(), { reuse = false } = {}) {
   if (!IDS.includes(id)) throw new Error("Unknown local agent.");
+  const cached = reuse && readyCache.get(id);
+  if (cached && Date.now() - cached.at < READY_TTL_MS) {
+    try { if (fs.statSync(cached.agent.executable).mtimeMs === cached.mtime) return cached.agent; } catch {}
+  }
+  const agent = await inspectFresh(id, cwd);
+  if (agent.available && agent.executable && !process.env.SHAPES_CLAUDE_BINARY && !process.env.SHAPES_CODEX_BINARY) {
+    try { readyCache.set(id, { agent, at: Date.now(), mtime: fs.statSync(agent.executable).mtimeMs }); } catch {}
+  } else readyCache.delete(id);
+  return agent;
+}
+
+async function inspectFresh(id, cwd) {
   const paths = [];
   for (const candidate of candidates(id)) {
     try {
@@ -145,7 +177,31 @@ async function inspectAgent(id, cwd = process.cwd()) {
     status: "not_installed", reason: `Install ${id === "claude" ? "Claude Code" : "Codex"} on this computer.` };
 }
 
-function publicAgent({ executable, transport, profile, nameFlag, ...agent }) { return agent; }
+function publicAgent({ executable, transport, profile, nameFlag, hostPrompts, autoMode, ...agent }) { return agent; }
+
+// The person's own Claude Code decides what needs asking: a defaultMode in
+// their settings (managed, user or project) wins. Without one, use auto mode,
+// the Claude app's default, so their autoMode rules apply. Never bypass.
+function claudeSettingsMode(cwd, { home = os.homedir(), platform = process.platform } = {}) {
+  const managed = platform === "darwin" ? "/Library/Application Support/ClaudeCode"
+    : platform === "win32" ? path.win32.join(process.env.ProgramFiles || "C:\\Program Files", "ClaudeCode")
+      : "/etc/claude-code";
+  let dropIns = [];
+  try { dropIns = fs.readdirSync(path.join(managed, "managed-settings.d")).filter((name) => name.endsWith(".json")).sort(); } catch {}
+  const files = [
+    path.join(managed, "managed-settings.json"),
+    ...dropIns.map((name) => path.join(managed, "managed-settings.d", name)),
+    path.join(process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude"), "settings.json"),
+    ...(cwd ? [path.join(cwd, ".claude", "settings.json"), path.join(cwd, ".claude", "settings.local.json")] : []),
+  ];
+  for (const file of files) {
+    try {
+      const mode = JSON.parse(fs.readFileSync(file, "utf8"))?.permissions?.defaultMode;
+      if (typeof mode === "string" && mode) return mode;
+    } catch {}
+  }
+  return null;
+}
 
 async function listAgents(cwd) {
   const agents = await Promise.all(IDS.map((id) => inspectAgent(id, cwd)));
@@ -154,7 +210,8 @@ async function listAgents(cwd) {
 
 async function selectAgent(id, cwd) {
   if (![...IDS, "auto"].includes(id)) throw new Error("agent must be auto, codex, or claude.");
-  const inspected = await Promise.all((id === "auto" ? IDS : [id]).map((name) => inspectAgent(name, cwd)));
+  // Starts reuse a ready agent for a minute; readiness answers (listAgents) always check again.
+  const inspected = await Promise.all((id === "auto" ? IDS : [id]).map((name) => inspectAgent(name, cwd, { reuse: true })));
   const selected = inspected.find((item) => item.available);
   if (selected) return selected;
   const error = new Error(id === "auto" ? "No local agent is ready. Install and sign in to Codex or Claude Code locally."
@@ -184,6 +241,19 @@ function argumentsFor(agent, request) {
     "-a", "never", "exec", "--json", "--color", "never", "--sandbox", request.sandbox === "workspace-write" ? "danger-full-access" : "read-only",
     "-c", "sandbox_workspace_write.writable_roots=[]", "--skip-git-repo-check", "--cd", request.cwd, "-",
   ];
+  if (request.claudeHost) {
+    // The person's own Claude Code: their permission mode and rules decide,
+    // and whatever would prompt them comes to the chat as an approval.
+    const args = ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+      "--permission-prompts", "host", "--permission-prompt-tool", "stdio"];
+    if (request.permissionMode) args.push("--permission-mode", request.permissionMode);
+    if (request.resumeSessionId) args.push("--resume", request.resumeSessionId);
+    else if (request.agentSessionId) {
+      args.push("--session-id", request.agentSessionId);
+      if (request.nameFlag && request.title) args.push(`--name=${request.title}`);
+    }
+    return args;
+  }
   const args = ["--print", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"];
   // A session the person can open: a new one under the id Bridge chose, or the
   // same session continued. The name is joined to its flag so a title can't
@@ -208,4 +278,4 @@ function argumentsFor(agent, request) {
   return args;
 }
 
-module.exports = { listAgents, selectAgent, inspectAgent, publicAgent, argumentsFor, desktopClaudeCandidates, windowsCandidates, verifyInteractiveCodex };
+module.exports = { listAgents, selectAgent, inspectAgent, publicAgent, argumentsFor, claudeSettingsMode, desktopClaudeCandidates, windowsCandidates, verifyInteractiveCodex };

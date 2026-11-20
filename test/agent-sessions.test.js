@@ -273,3 +273,130 @@ test("session routes take only their own fields and answer refusals with typed e
   assert.deepEqual([idle.status, idle.body.stopped], [200, false]);
   assert.equal(f.runs().length, 1, "no refused route ran the agent");
 });
+
+// A fake Claude Code that asks its host before one Bash call, the way
+// `--permission-prompt-tool stdio` does, then finishes with what happened.
+function hostFixture(t, { settingsMode } = {}) {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "shapes-claude-host-")));
+  const work = path.join(dir, "work");
+  fs.mkdirSync(work);
+  const config = path.join(dir, "claude");
+  fs.mkdirSync(config);
+  if (settingsMode) fs.writeFileSync(path.join(config, "settings.json"), JSON.stringify({ permissions: { defaultMode: settingsMode } }));
+  const executable = path.join(dir, "fake-claude");
+  fs.writeFileSync(executable, `#!${process.execPath}
+const fs=require('node:fs');const a=process.argv.slice(2);
+if(a.includes('--version')){console.log('2.1.300 (Claude Code)');process.exit(0);}
+if(a[0]==='auth'){console.log(JSON.stringify({loggedIn:true}));process.exit(0);}
+if(a[0]==='agents'){console.log('[]');process.exit(0);}
+if(a.includes('--help')){console.log([
+  'Options:','  -p, --print                           Print response and exit',
+  '  --output-format <format>              Output format','  --verbose                             Verbose',
+  '  --permission-mode <mode>              Permission mode to use for the session',
+  '                                        (choices: "acceptEdits", "auto",','                                        "manual", "plan")',
+  '  --permission-prompts <target>         Who answers permission prompts with',
+  '                                        --print: "host" (the SDK host or','                                        --permission-prompt-tool) or "none"',
+  '  --teammate-mode <mode>                (choices: "auto", "tmux")',
+  '  --tools <tools...>                    Tools','  --strict-mcp-config                   Strict','  --mcp-config <configs...>             MCP',
+  '  --disallowedTools <tools...>          Deny','  --session-id <uuid>                   Session','  -r, --resume [value]                  Resume',
+  '  -n, --name <name>                     Name'].join('\\n'));process.exit(0);}
+fs.appendFileSync(process.env.FAKE_LOG,JSON.stringify({args:a})+'\\n');
+const out=x=>process.stdout.write(JSON.stringify(x)+'\\n');
+const id=a[a.indexOf('--session-id')+1];
+let asked=false;
+require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
+  const m=JSON.parse(line);
+  if(m.type==='user'){
+    out({type:'system',subtype:'init',session_id:id});
+    out({type:'system',subtype:'task_started',description:'Final tsc and tests'});
+    out({type:'assistant',message:{content:[{type:'tool_use',name:'Bash',input:{command:'TOKEN=abc123 curl -H "Authorization: Bearer abc123" https://example.invalid'}}]}});
+    out({type:'control_request',request_id:'req-1',request:{subtype:'can_use_tool',tool_name:'Bash',input:{command:'git commit -m "Shape page targets"',description:'Commit the change'},description:'git commit -m "Shape page targets"'}});
+    asked=true;
+  }
+  if(m.type==='control_response'&&asked){
+    const allowed=m.response.response.behavior==='allow';
+    out({type:'assistant',message:{content:[{type:'text',text:allowed?'Committed.':'Left it uncommitted.'}]}});
+    out({type:'result',subtype:'success',is_error:false,session_id:id,result:allowed?'Built it and committed.':'Built it; the commit was denied, so it is uncommitted.',
+      permission_denials:allowed?[]:[{tool_name:'Bash',tool_input:{command:'git commit -m "Shape page targets"',description:'Commit the change'}}]});
+  }
+}).on('close',()=>process.exit(0));`, { mode: 0o700 });
+  const env = { SHAPES_CLAUDE_BINARY: executable, SHAPES_CODEX_JOB_DIR: path.join(dir, "jobs"), CLAUDE_CONFIG_DIR: config, FAKE_LOG: path.join(dir, "runs.jsonl") };
+  const saved = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
+  Object.assign(process.env, env);
+  t.after(() => {
+    for (const [key, value] of Object.entries(saved)) if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const runs = () => fs.readFileSync(env.FAKE_LOG, "utf8").trim().split("\n").map(JSON.parse);
+  return { work, runs, codex: require("../src/codex") };
+}
+
+async function waitingRequest(codex, id) {
+  for (let i = 0; i < 400; i++) {
+    const status = codex.publicStatus(id);
+    if (status.state === "waiting_on_user" && status.pending_requests?.length) return status;
+    if (TERMINAL.has(status.state)) throw new Error(`Finished before asking: ${JSON.stringify(status)}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("No approval arrived.");
+}
+
+test("a Claude Code write run asks the person in the chat, in their own mode, and approving once continues the same run", async (t) => {
+  const f = hostFixture(t);
+  const start = await f.codex.startJob({ prompt: "Build and commit", cwd: f.work, agent: "claude", sandbox: "workspace-write", sessionScope: SCOPE_A, title: "Tod: targets" });
+  assert.deepEqual([start.interactive, start.permission_scope], [true, "ask-in-chat"]);
+  const waiting = await waitingRequest(f.codex, start.job_id);
+  const [request] = waiting.pending_requests;
+  assert.equal(request.title, "Allow this command?");
+  assert.match(request.message, /Commit the change/);
+  assert.ok(request.message.includes(`Folder: ${f.work}`) && request.message.includes('git commit -m "Shape page targets"'));
+  assert.deepEqual(request.choices.map((choice) => choice.label), ["Approve once", "Deny", "Stop task"]);
+  // Its current step, by program name only: never the command, which can carry secrets.
+  assert.equal(waiting.activity.text, "Running curl");
+  assert.ok(!JSON.stringify(waiting).includes("abc123"));
+  f.codex.respondJob(start.job_id, request.id, { decision: "accept" });
+  const done = await finished(f.codex, start.job_id);
+  assert.deepEqual([done.state, done.final, done.denied_actions], ["completed", "Built it and committed.", undefined]);
+  const [run] = f.runs();
+  // Their own Claude Code decides; this Bridge never skips permissions.
+  assert.ok(run.args.includes("--permission-prompt-tool") && run.args.includes("stdio"));
+  assert.deepEqual(run.args.slice(run.args.indexOf("--permission-mode"), run.args.indexOf("--permission-mode") + 2), ["--permission-mode", "auto"]);
+  assert.ok(!run.args.includes("--dangerously-skip-permissions"));
+});
+
+test("a denied approval is reported as what was denied, and the run's own result still stands", async (t) => {
+  const f = hostFixture(t, { settingsMode: "acceptEdits" });
+  const start = await f.codex.startJob({ prompt: "Build and commit", cwd: f.work, agent: "claude", sandbox: "workspace-write" });
+  const [request] = (await waitingRequest(f.codex, start.job_id)).pending_requests;
+  f.codex.respondJob(start.job_id, request.id, { decision: "decline" });
+  const done = await finished(f.codex, start.job_id);
+  assert.equal(done.state, "completed");
+  assert.equal(done.final, "Built it; the commit was denied, so it is uncommitted.");
+  assert.deepEqual(done.denied_actions, [{ tool: "Bash", summary: "Commit the change", by: "person" }]);
+  assert.ok(!JSON.stringify(done).includes("git commit"), "the raw command stays out of the receipt");
+  // A defaultMode in their settings is theirs: no mode is forced.
+  assert.ok(!f.runs()[0].args.includes("--permission-mode"));
+});
+
+test("Stop from an approval ends the run without approving anything", async (t) => {
+  const f = hostFixture(t);
+  const start = await f.codex.startJob({ prompt: "Build and commit", cwd: f.work, agent: "claude", sandbox: "workspace-write" });
+  const [request] = (await waitingRequest(f.codex, start.job_id)).pending_requests;
+  f.codex.respondJob(start.job_id, request.id, { decision: "cancel" });
+  const done = await finished(f.codex, start.job_id);
+  assert.equal(done.state, "cancelled");
+  assert.deepEqual(done.pending_requests, []);
+});
+
+test("a run that finishes with an auto-denied action is completed, with the result kept and the denial listed", async (t) => {
+  const f = claudeFixture(t);
+  // Dhruv's run on 2026-11-20: one Bash call denied, then a full success result.
+  const fake = fs.readFileSync(process.env.SHAPES_CLAUDE_BINARY, "utf8").replace(
+    "console.log(JSON.stringify({type:'system',subtype:'init',session_id:id}));",
+    "console.log(JSON.stringify({type:'system',subtype:'init',session_id:id}));console.log(JSON.stringify({type:'system',subtype:'permission_denied',tool_name:'Bash',message:'no approval surface'}));");
+  fs.writeFileSync(process.env.SHAPES_CLAUDE_BINARY, fake.replace("result:'done: '+prompt,session_id:id", "result:'done: '+prompt,session_id:id,permission_denials:[{tool_name:'Bash',tool_input:{description:'Commit and clean up'}}]"));
+  const start = await f.codex.startJob({ prompt: "Build three directions", cwd: f.work, agent: "claude", sandbox: "workspace-write" });
+  const done = await finished(f.codex, start.job_id);
+  assert.deepEqual([done.state, done.error_type, done.final, done.permission_denials], ["completed", null, "done: Build three directions", 1]);
+  assert.deepEqual(done.denied_actions, [{ tool: "Bash", summary: "Commit and clean up" }]);
+});

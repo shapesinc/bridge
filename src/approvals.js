@@ -75,9 +75,43 @@ function formFields(schema) {
   return fields;
 }
 
+// Claude Code asks its host (`--permission-prompt-tool stdio`) before a tool
+// call its own permission mode and rules didn't settle. Show the exact action
+// and folder; the person answers once for this one call.
+const CLAUDE_FILE_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
+function claudeRequest(p) {
+  const name = text(p.tool_name, 200);
+  const input = object(p.input) ? p.input : {};
+  let title, detail;
+  if (name === "Bash" && typeof input.command === "string") {
+    title = "Allow this command?";
+    detail = text(input.command, 3000);
+  } else if (CLAUDE_FILE_TOOLS.has(name) && typeof (input.file_path || input.notebook_path) === "string") {
+    title = "Allow this file change?";
+    detail = text(input.file_path || input.notebook_path, 1000);
+  } else {
+    title = `Allow Claude Code to use ${name}?`;
+    detail = text(JSON.stringify(input, null, 2).slice(0, 2000), 3000);
+  }
+  // The agent's own words for the step; the CLI's description can be the command itself, already shown.
+  const said = [input.description, p.description].find((value) => typeof value === "string" && value.trim() && value.trim() !== detail);
+  const why = said ? text(said.trim(), 500) : null;
+  const where = typeof p.cwd === "string" ? `Folder: ${text(p.cwd, 1000)}` : null;
+  return { title, message: text([why, where, detail].filter(Boolean).join("\n\n")),
+    tool: name, ...(name === "Bash" ? { command: detail } : {}), ...(typeof p.cwd === "string" ? { cwd: p.cwd } : {}) };
+}
+
 function normalizeRequest(request) {
   const p = request.params;
   if (!object(p)) throw new Error("Invalid native request.");
+  if (request.method === "claude/canUseTool") {
+    const shown = claudeRequest(p);
+    const result = { id: crypto.randomUUID(), kind: "permission", title: shown.title, message: shown.message, fields: [],
+      action: { tool: shown.tool, ...(shown.command ? { command: shown.command } : {}), ...(shown.cwd ? { cwd: shown.cwd } : {}) },
+      choices: [{ id: "accept", label: "Approve once" }, { id: "decline", label: "Deny" }, { id: "cancel", label: "Stop task" }] };
+    if (Buffer.byteLength(JSON.stringify(result)) > 16000) throw new Error("Approval request is too large.");
+    return result;
+  }
   let title, message, fields = [], kind = "permission", choices;
   if (request.method === "mcpServer/elicitation/request") {
     // URL authentication and device-verification proofs must use their native
@@ -176,6 +210,10 @@ function nativeResponse(request, display, response) {
       validateValue(field, request.params.requestedSchema?.properties[field.id], values[field.id]);
     }
   } else if (Object.keys(values).length) throw new Error("Declining does not submit answers.");
+  // Approve once allows exactly the call Claude Code asked about, unchanged.
+  if (request.method === "claude/canUseTool") return response.decision === "accept"
+    ? { behavior: "allow", updatedInput: request.params.input }
+    : { behavior: "deny", message: "The person denied this in the shapes.inc chat. Don't retry it; continue without it or explain what you need." };
   if (request.method === "mcpServer/elicitation/request") return {
     action: response.decision, content: response.decision === "accept" ? values : null,
   };
