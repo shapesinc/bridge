@@ -5,15 +5,15 @@ const path = require("node:path");
 const { execFile } = require("node:child_process");
 const { spawnOwned } = require("./owned-process");
 const { StringDecoder } = require("node:string_decoder");
-const { localEnvironment } = require("./local-workspace");
+const { agentEnvironment } = require("./login-shell-env");
 const { bundledRuntime } = require("./bundled-runtime");
 const { closeProcessGroup } = require("./process-close");
 
 // The vendor owns this standard personal profile and its credentials. Never
 // read/copy auth files, and never use the credits-funded runtime-home here.
-function personalConfiguration(profile = process.env.CODEX_HOME || path.join(os.homedir(), ".codex")) {
+function personalConfiguration(profile = agentEnvironment().CODEX_HOME || path.join(os.homedir(), ".codex")) {
   if (typeof profile !== "string" || !path.isAbsolute(profile) || /[\x00-\x1f\x7f]/.test(profile)) throw new Error("Invalid personal Codex profile.");
-  const environment = localEnvironment();
+  const environment = agentEnvironment();
   for (const key of Object.keys(environment)) if (/^(?:OPENAI_|ANTHROPIC_|SHAPES_RUNTIME_TOKEN$|SHAPES_NATIVE_TOOL_TOKEN$)/.test(key)) delete environment[key];
   environment.CODEX_HOME = profile;
   const config = { model_provider: "openai", check_for_update_on_startup: false, "analytics.enabled": false,
@@ -113,7 +113,7 @@ function openBrowser(url, { platform = process.platform, execute = execFile } = 
     const command = "Start-Process -FilePath '" + url.replaceAll("'", "''") + "'";
     args = ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(command, "utf16le").toString("base64")];
   } else { executable = "xdg-open"; args = [url]; }
-  return new Promise((resolve, reject) => execute(executable, args, { timeout: 10000, maxBuffer: 16384, windowsHide: true, env: localEnvironment() },
+  return new Promise((resolve, reject) => execute(executable, args, { timeout: 10000, maxBuffer: 16384, windowsHide: true, env: agentEnvironment() },
     (error) => error ? reject(new Error("Could not open provider sign-in.")) : resolve()));
 }
 

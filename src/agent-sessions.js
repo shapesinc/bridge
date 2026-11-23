@@ -15,7 +15,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { localEnvironment } = require("./local-workspace");
+const { agentEnvironment } = require("./login-shell-env");
 const { spawnOwned, signalOwned } = require("./owned-process");
 const { closeProcessGroup } = require("./process-close");
 
@@ -103,7 +103,7 @@ function runBounded(executable, args, { cwd = os.homedir(), timeoutMs = 5000, ma
     };
     const stop = () => { try { signalOwned(child, "SIGKILL"); } catch {} finish(null, true); };
     try {
-      child = spawnOwned(executable, args, { cwd, env: localEnvironment(), stdio: ["ignore", "pipe", "ignore"] });
+      child = spawnOwned(executable, args, { cwd, env: agentEnvironment(), stdio: ["ignore", "pipe", "ignore"] });
       child.stdout.on("data", (part) => { output += part; if (output.length > maxBytes) stop(); });
       child.once("error", () => finish(null, true));
       child.once("close", (code) => finish(code));
@@ -130,7 +130,7 @@ async function claudeActiveSessions(executable, options) {
 }
 
 function claudeProjectsDirectory() {
-  return path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "projects");
+  return path.join(agentEnvironment().CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude"), "projects");
 }
 
 // Claude Code names a project folder after its path with every other character
@@ -200,7 +200,7 @@ function claudeTranscriptMessages(file, limit) {
 // One short-lived Codex app-server: initialize, then the given calls in order.
 async function codexAppServer(executable, cwd, calls, { timeoutMs = 20000, maxLineBytes = 8 * 1024 * 1024 } = {}) {
   const child = spawnOwned(executable, ["app-server", "--listen", "stdio://"],
-    { cwd, env: localEnvironment(), detached: true, stdio: ["pipe", "pipe", "ignore"] });
+    { cwd, env: agentEnvironment(), detached: true, stdio: ["pipe", "pipe", "ignore"] });
   const waiting = new Map();
   let buffer = "", nextId = 0, failure;
   const fail = (error) => {

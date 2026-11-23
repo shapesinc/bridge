@@ -16,6 +16,27 @@ availability, quota, or task success. No prompt is sent during discovery, and
 no account identity, authentication output, or credentials are copied to shapes.inc.
 Sign in to the agent locally if it reports `auth_required`.
 
+**Sign-in from your shell profile.** The desktop app starts from launchd, which
+never reads `~/.zprofile` or `~/.zshrc`. On macOS the Bridge reads your login
+shell's environment once (`$SHELL -l -i -c`, 5 s limit, cached ten minutes, read
+again at most every 15 s while an agent looks signed out; started in the
+background when the Bridge starts) and keeps only the names Claude Code and Codex
+document for sign-in and provider choice: `ANTHROPIC_*`, `CLAUDE_CODE_OAUTH_*`,
+`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_USE_*`/`CLAUDE_CODE_SKIP_*`, `CLAUDE_CODE_CLIENT_*`,
+`AWS_*`, `CLOUD_ML_REGION`, `GOOGLE_APPLICATION_CREDENTIALS`, `CODEX_HOME`,
+`OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENAI_BASE_URL` and each Codex provider's
+`env_key` from `config.toml`. They go only to discovery checks and the agent
+processes; anything the Bridge's own environment already sets wins. They are never
+logged, written to job files or receipts, or sent to shapes.inc. Windows apps
+already inherit the user's environment, so Windows skips this.
+`SHAPES_LOGIN_SHELL` points the read at another shell (tests, support checks).
+
+Claude Code on the command line has its own sign-in, separate from the Claude
+app's, and documents no way to reuse the app's. A Mac with only the Claude app
+finds its bundled Claude Code signed out until `claude auth login` runs once; the
+shapes.inc app's **sign in to Claude Code** link runs exactly that, and the next
+request checks again (signed-out answers are never cached).
+
 On macOS, Codex discovery checks its ChatGPT/Codex app bundles and PATH. Claude
 discovery checks PATH, `~/.local/bin`, legacy `~/.claude/local` installs,
 Homebrew locations, and bounded version directories under Claude Desktop's
@@ -94,7 +115,10 @@ The shapes.inc backend sends `workspace_write: true` for the person's own
 computer unless they asked for a look only.
 
 For edits, set `workspace_write: true` and any absolute folder: a primary
-checkout, a worktree or a plain directory. The launcher has no worktree rule
+checkout, a worktree or a plain directory. The folder is stored and run in its
+on-disk spelling (`/applications/shapesinc/app` becomes `/Applications/shapesinc/app`,
+symlinks resolved), because Claude Code, Codex and the Claude app key sessions and
+saved per-folder modes by the exact path; a mapped Windows drive keeps its letter. The launcher has no worktree rule
 (removed 2026-11-23: it made a shape fall back to read-only and box in the
 person's Claude Code). Whether to branch, use a worktree or work in a sibling
 repository is the agent's call under the person's own settings and instructions,

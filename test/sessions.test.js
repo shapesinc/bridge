@@ -535,3 +535,17 @@ test("funded provider failures preserve the cause without personal account advic
     assert.equal(repeated.body.job_id, started.body.job_id);
   }
 });
+
+test("a session saved with the folder in another letter case is still the same session", async (t) => {
+  const f = await fixture(t);
+  const typed = f.directory.toUpperCase();
+  if (!fs.existsSync(typed) || typed === f.directory) { t.skip("this file system tells letter case apart"); return; }
+  const first = await f.request("/sessions/create", { ...f.create, cwd: typed });
+  assert.equal(first.status, 200);
+  assert.equal(first.body.cwd, fs.realpathSync.native(f.directory));
+  // A record written before folders were stored in their on-disk spelling.
+  const record = fs.readdirSync(f.state, { recursive: true }).map((name) => path.join(f.state, name))
+    .find((name) => name.endsWith(`${f.identity.session_id}.json`));
+  fs.writeFileSync(record, JSON.stringify({ ...JSON.parse(fs.readFileSync(record, "utf8")), cwd: typed }));
+  assert.equal((await f.request("/sessions/create", { ...f.create, cwd: typed })).status, 200);
+});

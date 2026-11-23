@@ -44,6 +44,7 @@ const { createSession, startSessionTurn, readSession, sessionEvents } = require(
 const { runtimeCapabilities } = require("./runtime-capabilities");
 const { runCommand: startCommandProcess } = require("./command-process");
 const { commandStatus, cancelCommand } = require("./commands");
+const { loadLoginShellAuth } = require("./login-shell-env");
 
 const MAX_OUTPUT = 20000;
 const MAX_FILE_READ = 100000;
@@ -542,6 +543,9 @@ function startServer({ port, token, computerControl = createComputerControl(), p
     }
   });
 
+  // The person's sign-in settings from their login shell, read in the background
+  // so the first Claude Code or Codex task doesn't wait on their profile.
+  loadLoginShellAuth().catch(() => {});
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", () => resolve(server));
