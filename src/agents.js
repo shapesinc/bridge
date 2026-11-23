@@ -145,12 +145,12 @@ const readyCache = new Map();
 async function inspectAgent(id, cwd = process.cwd(), { reuse = false } = {}) {
   if (!IDS.includes(id)) throw new Error("Unknown local agent.");
   const cached = reuse && readyCache.get(id);
-  if (cached && Date.now() - cached.at < READY_TTL_MS) {
+  if (cached && Date.now() - cached.at < READY_TTL_MS && cached.profile === loginShellAuthVersion()) {
     try { if (fs.statSync(cached.agent.executable).mtimeMs === cached.mtime) return cached.agent; } catch {}
   }
   const agent = await inspectFresh(id, cwd);
   if (agent.available && agent.executable && !process.env.SHAPES_CLAUDE_BINARY && !process.env.SHAPES_CODEX_BINARY) {
-    try { readyCache.set(id, { agent, at: Date.now(), mtime: fs.statSync(agent.executable).mtimeMs }); } catch {}
+    try { readyCache.set(id, { agent, at: Date.now(), mtime: fs.statSync(agent.executable).mtimeMs, profile: loginShellAuthVersion() }); } catch {}
   } else readyCache.delete(id);
   return agent;
 }

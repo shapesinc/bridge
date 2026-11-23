@@ -2,8 +2,8 @@
 
 // "/applications/shapesinc/app" opens the same folder on macOS and Windows, but
 // Claude Code, Codex and the Claude app key sessions and saved permission modes
-// by the exact spelling (2026-11-23, job b56e64c0: the Bridge missed Dhruv's
-// saved mode for /Applications/shapesinc/app and stored the lowercase path).
+// by the exact spelling: a folder typed in lowercase used to miss its saved
+// Claude app mode and be stored as typed.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");

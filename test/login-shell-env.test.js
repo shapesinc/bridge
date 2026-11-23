@@ -62,6 +62,26 @@ test("a profile that hangs never holds up a task", { skip: !POSIX }, async (t) =
   assert.ok(Date.now() - started < 3000);
 });
 
+test("a profile that leaves something running in the background still answers at once", { skip: !POSIX }, async (t) => {
+  const { shell } = stand_in_shell(t, "export ANTHROPIC_API_KEY=from-profile\n(sleep 30) &");
+  const started = Date.now();
+  const values = await shellEnv.readShell(shell, { home: os.tmpdir(), timeoutMs: 4000 });
+  assert.equal(values?.ANTHROPIC_API_KEY, "from-profile");
+  assert.ok(Date.now() - started < 3000);
+});
+
+test("a reread that fails keeps the sign-in the last read found", async (t) => {
+  shellEnv.resetLoginShellAuth();
+  t.after(() => shellEnv.resetLoginShellAuth());
+  let clock = 5_000_000, fail = false;
+  const read = async () => (fail ? null : { CLAUDE_CODE_OAUTH_TOKEN: "kept" });
+  const options = { shell: "/bin/sh", read, now: () => clock, platform: "darwin" };
+  await shellEnv.loadLoginShellAuth(options);
+  fail = true; clock += 11 * 60_000;
+  assert.deepEqual(await shellEnv.loadLoginShellAuth(options), { CLAUDE_CODE_OAUTH_TOKEN: "kept" });
+  assert.equal(shellEnv.agentEnvironment({}).CLAUDE_CODE_OAUTH_TOKEN, "kept");
+});
+
 test("one read is shared and reused; a signed-out check reads the profile again", async (t) => {
   shellEnv.resetLoginShellAuth();
   t.after(() => shellEnv.resetLoginShellAuth());

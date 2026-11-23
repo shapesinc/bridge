@@ -8,6 +8,7 @@ const { StringDecoder } = require("node:string_decoder");
 const { selectAgent, argumentsFor, verifyInteractiveCodex, claudePermissionMode } = require("./agents");
 const agentImages = require("./agent-images");
 const { normalizeRequest, nativeResponse } = require("./approvals");
+const { localEnvironment } = require("./local-workspace");
 const { agentEnvironment } = require("./login-shell-env");
 const { bundledRuntime, launchConfiguration } = require("./bundled-runtime");
 const { spawnOwned, signalOwned } = require("./owned-process");
@@ -368,7 +369,8 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     const child = spawnOwned(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
       // Durable jobs outlive a short CLI start request. On Windows the native
       // app's enclosing Job still owns the full runtime and every nested job.
-      parentPid: null, detached: true, stdio: "ignore", env: { ...agentEnvironment(), SHAPES_CODEX_JOB_DIR: root(),
+      parentPid: null, detached: true, stdio: "ignore", // Profile sign-in settings are for the person's own agents, never a credits-funded built-in session.
+      env: { ...(builtIn ? localEnvironment() : agentEnvironment()), SHAPES_CODEX_JOB_DIR: root(),
         ...(builtIn ? { SHAPES_RUNTIME_TOKEN: builtIn.token, SHAPES_NATIVE_TOOL_TOKEN: builtIn.toolToken || "" } : {}) },
     });
     await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });

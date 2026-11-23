@@ -333,13 +333,14 @@ function startServer({ port, token, computerControl = createComputerControl(), p
           const cwd = body.cwd ? expandHome(body.cwd) : process.cwd();
           const agent = codexOnly ? "codex" : body.agent || "auto";
           const images = normalizeImages(body.images);
-          log(`AGENT START (${agent}, cwd=${cwd}, scope=${body.workspace_write ? "workspace-write" : "read-only"}${images.length ? `, images=${images.length}` : ""})`);
           const result = await startJob({
             prompt: body.prompt, cwd, agent, images,
             interactive: body.interactive === true, requestKey: body.request_key,
             sandbox: body.workspace_write ? "workspace-write" : "read-only",
             ...(body.session_scope !== undefined ? { sessionScope: body.session_scope, title: body.title, startedBy: body.started_by } : {}),
           });
+          // The folder as the job uses it: its on-disk spelling.
+          log(`AGENT START (${agent}, cwd=${result.cwd || cwd}, scope=${body.workspace_write ? "workspace-write" : "read-only"}${images.length ? `, images=${images.length}` : ""})`);
           if (result.deduplicated) log(`AGENT START deduplicated: ${result.job_id}`);
           return sendJson(res, result.deduplicated ? 200 : 202, result);
         } catch (err) {

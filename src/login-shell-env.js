@@ -31,6 +31,7 @@ const MAX_OUTPUT = 1024 * 1024;
 const FRESH_MS = 10 * 60_000;
 const RETRY_MS = 60_000;
 const MARK = "__SHAPES_LOGIN_ENV_6c1f__";
+const END = "__SHAPES_LOGIN_ENV_END_6c1f__";
 
 let cached = { values: {}, at: 0, ok: false };
 let pending = null;
@@ -56,8 +57,10 @@ function parseEnvironment(output) {
   const text = Buffer.isBuffer(output) ? output.toString("utf8") : String(output);
   const start = text.lastIndexOf(`${MARK}\n`);
   if (start < 0) return null;
+  let body = text.slice(start + MARK.length + 1);
+  if (body.endsWith(END)) body = body.slice(0, -END.length);
   const values = {};
-  for (const entry of text.slice(start + MARK.length + 1).split("\0")) {
+  for (const entry of body.split("\0")) {
     const at = entry.indexOf("=");
     if (at > 0) values[entry.slice(0, at)] = entry.slice(at + 1);
   }
@@ -91,13 +94,20 @@ function readShell(shell, { home, spawnProcess = spawnOwned, signal = signalOwne
     };
     try {
       // Interactive login, as a new terminal window: exports in ~/.zshrc count.
-      child = spawnProcess(shell, ["-l", "-i", "-c", `printf '\\n%s\\n' ${MARK}; exec /usr/bin/env -0`], {
-        cwd: home, env: { ...localEnvironment(), TERM: "dumb" }, stdio: ["ignore", "pipe", "ignore"],
+      // Only the basics a new window starts with; none of this process's own settings.
+      const base = localEnvironment();
+      const env = { TERM: "dumb" };
+      for (const name of ["HOME", "USER", "LOGNAME", "SHELL", "PATH", "TMPDIR", "LANG", "LC_ALL", "ZDOTDIR"]) if (base[name]) env[name] = base[name];
+      child = spawnProcess(shell, ["-l", "-i", "-c", `printf '\\n%s\\n' ${MARK}; /usr/bin/env -0; printf '%s' ${END}`], {
+        cwd: home, env, stdio: ["ignore", "pipe", "ignore"],
       });
       child.stdout.on("data", (part) => {
         size += part.length;
         if (size > MAX_OUTPUT) { finish(null); return; }
         chunks.push(part);
+        // Done once the end marker arrives: something the profile started in
+        // the background may keep the output open long after the shell exits.
+        if (Buffer.concat(chunks.slice(-2)).toString("utf8").endsWith(END)) finish(parseEnvironment(Buffer.concat(chunks)));
       });
       child.once("error", () => finish(null));
       child.once("close", () => finish(parseEnvironment(Buffer.concat(chunks))));
@@ -116,13 +126,13 @@ async function loadLoginShellAuth({ platform = process.platform, env = process.e
   pending = (async () => {
     const login = shell === undefined ? loginShell({ env }) : shell;
     const all = login ? await read(login, { home }) : null;
+    // A read that fails keeps what the last good one found, and is retried sooner.
+    if (!all) { cached = { ...cached, at: now(), ok: false }; return cached.values; }
     const values = {};
-    if (all) {
-      const extra = codexKeyNames({ ...all, ...env }, home);
-      for (const [name, value] of Object.entries(all)) if (wanted(name, extra) && value) values[name] = value;
-    }
+    const extra = codexKeyNames({ ...all, ...env }, home);
+    for (const [name, value] of Object.entries(all)) if (wanted(name, extra) && value) values[name] = value;
     if (JSON.stringify(Object.entries(values).sort()) !== JSON.stringify(Object.entries(cached.values).sort())) version += 1;
-    cached = { values, at: now(), ok: Boolean(all) };
+    cached = { values, at: now(), ok: true };
     return values;
   })();
   try { return await pending; } finally { pending = null; }
@@ -147,5 +157,5 @@ function agentEnvironment(base = localEnvironment()) {
 
 function resetLoginShellAuth() { cached = { values: {}, at: 0, ok: false }; pending = null; }
 
-module.exports = { loadLoginShellAuth, refreshLoginShellAuth, loginShellAuthVersion, agentEnvironment, parseEnvironment, readShell, loginShell, wanted, codexKeyNames,
+module.exports = { END, loadLoginShellAuth, refreshLoginShellAuth, loginShellAuthVersion, agentEnvironment, parseEnvironment, readShell, loginShell, wanted, codexKeyNames,
   resetLoginShellAuth, MARK };
