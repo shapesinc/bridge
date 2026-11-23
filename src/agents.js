@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { localEnvironment } = require("./local-workspace");
-const { agentEnvironment, loadLoginShellAuth, refreshLoginShellAuth } = require("./login-shell-env");
+const { agentEnvironment, loadLoginShellAuth, refreshLoginShellAuth, loginShellAuthVersion } = require("./login-shell-env");
 const { spawnOwned, signalOwned } = require("./owned-process");
 
 const IDS = ["codex", "claude"];
@@ -158,10 +158,11 @@ async function inspectAgent(id, cwd = process.cwd(), { reuse = false } = {}) {
 async function inspectFresh(id, cwd) {
   // Sign-in settings from their login shell, before any probe decides "signed out".
   await loadLoginShellAuth();
+  const since = loginShellAuthVersion();
   const found = await inspectInstalls(id, cwd);
   // Signed out: their profile may have just gained a token or config folder
   // ("add this to ~/.zshrc, then ask again"). Read it again and check once more.
-  if (found.status === "auth_required" && await refreshLoginShellAuth()) return inspectInstalls(id, cwd);
+  if (found.status === "auth_required" && await refreshLoginShellAuth({ since })) return inspectInstalls(id, cwd);
   return found;
 }
 

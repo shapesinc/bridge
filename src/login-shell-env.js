@@ -34,6 +34,8 @@ const MARK = "__SHAPES_LOGIN_ENV_6c1f__";
 
 let cached = { values: {}, at: 0, ok: false };
 let pending = null;
+// Bumped whenever what the profile holds for sign-in changes.
+let version = 0;
 
 function wanted(name, extra) {
   return NAME.test(name) && (NAMES.has(name) || extra.has(name) || PREFIXES.some((prefix) => name.startsWith(prefix)));
@@ -119,6 +121,7 @@ async function loadLoginShellAuth({ platform = process.platform, env = process.e
       const extra = codexKeyNames({ ...all, ...env }, home);
       for (const [name, value] of Object.entries(all)) if (wanted(name, extra) && value) values[name] = value;
     }
+    if (JSON.stringify(Object.entries(values).sort()) !== JSON.stringify(Object.entries(cached.values).sort())) version += 1;
     cached = { values, at: now(), ok: Boolean(all) };
     return values;
   })();
@@ -126,14 +129,15 @@ async function loadLoginShellAuth({ platform = process.platform, env = process.e
 }
 
 // Read the profile again when an agent looks signed out, at most every 15 seconds.
-// True when what it holds for sign-in changed.
-async function refreshLoginShellAuth({ minAgeMs = 15_000, now = Date.now, ...options } = {}) {
+// True when what it holds for sign-in differs from the read `since` came from,
+// even when a check running alongside did the rereading.
+async function refreshLoginShellAuth({ minAgeMs = 15_000, now = Date.now, since = version, ...options } = {}) {
   if (pending) await pending.catch(() => {});
-  if (cached.at && now() - cached.at < minAgeMs) return false;
-  const before = JSON.stringify(Object.entries(cached.values).sort());
-  const after = await loadLoginShellAuth({ ...options, now, force: true });
-  return JSON.stringify(Object.entries(after).sort()) !== before;
+  if (!cached.at || now() - cached.at >= minAgeMs) await loadLoginShellAuth({ ...options, now, force: true });
+  return version !== since;
 }
+
+function loginShellAuthVersion() { return version; }
 
 // The environment for the person's own Claude Code or Codex: what this process
 // already has wins, then their login shell's sign-in settings fill the gaps.
@@ -143,5 +147,5 @@ function agentEnvironment(base = localEnvironment()) {
 
 function resetLoginShellAuth() { cached = { values: {}, at: 0, ok: false }; pending = null; }
 
-module.exports = { loadLoginShellAuth, refreshLoginShellAuth, agentEnvironment, parseEnvironment, readShell, loginShell, wanted, codexKeyNames,
+module.exports = { loadLoginShellAuth, refreshLoginShellAuth, loginShellAuthVersion, agentEnvironment, parseEnvironment, readShell, loginShell, wanted, codexKeyNames,
   resetLoginShellAuth, MARK };

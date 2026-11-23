@@ -78,6 +78,10 @@ test("one read is shared and reused; a signed-out check reads the profile again"
   assert.equal(await shellEnv.refreshLoginShellAuth({ ...options }), true);
   assert.equal(shellEnv.agentEnvironment({}).ANTHROPIC_API_KEY, "added");
   assert.equal(reads, 2);
+  // Claude Code and Codex are checked side by side: the one that didn't reread still sees the change.
+  const since = shellEnv.loginShellAuthVersion() - 1;
+  assert.equal(await shellEnv.refreshLoginShellAuth({ ...options, since }), true);
+  assert.equal(reads, 2);
   // Windows apps already have the user's environment: no shell.
   assert.deepEqual(await shellEnv.loadLoginShellAuth({ ...options, platform: "win32", force: true }), {});
 });
