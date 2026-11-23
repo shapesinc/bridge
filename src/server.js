@@ -45,7 +45,6 @@ const { runtimeCapabilities } = require("./runtime-capabilities");
 const { runCommand: startCommandProcess } = require("./command-process");
 const { commandStatus, cancelCommand } = require("./commands");
 
-const MAX_OUTPUT = 20000;
 const MAX_FILE_READ = 100000;
 const MAX_DIRECTORY_ENTRIES = 2000;
 
@@ -104,11 +103,6 @@ async function waitForCodex(id, req, res, expectedAgent, immediate = false) {
 
 function log(msg) {
   process.stdout.write(`[bridge] ${msg}\n`);
-}
-
-function tail(value, max = MAX_OUTPUT) {
-  if (typeof value !== "string") return value;
-  return value.length > max ? value.slice(-max) : value;
 }
 
 function sendJson(res, status, body) {

@@ -41,13 +41,14 @@ test("worker persists the accepted command outcome when a cancellation arrives d
 test("legacy receipt lookup preserves an unproven observer outcome after settlement", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-legacy-outcome-"));
   try {
-    const result = { exit_code: -1, stdout: "", stderr: "observer failed", stopped: null, cleanup_confirmed: false,
-      outcome_unknown: true, error_type: "command_exit_unconfirmed" };
-    const source = `const primitive=require.resolve(${JSON.stringify(path.resolve(__dirname, "../src/command-process"))});
-      require.cache[primitive]={exports:{runCommand:()=>({result:Promise.resolve(${JSON.stringify(result)}),snapshot:()=>({}),cancel(){}})}};
-      const commands=require(${JSON.stringify(path.resolve(__dirname, "../src/commands"))});
-      const first=commands.startCommand({scope_id:'fixture',request_key:'once',cmd:'never executed'});
-      setImmediate(()=>console.log(JSON.stringify(commands.commandStatus({command_id:first.command_id,scope_id:'fixture'}))));`;
+    const id = "a".repeat(64);
+    const root = path.join(directory, "commands");
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(root, `${id}.json`), JSON.stringify({ command_id: id, scope_id: "fixture", fingerprint: null,
+      state: "failed", exit_code: -1, stdout: "", stderr: "observer failed", cleanup_confirmed: false,
+      outcome_unknown: true, error_type: "command_exit_unconfirmed" }));
+    const source = `const commands=require(${JSON.stringify(path.resolve(__dirname, "../src/commands"))});
+      console.log(JSON.stringify(commands.commandStatus({command_id:${JSON.stringify(id)},scope_id:'fixture'})));`;
     const child = spawnSync(process.execPath, ["-e", source], { timeout: 5000, encoding: "utf8", windowsHide: true,
       env: { ...process.env, SHAPES_BRIDGE_HOME: directory } });
     assert.equal(child.status, 0, child.stderr);
