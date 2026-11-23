@@ -4,7 +4,6 @@
 // Codex with the task: the screenshot or wireframe they attached is part of
 // what they asked. The authenticated backend reads the persisted message and
 // sends the bytes; this computer fetches nothing and reads no other file.
-const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -49,11 +48,6 @@ function normalizeImages(value) {
   });
 }
 
-// Part of a start's request fingerprint: the same retry carries the same images.
-function imagesDigest(images) {
-  return images.map((image) => `${image.media_type}:${crypto.createHash("sha256").update(image.bytes).digest("hex")}`);
-}
-
 // Private copies in the job folder, so the agent can also open or copy them.
 function saveImages(directory, images, writePrivate) {
   if (!images.length) return [];
@@ -87,4 +81,4 @@ function codexInput(prompt, saved) {
   return { text: prompt + imageNote(saved), localImages: (saved || []).map((image) => image.path) };
 }
 
-module.exports = { normalizeImages, imagesDigest, saveImages, claudeUserMessage, codexInput, imageNote, MAX_IMAGES };
+module.exports = { normalizeImages, saveImages, claudeUserMessage, codexInput, imageNote, MAX_IMAGES };

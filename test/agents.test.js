@@ -194,8 +194,10 @@ test("Claude write mode works in the person's own checkout and enables per-run e
   fs.writeFileSync(settings, rules);
   const result = await done((await f.start({ sandbox: "workspace-write", cwd: worktree })).job_id);
   assert.equal(result.state, "completed");
-  assert.equal(result.permission_scope, "full-access");
-  assert.deepEqual(JSON.parse(result.final), ["--print", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none", "--dangerously-skip-permissions"]);
+  // Without host prompts their own settings still decide (here defaultMode plan, applied by
+  // Claude Code itself): nothing is bypassed; what would ask is denied and reported.
+  assert.equal(result.permission_scope, "own-settings");
+  assert.deepEqual(JSON.parse(result.final), ["--print", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"]);
   assert.equal(fs.readFileSync(settings, "utf8"), rules);
 });
 
@@ -321,6 +323,10 @@ test("write jobs run the local agents with full access and no approval prompts; 
   assert.deepEqual(codexWrite.slice(0, 2), ["-a", "never"]);
   const codexRead = argumentsFor("codex", { sandbox: "read-only", cwd: "/w" });
   assert.equal(codexRead[codexRead.indexOf("--sandbox") + 1], "read-only");
-  assert.ok(argumentsFor("claude", { sandbox: "workspace-write", cwd: "/w" }).includes("--dangerously-skip-permissions"));
-  assert.ok(!argumentsFor("claude", { sandbox: "read-only", cwd: "/w" }).includes("--dangerously-skip-permissions"));
+  // Claude Code never skips the person's own permissions, with or without host prompts.
+  for (const sandbox of ["workspace-write", "read-only"]) {
+    assert.ok(!argumentsFor("claude", { sandbox, cwd: "/w" }).includes("--dangerously-skip-permissions"));
+  }
+  const ownMode = argumentsFor("claude", { sandbox: "workspace-write", cwd: "/w", permissionMode: "auto" });
+  assert.deepEqual(ownMode.slice(ownMode.indexOf("--permission-mode"), ownMode.indexOf("--permission-mode") + 2), ["--permission-mode", "auto"]);
 });

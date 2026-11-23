@@ -277,8 +277,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     .update(JSON.stringify([prompt, cwd, sandbox, timeout, agent, interactive,
       ...(builtIn ? [builtIn.sessionId, builtIn.scopeId, builtIn.gateway.model] : []),
       ...(input ? [input] : []),
-      ...(sessionScope ? [sessionScope, resumeSessionId || null, sessionTitle || null] : []),
-      ...(images.length ? [agentImages.imagesDigest(images)] : [])])).digest("hex");
+      ...(sessionScope ? [sessionScope, resumeSessionId || null, sessionTitle || null] : [])])).digest("hex");
   if (requestKey && fs.existsSync(root())) {
     const existing = existingRequest(requestKey, fingerprint);
     if (existing) return { ...publicStatus(existing), deduplicated: true };
@@ -301,7 +300,9 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
   // skipping permissions, in the person's own permission mode; read-only runs
   // (only when the person asked for no changes) stay limited to read-only tools.
   const claudeHost = agent === "claude" && sandbox === "workspace-write" && selected.hostPrompts === true;
-  const permissionMode = claudeHost ? claudePermissionMode(cwd, { autoMode: selected.autoMode }) : undefined;
+  // Every Claude Code write run uses the person's own mode, with or without host prompts.
+  const permissionMode = agent === "claude" && sandbox === "workspace-write"
+    ? claudePermissionMode(cwd, { autoMode: selected.autoMode }) : undefined;
   if (claudeHost) interactive = true;
   const executable = selected.executable;
   const id = crypto.randomUUID();
@@ -325,7 +326,8 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     ...(builtIn ? { gateway: builtIn.gateway, resumeThreadId, usageBaseline } : {}),
     // The person's own Codex picks a model this account offers.
     ...(!builtIn && agent === "codex" && selected.transport !== "bundled_personal" ? { pickAvailableModel: true } : {}),
-    ...(claudeHost ? { claudeHost: true, ...(permissionMode ? { permissionMode } : {}) } : {}),
+    ...(claudeHost ? { claudeHost: true } : {}),
+    ...(permissionMode ? { permissionMode } : {}),
     ...(sessionScope ? { sessionScope, title: sessionTitle, startedBy, agentSessionId, resumeSessionId,
       ...(agent === "claude" && selected.nameFlag ? { nameFlag: true } : {}) } : {}) }));
   saveState(directory, state);
@@ -373,10 +375,10 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
 }
 
 // Read-only tools; the person's own Claude Code permissions with approvals
-// asked in chat; or (older Claude Code) skipped permissions.
+// asked in chat; or (older Claude Code) their own permissions, prompts denied.
 function claudeScope(sandbox, host) {
   if (sandbox === "read-only") return "read-only-tools";
-  return host ? "ask-in-chat" : "full-access";
+  return host ? "ask-in-chat" : "own-settings";
 }
 
 function listJobs({ requestKey, limit = 10, agent } = {}) {

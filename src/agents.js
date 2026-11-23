@@ -319,11 +319,10 @@ function argumentsFor(agent, request) {
     // https://code.claude.com/docs/en/cli-reference
     args.push("--permission-mode", "dontAsk", "--tools", "Read,Grep,Glob",
       "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disallowedTools", "mcp__*");
-  } else {
-    // Full autonomy for this task: no permission prompts, no per-command
-    // approvals. The person already granted this computer to the chat.
-    // https://code.claude.com/docs/en/cli-reference
-    args.push("--dangerously-skip-permissions");
+  } else if (request.permissionMode) {
+    // A CLI without host prompts: the person's own mode and rules still decide;
+    // what would need asking is denied and reported, never bypassed.
+    args.push("--permission-mode", request.permissionMode);
   }
   return args;
 }

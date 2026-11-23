@@ -172,9 +172,10 @@ that did not succeed because of a denial. The final assistant message is kept
 in the job's result file regardless of the log cap, and status adds
 `activity {text, at}` (the current step) and `started_at`.
 
-Older Claude Code without host prompts keeps the previous contract:
-`--dangerously-skip-permissions`, no per-command approvals, and
-`permission_scope: "full-access"`. Managed policy, MCP services, hooks, and
+Older Claude Code without host prompts still never skips permissions: it runs
+in the person's own mode (the same choice as above) with `--permission-prompts
+none`, so what would need asking is denied and listed in `denied_actions`, and
+`permission_scope: "own-settings"`. Managed policy, MCP services, hooks, and
 model preferences remain in effect; the launcher changes no saved settings.
 Read-only jobs keep `--permission-prompts none`, so an action that
 would need interactive permission is denied instead of waiting: a run that still
@@ -190,8 +191,9 @@ files) and goes with the task: Claude Code gets them as image blocks in the same
 stream-json user message (read-only runs switch to `--input-format stream-json`
 for this), Codex as `localImage` inputs on the app-server or `--image=<path>` on
 `codex exec`. The prompt also names the saved copies so the agent can open or
-copy them. The receipt and status say `images: <n>`; they are part of the
-request fingerprint, so a retry with different images is a different request.
+copy them. The receipt and status say `images: <n>`. Images are not part of the
+request fingerprint: they come from the same chat message, so a retry whose
+download went differently is still the same request and keeps its first job.
 `/capabilities` advertises `features.agent_images` and
 `features.agent_any_folder`.
 

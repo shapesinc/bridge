@@ -105,7 +105,7 @@ test("a run with no images keeps the plain prompt", async (t) => {
   assert.ok(!args.includes("--input-format"));
 });
 
-test("images are checked: type, signature, count and size; a retry with other images is a different request", async (t) => {
+test("images are checked: type, signature, count and size; a retry of the same request keeps its first job", async (t) => {
   const { normalizeImages } = require("../src/agent-images");
   assert.deepEqual(normalizeImages(undefined), []);
   assert.throws(() => normalizeImages([image(JPEG, "image/png")]), /does not match/);
@@ -122,8 +122,11 @@ test("images are checked: type, signature, count and size; a retry with other im
   const retry = await f.codex.startJob({ prompt: "Same words", cwd: f.work, agent: "claude", sandbox: "workspace-write", requestKey: key,
     images: [image(PNG, "image/png")] });
   assert.equal(retry.job_id, first.job_id);
-  await assert.rejects(f.codex.startJob({ prompt: "Same words", cwd: f.work, agent: "claude", sandbox: "workspace-write", requestKey: key,
-    images: [image(JPEG, "image/jpeg")] }));
+  // Images come from the same chat message; a download that went differently on a
+  // retry is still that request, never a refusal or a second run.
+  const other = await f.codex.startJob({ prompt: "Same words", cwd: f.work, agent: "claude", sandbox: "workspace-write", requestKey: key,
+    images: [image(JPEG, "image/jpeg")] });
+  assert.equal(other.job_id, first.job_id);
   await finished(f.codex, first.job_id);
 });
 
