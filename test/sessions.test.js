@@ -151,6 +151,8 @@ test("typed original input survives authenticated dispatch, retry, restart and s
   assert.equal(first.state, "completed");
   const stored = path.join(f.jobs, start.body.job_id, "request.json");
   assert.deepEqual(JSON.parse(fs.readFileSync(stored)).input, input);
+  // Built-in sessions run on shapes.inc credits and keep their 30-minute deadline.
+  assert.equal(JSON.parse(fs.readFileSync(stored)).timeout, 1800);
   assert.equal(fs.statSync(stored).mode & 0o777, 0o600);
   assert.equal((await f.request(`/agents/jobs?request_key=${body.request_key}`)).body.jobs[0].task_preview.includes("base64"), false);
   assert.equal((await f.request("/agents/start", body)).body.job_id, start.body.job_id);

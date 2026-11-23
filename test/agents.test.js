@@ -238,6 +238,43 @@ test("Claude requires an explicit successful result and exit zero; a denied acti
   });
 });
 
+// The supervisor's long timers fire within milliseconds, so a default deadline
+// would end a run at once. Only tests can do this: the app's host drops NODE_OPTIONS.
+function fastClock(t, dir) {
+  const preload = path.join(dir, "fast-clock.js");
+  fs.writeFileSync(preload, "const later=global.setTimeout;global.setTimeout=(fn,ms,...rest)=>later(fn,ms>=600000?10:ms,...rest);\n");
+  const previous = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = `${previous ? `${previous} ` : ""}--require ${JSON.stringify(preload)}`;
+  t.after(() => { if (previous === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = previous; });
+}
+
+test("the person's own Claude Code works past any deadline unless its start sets one", async (t) => {
+  await t.test("no deadline", async (t) => {
+    const f = fixture(t, { claude: { body: `setTimeout(()=>{${COMPLETE}},800);` } });
+    fastClock(t, f.dir);
+    const result = await done((await f.start()).job_id);
+    assert.deepEqual([result.state, result.error_type], ["completed", null]);
+  });
+  await t.test("a deadline the start asked for", async (t) => {
+    const f = fixture(t, { claude: { body: `setTimeout(()=>{${COMPLETE}},800);` } });
+    fastClock(t, f.dir);
+    assert.equal((await done((await f.start({ timeoutSeconds: 3600 })).job_id)).state, "timed_out");
+  });
+});
+
+test("the bridge quitting mid-run is reported as the bridge stopping, never as the person's Stop", async (t) => {
+  const f = fixture(t, { claude: { body: "setInterval(()=>{},1000);" } });
+  const job = await f.start();
+  const stateFile = path.join(process.env.SHAPES_CODEX_JOB_DIR, job.job_id, "state.json");
+  let state;
+  for (let i = 0; i < 100 && !(state = JSON.parse(fs.readFileSync(stateFile, "utf8"))).agentPid; i++) await new Promise((resolve) => setTimeout(resolve, 30));
+  process.kill(state.supervisorPid, "SIGTERM");
+  const result = await done(job.job_id);
+  assert.deepEqual([result.state, result.error_type], ["failed", "bridge_stopped"]);
+  assert.match(result.error, /session can be continued/);
+  assert.throws(() => process.kill(state.agentPid, 0), (error) => error.code === "ESRCH");
+});
+
 test("Claude cancellation and timeout kill a process that ignores SIGTERM", async (t) => {
   for (const operation of ["cancel", "timeout"]) await t.test(operation, async (t) => {
     const f = fixture(t, { claude: { body: "process.on('SIGTERM',()=>{});setInterval(()=>{},1000);" } });
