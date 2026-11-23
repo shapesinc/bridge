@@ -179,12 +179,13 @@ test("Claude receives literal stdin and restricted read-only tools without crede
   for (const file of fs.readdirSync(jobDir)) assert.equal(fs.statSync(path.join(jobDir, file)).mode & 0o777, 0o600);
 });
 
-test("Claude write mode requires a Git worktree and enables per-run edits without overriding rules", async (t) => {
+test("Claude write mode works in the person's own checkout and enables per-run edits without overriding rules", async (t) => {
   const f = fixture(t, { claude: { body: `console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:JSON.stringify(process.argv.slice(2))}));` } });
   const git = (...args) => execFileSync("git", ["-C", f.dir, ...args], { stdio: "pipe" });
   git("init");
   git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "fixture");
-  await assert.rejects(f.start({ sandbox: "workspace-write" }), /dedicated Git worktree/);
+  // The primary checkout itself: no worktree rule (2026-11-22).
+  assert.equal((await done((await f.start({ sandbox: "workspace-write" })).job_id)).state, "completed");
   const worktree = path.join(f.dir, "worktree");
   git("worktree", "add", "--detach", worktree);
   const settings = path.join(worktree, ".claude", "settings.json");

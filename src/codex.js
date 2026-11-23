@@ -4,9 +4,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { spawnSync } = require("node:child_process");
 const { StringDecoder } = require("node:string_decoder");
-const { selectAgent, argumentsFor, verifyInteractiveCodex, claudeSettingsMode } = require("./agents");
+const { selectAgent, argumentsFor, verifyInteractiveCodex, claudePermissionMode } = require("./agents");
+const agentImages = require("./agent-images");
 const { normalizeRequest, nativeResponse } = require("./approvals");
 const { localEnvironment } = require("./local-workspace");
 const { bundledRuntime, launchConfiguration } = require("./bundled-runtime");
@@ -139,31 +139,15 @@ function loadState(directory) {
   return JSON.parse(fs.readFileSync(path.join(directory, "state.json"), "utf8"));
 }
 
-function validateCwd(value, sandbox) {
+// Any folder the person points at, as their own CLI would take it. Whether to
+// branch, use a worktree or touch a sibling repository is the agent's call
+// under the person's own settings and instructions, not this Bridge's: a
+// worktree rule here boxed in Claude Code (2026-11-22, "you lobotomized my
+// claude").
+function validateCwd(value) {
   if (!value || !path.isAbsolute(value)) throw new Error("--cwd must be an explicit absolute directory.");
   const cwd = fs.realpathSync(value);
   if (!fs.statSync(cwd).isDirectory()) throw new Error("--cwd must be a directory.");
-  if (sandbox === "workspace-write") {
-    // Plain file work must work on a fresh Mac without Command Line Tools.
-    // Only ask Git to classify folders that could actually be repositories.
-    let possibleRepository = Boolean(process.env.GIT_DIR || process.env.GIT_WORK_TREE);
-    for (let parent = cwd; !possibleRepository; parent = path.dirname(parent)) {
-      possibleRepository = fs.existsSync(path.join(parent, ".git"))
-        || (fs.existsSync(path.join(parent, "HEAD")) && fs.existsSync(path.join(parent, "objects")) && fs.existsSync(path.join(parent, "refs")));
-      if (parent === path.dirname(parent)) break;
-    }
-    if (!possibleRepository) return cwd;
-    const git = spawnSync("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8", timeout: 5000, env: { ...localEnvironment(), LC_ALL: "C" } });
-    if (git.error) throw new Error("Cannot validate Git worktree: git is unavailable or timed out.");
-    if (git.status === 0 && git.stdout.trim() === "true") {
-      const dirs = spawnSync("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], { encoding: "utf8", timeout: 5000, env: localEnvironment() });
-      if (dirs.status !== 0) throw new Error("Cannot validate Git worktree.");
-      const [gitDir, commonDir] = dirs.stdout.trim().split("\n").map((p) => fs.realpathSync(p));
-      if (gitDir === commonDir) throw new Error("Workspace writes require a dedicated Git worktree. Create one and pass its path as --cwd.");
-    } else if (git.status !== 128 || !/^fatal: not a git repository \(or any of the parent directories\): \.git\s*$/.test(git.stderr)) {
-      throw new Error("Cannot validate Git worktree.");
-    }
-  }
   return cwd;
 }
 
@@ -254,8 +238,12 @@ function publicStatus(id, expectedAgent) {
 }
 
 async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInput, deliveredInputContext, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex", interactive = false, requestKey, builtIn, resumeThreadId, usageBaseline,
-  sessionScope, title, startedBy, resumeSessionId, preselected }) {
+  sessionScope, title, startedBy, resumeSessionId, preselected, images: suppliedImages }) {
   if (!["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
+  // Already validated by the route; normalized again for direct callers.
+  const images = Array.isArray(suppliedImages) && suppliedImages.every((image) => Buffer.isBuffer(image?.bytes))
+    ? suppliedImages : agentImages.normalizeImages(suppliedImages);
+  if (images.length && builtIn) throw new Error("Images go to a built-in session through its typed input.");
   // A session start or turn: the same Claude Code session or Codex thread the
   // person sees in their own apps, bound to the chat's server-derived scope.
   if (sessionScope !== undefined) {
@@ -267,7 +255,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
   }
   if (title !== undefined && (typeof title !== "string" || title.length > 400)) throw new Error("title must be short text.");
   if (startedBy !== undefined && (typeof startedBy !== "string" || startedBy.length > 80)) throw new Error("started_by must be short text.");
-  cwd = validateCwd(cwd, sandbox);
+  cwd = validateCwd(cwd);
   const timeout = Number(timeoutSeconds);
   if (!Number.isInteger(timeout) || timeout < 1 || timeout > 86400) throw new Error("Timeout must be between 1 and 86400 seconds.");
   if (promptFile && suppliedPrompt !== undefined) throw new Error("Supply a prompt or a prompt file, not both.");
@@ -289,7 +277,8 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     .update(JSON.stringify([prompt, cwd, sandbox, timeout, agent, interactive,
       ...(builtIn ? [builtIn.sessionId, builtIn.scopeId, builtIn.gateway.model] : []),
       ...(input ? [input] : []),
-      ...(sessionScope ? [sessionScope, resumeSessionId || null, sessionTitle || null] : [])])).digest("hex");
+      ...(sessionScope ? [sessionScope, resumeSessionId || null, sessionTitle || null] : []),
+      ...(images.length ? [agentImages.imagesDigest(images)] : [])])).digest("hex");
   if (requestKey && fs.existsSync(root())) {
     const existing = existingRequest(requestKey, fingerprint);
     if (existing) return { ...publicStatus(existing), deduplicated: true };
@@ -309,9 +298,10 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
   interactive = (interactive || selected.transport === "bundled_personal" || Boolean(sessionScope)) && agent === "codex";
   if (interactive && !builtIn) await verifyInteractiveCodex(selected, cwd);
   // Claude Code write runs ask the person through this Bridge instead of
-  // skipping permissions; read-only runs stay limited to read-only tools.
+  // skipping permissions, in the person's own permission mode; read-only runs
+  // (only when the person asked for no changes) stay limited to read-only tools.
   const claudeHost = agent === "claude" && sandbox === "workspace-write" && selected.hostPrompts === true;
-  const permissionMode = claudeHost && !claudeSettingsMode(cwd) && selected.autoMode ? "auto" : undefined;
+  const permissionMode = claudeHost ? claudePermissionMode(cwd, { autoMode: selected.autoMode }) : undefined;
   if (claudeHost) interactive = true;
   const executable = selected.executable;
   const id = crypto.randomUUID();
@@ -319,7 +309,9 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
   // it runs; a Codex thread id is known once the app-server starts it.
   const agentSessionId = resumeSessionId || (sessionScope && agent === "claude" ? crypto.randomUUID() : undefined);
   const directory = privateDir(path.join(root(), id));
+  const savedImages = agentImages.saveImages(directory, images, writePrivate);
   const state = { id, status: "queued", cwd, sandbox, agent, interactive, createdAt: new Date().toISOString(),
+    ...(savedImages.length ? { images: savedImages.length } : {}),
     ...(claudeHost ? { claudeHost: true } : {}),
     ...(selected.transport === "bundled_personal" ? { funding: "personal", runtimeVersion: selected.version, personalTransport: selected.transport } : {}),
     ...(builtIn ? { sessionId: builtIn.sessionId, scopeId: builtIn.scopeId, funding: "shapes_credits", runtimeVersion: selected.version,
@@ -327,6 +319,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     ...(sessionScope ? { sessionScope, ...(agentSessionId ? { agentSessionId } : {}), ...(resumeSessionId ? { resumedSession: true } : {}) } : {}),
     promptPreview: prompt.trim().replace(/\s+/g, " ").slice(0, 160) };
   writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable, agent, interactive,
+    ...(savedImages.length ? { images: savedImages } : {}),
     ...(input ? { input, ...preparedInput } : {}),
     ...(selected.transport === "bundled_personal" ? { personalProfile: selected.profile } : {}),
     ...(builtIn ? { gateway: builtIn.gateway, resumeThreadId, usageBaseline } : {}),
@@ -373,6 +366,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     throw failure;
   }
   return { job_id: id, state: "queued", cwd, sandbox, agent, interactive, created_at: state.createdAt,
+    ...(savedImages.length ? { images: savedImages.length } : {}),
     ...(builtIn ? { session_id: builtIn.sessionId, funding: "shapes_credits", runtime_version: selected.version } : {}),
     ...(sessionScope ? sessionReceipt(agent, agentSessionId, resumeSessionId ? sessions.readRecord(sessionsDirectory(), agent, agentSessionId)?.title : sessionTitle) : {}),
     ...(agent === "claude" ? { permission_scope: claudeScope(sandbox, claudeHost) } : {}) };
@@ -472,6 +466,10 @@ function getStatus(id, expectedAgent) {
     cwd: state.cwd, sandbox: state.sandbox, thread_id: typeof state.threadId === "string" ? bounded(state.threadId, 512) : null,
     ...(state.sessionScope ? sessionReceipt(agent, state.agentSessionId) : {}),
     ...(typeof state.modelNote === "string" ? { model_note: state.modelNote } : {}),
+    // What the agent actually got and ran under: how many of the person's
+    // images, and Claude Code's own permission mode from its init event.
+    ...(Number.isInteger(state.images) ? { images: state.images } : {}),
+    ...(typeof state.permissionMode === "string" ? { permission_mode: bounded(state.permissionMode, 40) } : {}),
     ...(state.activity?.text ? { activity: { text: bounded(state.activity.text, 400), at: state.activity.at } } : {}),
     ...(Array.isArray(state.deniedActions) && state.deniedActions.length ? { denied_actions: state.deniedActions.slice(0, 10) } : {}),
     started_at: state.startedAt || null,
@@ -582,7 +580,7 @@ async function claudeOpenElsewhere(record) {
   return active.some((entry) => entry.session_id === record.agent_session_id);
 }
 
-async function sendTurn({ agentSessionId, sessionScope, prompt, requestKey, sandbox, agent }) {
+async function sendTurn({ agentSessionId, sessionScope, prompt, requestKey, sandbox, agent, images }) {
   const record = scopedRecord(agentSessionId, sessionScope, agent);
   if (sandbox !== undefined && !["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
   return withSessionLock(record.agent_session_id, async () => {
@@ -603,7 +601,7 @@ async function sendTurn({ agentSessionId, sessionScope, prompt, requestKey, sand
         { statusCode: 409, errorType: "session_open_elsewhere" });
     }
     return startJob({ prompt, cwd: fresh.cwd, sandbox: sandbox || fresh.sandbox, agent: fresh.agent,
-      interactive: fresh.agent === "codex", requestKey, sessionScope, resumeSessionId: fresh.agent_session_id, preselected: selected });
+      interactive: fresh.agent === "codex", requestKey, sessionScope, resumeSessionId: fresh.agent_session_id, preselected: selected, images });
   });
 }
 
@@ -820,7 +818,8 @@ async function superviseInteractive(directory, state, request) {
       }
     }, 100);
     timer = setTimeout(() => stop("timed_out"), request.timeout * 1000);
-    const completion = session.start(request.runtimeInput || request.input || request.prompt);
+    const completion = session.start(request.runtimeInput || request.input
+      || (request.images?.length ? agentImages.codexInput(request.prompt, request.images) : request.prompt));
     state.agentPid = session.child?.pid;
     persist();
     const result = await completion;
@@ -1094,6 +1093,7 @@ async function supervise(id) {
         noteActivity(directory, state, value);
         if (value.type === "system" && value.subtype === "init" && typeof value.session_id === "string") {
           state.threadId = value.session_id;
+          if (typeof value.permissionMode === "string") state.permissionMode = value.permissionMode.slice(0, 40);
           if (request.sessionScope) bindSession(state, request, value.session_id);
         }
         // A denied action is a fact about the run, not its outcome: the agent
@@ -1169,7 +1169,10 @@ async function supervise(id) {
     if (child.pid) { state.agentPid = child.pid; saveState(directory, state); }
     child.stdin.on("error", () => {}); // Early CLI exits can close stdin before the prompt is consumed.
     // Host approvals keep stdin open for answers; the session's result ends it.
-    if (request.claudeHost) child.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: request.prompt } }) + "\n");
+    // The person's images go in the same first message as their task.
+    const message = JSON.stringify(agentImages.claudeUserMessage(request.prompt, request.images)) + "\n";
+    if (request.claudeHost) child.stdin.write(message);
+    else if (request.images?.length) child.stdin.end(message); // --input-format stream-json (argumentsFor)
     else child.stdin.end(request.prompt);
     child.stdout.on("data", (chunk) => {
       capture("stdout", chunk);
