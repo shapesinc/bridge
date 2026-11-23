@@ -955,6 +955,13 @@ function activityLine(value) {
   return "";
 }
 
+// Claude Code ends a turn while a command it started in the background is still
+// running, stays alive for it, and picks the work up again when the command
+// reports. Between those two moments it streams nothing, so the status line kept
+// the last thing it did and the run looked stuck while its session looked idle.
+const BACKGROUND_WAIT = "Waiting on a command it left running";
+const BACKGROUND_WAIT_NOTE_MS = Number(process.env.SHAPES_BACKGROUND_WAIT_NOTE_MS) || 5000;
+
 function noteActivity(directory, state, value) {
   const text = activityLine(value);
   if (!text || state.activity?.text === text) return;
@@ -998,6 +1005,7 @@ async function supervise(id) {
   let deadline;
   let shutdown, finishExit;
   let stopped;
+  let backgroundWait;
   let turnCompleted = false;
   let turnFailed = false;
   let lineBuffer = "";
@@ -1068,7 +1076,7 @@ async function supervise(id) {
     shutdown = closeProcessGroup(child).then((result) => { finishExit?.(result); return result; });
   };
   const finish = (status, detail = {}) => {
-    clearInterval(poll); clearTimeout(deadline);
+    clearInterval(poll); clearTimeout(deadline); clearTimeout(backgroundWait);
     for (const id of pending.keys()) {
       fs.rmSync(path.join(directory, `${id}.request.json`), { force: true });
       fs.rmSync(path.join(directory, `${id}.response.json`), { force: true });
@@ -1092,6 +1100,8 @@ async function supervise(id) {
           for (const [id, entry] of pending) if (entry.requestId === value.request_id) clearHostRequest(id);
           return;
         }
+        // Anything it streams after a turn's result means it is working again.
+        clearTimeout(backgroundWait);
         noteActivity(directory, state, value);
         if (value.type === "system" && value.subtype === "init" && typeof value.session_id === "string") {
           state.threadId = value.session_id;
@@ -1116,6 +1126,12 @@ async function supervise(id) {
         }
         if (value.type !== "result") return;
         if (request.claudeHost) { inputClosed = true; try { child.stdin.end(); } catch {} } // The session's turn is over.
+        // Still alive a few seconds after its turn ended: it is waiting on its own background command.
+        backgroundWait = setTimeout(() => {
+          if (stopped) return;
+          state.activity = { text: BACKGROUND_WAIT, at: new Date().toISOString() };
+          try { saveState(directory, state); } catch { /* The next change saves it. */ }
+        }, BACKGROUND_WAIT_NOTE_MS);
         if (typeof value.session_id === "string") state.threadId = value.session_id;
         const denials = Array.isArray(value.permission_denials) ? value.permission_denials : [];
         state.permissionDenials = Math.max(state.permissionDenials || 0, denials.length);
