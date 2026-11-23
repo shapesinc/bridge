@@ -15,7 +15,7 @@
 //   POST /open          -> open a file/app/url with the OS default {target}
 //   POST /computer      -> one observed desktop input or screenshot {scope, control}
 //   GET  /agents        -> check local Codex and Claude Code readiness
-//   POST /agents/start  -> delegate {agent?, prompt, cwd?, workspace_write?}
+//   POST /agents/start  -> delegate {agent?, prompt, cwd?, workspace_write?, images?}
 //   GET  /agents/status -> wait up to 20 seconds for a job {job_id in query}
 //   POST /agents/cancel -> request cancellation {job_id}
 //   GET  /agents/jobs   -> recent jobs {request_key?, limit? in query}
@@ -36,6 +36,7 @@ const { URL } = require("node:url");
 const { startJob, publicStatus, listJobs, cancelJob, respondJob, sendTurn, sessionStatus,
   readSession: readAgentSession, stopSession, listSessions } = require("./codex");
 const { listAgents } = require("./agents");
+const { normalizeImages } = require("./agent-images");
 const { expandHome } = require("./local-workspace");
 const { bundledRuntime } = require("./bundled-runtime");
 const { createComputerControl } = require("./computer");
@@ -237,6 +238,9 @@ function startServer({ port, token, computerControl = createComputerControl(), p
     if (route === "/capabilities" && method === "GET") {
       return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: {
         command_jobs: true, interactive_codex: true, idempotent_start: true, job_list: true, agent_sessions: true,
+        // Personal agents take the person's chat images, and write wherever the
+        // person points them (no worktree rule).
+        agent_images: true, agent_any_folder: true,
         ...runtimeCapabilities(), computer_control: computerControl.available(),
         computer_app_control: Boolean(computerControl.appControlAvailable?.()),
         computer_brief_activation: Boolean(computerControl.appControlAvailable?.()) } });
@@ -314,7 +318,7 @@ function startServer({ port, token, computerControl = createComputerControl(), p
             return sendJson(res, result.deduplicated ? 200 : 202, result);
           }
           if (!body || typeof body !== "object" || Array.isArray(body)
-              || Object.keys(body).some((key) => !["prompt", "cwd", "workspace_write", "interactive", "request_key", ...(codexOnly ? [] : ["agent", "session_scope", "title", "started_by"])].includes(key))
+              || Object.keys(body).some((key) => !["prompt", "cwd", "workspace_write", "interactive", "request_key", ...(codexOnly ? [] : ["agent", "session_scope", "title", "started_by", "images"])].includes(key))
               || typeof body.prompt !== "string" || !body.prompt.trim()
               || (body.cwd !== undefined && typeof body.cwd !== "string")
               || (!codexOnly && body.agent !== undefined && !["auto", "codex", "claude"].includes(body.agent))
@@ -327,9 +331,10 @@ function startServer({ port, token, computerControl = createComputerControl(), p
           }
           const cwd = body.cwd ? expandHome(body.cwd) : process.cwd();
           const agent = codexOnly ? "codex" : body.agent || "auto";
-          log(`AGENT START (${agent}, cwd=${cwd}, scope=${body.workspace_write ? "workspace-write" : "read-only"})`);
+          const images = normalizeImages(body.images);
+          log(`AGENT START (${agent}, cwd=${cwd}, scope=${body.workspace_write ? "workspace-write" : "read-only"}${images.length ? `, images=${images.length}` : ""})`);
           const result = await startJob({
-            prompt: body.prompt, cwd, agent,
+            prompt: body.prompt, cwd, agent, images,
             interactive: body.interactive === true, requestKey: body.request_key,
             sandbox: body.workspace_write ? "workspace-write" : "read-only",
             ...(body.session_scope !== undefined ? { sessionScope: body.session_scope, title: body.title, startedBy: body.started_by } : {}),
@@ -347,7 +352,7 @@ function startServer({ port, token, computerControl = createComputerControl(), p
       if (route === "/agents/send" && method === "POST") {
         try {
           const body = await readBody(req);
-          if (!onlyKeys(body, ["agent_session_id", "session_scope", "prompt", "request_key", "workspace_write", "agent"])
+          if (!onlyKeys(body, ["agent_session_id", "session_scope", "prompt", "request_key", "workspace_write", "agent", "images"])
               || typeof body.prompt !== "string" || !body.prompt.trim()
               || (body.workspace_write !== undefined && typeof body.workspace_write !== "boolean")
               || (body.request_key !== undefined && typeof body.request_key !== "string")) {
@@ -355,6 +360,7 @@ function startServer({ port, token, computerControl = createComputerControl(), p
           }
           log(`AGENT SEND: ${body.agent_session_id}`);
           const result = await sendTurn({ agentSessionId: body.agent_session_id, sessionScope: body.session_scope, prompt: body.prompt, agent: body.agent,
+            images: normalizeImages(body.images),
             requestKey: body.request_key, ...(body.workspace_write !== undefined ? { sandbox: body.workspace_write ? "workspace-write" : "read-only" } : {}) });
           return sendJson(res, result.deduplicated ? 200 : 202, result);
         } catch (err) { return sessionError(res, err); }

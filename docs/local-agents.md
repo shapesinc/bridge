@@ -84,16 +84,21 @@ counts as completion. Error details remain in private local diagnostics.
 
 ## Permissions and task lifetime
 
-The default `workspace_write: false` uses Codex's read-only shell sandbox.
-Claude uses **read-only tools**, not an OS sandbox: only its `Read`, `Grep`, and
-`Glob` built-ins are exposed, with `dontAsk` mode, an empty strict MCP config,
-and MCP tools denied. User hooks and other local configuration still apply.
-Its receipt says `permission_scope: "read-only-tools"` to distinguish this.
+`workspace_write: false` is only for a person who asked for no changes. It uses
+Codex's read-only shell sandbox. Claude uses **read-only tools**, not an OS
+sandbox: only its `Read`, `Grep`, and `Glob` built-ins are exposed, with
+`dontAsk` mode (shown as "Don't ask" in the Claude app), an empty strict MCP
+config, and MCP tools denied. User hooks and other local configuration still
+apply. Its receipt says `permission_scope: "read-only-tools"` to distinguish this.
+The shapes.inc backend sends `workspace_write: true` for the person's own
+computer unless they asked for a look only.
 
-For edits, set `workspace_write: true` and a dedicated Git worktree path. The
-launcher refuses writes in a repository's primary checkout; create the worktree
-first. A directory outside Git can also be used, but has no Git worktree
-protection. Granting a chat this computer is the consent: write jobs run with
+For edits, set `workspace_write: true` and any absolute folder: a primary
+checkout, a worktree or a plain directory. The launcher has no worktree rule
+(removed 2026-11-23: it made a shape fall back to read-only and box in the
+person's Claude Code). Whether to branch, use a worktree or work in a sibling
+repository is the agent's call under the person's own settings and instructions,
+as when they run it themselves. Granting a chat this computer is the consent: write jobs run with
 **full access and no per-command approval prompts**. Headless and interactive
 Codex both use `danger-full-access` with approvals set to `never`; the shape is
 still asked real questions (`item/tool/requestUserInput`), never for permission.
@@ -146,9 +151,14 @@ Claude write jobs ask the person instead of skipping permissions when the CLI
 supports host prompts (`--permission-prompt-tool`): they run with
 `--input-format stream-json --permission-prompts host --permission-prompt-tool
 stdio`, under the person's own settings (allow/ask/deny rules, additional
-directories) and their `permissions.defaultMode` from managed settings (including
-`managed-settings.d/` drop-ins), user, project or local settings, or
-`--permission-mode auto` when none is set. Each `can_use_tool`
+directories) and their own permission mode: a `permissions.defaultMode` in managed
+settings (including `managed-settings.d/` drop-ins), user, project or local
+settings is applied by Claude Code itself (no flag); without one, the mode they
+chose for that folder (or its nearest parent) in the Claude app's Code tab
+(`default`, `acceptEdits`, `auto`, `plan` or `dontAsk`; best effort, read from the
+app's preferences); otherwise `--permission-mode auto`, the Claude app's default.
+The mode a run actually used comes back as `permission_mode` (from Claude Code's
+init event). Each `can_use_tool`
 request becomes a `waiting_on_user` job with one pending request ("Allow this
 command?" with the folder and exact command or path; Approve once, Deny, Stop
 task). Approve answers `allow` and the same session continues; Deny answers
@@ -162,15 +172,31 @@ that did not succeed because of a denial. The final assistant message is kept
 in the job's result file regardless of the log cap, and status adds
 `activity {text, at}` (the current step) and `started_at`.
 
-Older Claude Code without host prompts keeps the previous contract:
-`--dangerously-skip-permissions`, no per-command approvals, and
-`permission_scope: "full-access"`. Managed policy, MCP services, hooks, and
-model preferences remain in effect; the launcher changes no saved settings. The
-worktree check validates the starting directory only: it does not make Claude an
-OS sandbox. Read-only jobs keep `--permission-prompts none`, so an action that
+Older Claude Code without host prompts still never skips permissions: it runs
+in the person's own mode (the same choice as above) with `--permission-prompts
+none`, so what would need asking is denied and listed in `denied_actions`, and
+`permission_scope: "own-settings"`. Managed policy, MCP services, hooks, and
+model preferences remain in effect; the launcher changes no saved settings.
+Read-only jobs keep `--permission-prompts none`, so an action that
 would need interactive permission is denied instead of waiting: a run that still
 finishes is `completed` with the denial in `denied_actions`, and one that doesn't is
 `permission_denied`.
+
+**Images.** `POST /agents/start` and `POST /agents/send` take optional `images`:
+up to four `{media_type, data, name?}` (PNG, JPEG, WebP or GIF; base64; each at
+most 5 MB, 12 MB in all; the signature must match the type). They are the
+person's own chat attachments, read and downsized by the backend; the Bridge
+fetches nothing. Each is saved in the job folder (`images/<n>.<ext>`, private
+files) and goes with the task: Claude Code gets them as image blocks in the same
+stream-json user message (read-only runs switch to `--input-format stream-json`
+for this), Codex as `localImage` inputs on the app-server or `--image=<path>` on
+`codex exec`. The prompt also names the saved copies so the agent can open or
+copy them. The receipt and status say `images: <n>`. Images are not part of the
+request fingerprint: they come from the same chat message, so a retry whose
+download went differently is still the same request and keeps its first job.
+`/capabilities` advertises `features.agent_images` and
+`features.agent_any_folder`.
+
 See the official [CLI reference](https://code.claude.com/docs/en/cli-reference),
 [headless guide](https://code.claude.com/docs/en/headless), and
 [permission modes](https://code.claude.com/docs/en/permission-modes).

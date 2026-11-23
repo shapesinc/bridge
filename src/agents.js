@@ -203,6 +203,52 @@ function claudeSettingsMode(cwd, { home = os.homedir(), platform = process.platf
   return null;
 }
 
+// Modes Claude Code takes on the command line without another flag.
+const CLAUDE_MODES = new Set(["default", "acceptEdits", "auto", "plan", "dontAsk"]);
+
+// The mode the person picked for this folder (or the nearest parent) in the
+// Claude app's Code tab. Best effort: the app keeps it in its own preferences.
+function claudeAppFolderMode(cwd, { home = os.homedir(), platform = process.platform } = {}) {
+  if (!cwd) return null;
+  const file = platform === "win32"
+    ? path.win32.join(process.env.APPDATA || path.win32.join(home, "AppData", "Roaming"), "Claude", "claude_desktop_config.json")
+    : path.join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json");
+  let prefs;
+  try {
+    if (fs.statSync(file).size > 4 * 1024 * 1024) return null;
+    prefs = JSON.parse(fs.readFileSync(file, "utf8"))?.preferences?.epitaxyPrefs;
+  } catch { return null; }
+  if (!prefs || typeof prefs !== "object") return null;
+  const join = platform === "win32" ? path.win32 : path.posix;
+  const folder = (value) => join.resolve(value).replace(/[\\/]+$/, "") || join.sep;
+  const target = folder(cwd);
+  let best = null;
+  for (const version of ["epitaxy-folder-permission-mode-v2.", "epitaxy-folder-permission-mode."]) {
+    for (const [key, folders] of Object.entries(prefs)) {
+      if (!key.startsWith(version) || !folders || typeof folders !== "object") continue;
+      for (const [saved, mode] of Object.entries(folders)) {
+        if (typeof saved !== "string" || !join.isAbsolute(saved) || typeof mode !== "string") continue;
+        const root = folder(saved);
+        const inside = target === root || target.startsWith(root.endsWith(join.sep) ? root : root + join.sep);
+        if (inside && (!best || root.length > best.root.length)) best = { root, mode };
+      }
+    }
+    if (best) break;
+  }
+  return best && CLAUDE_MODES.has(best.mode) ? best.mode : null;
+}
+
+// The person's own mode, never one this Bridge prefers: a defaultMode in
+// their Claude Code settings is applied by Claude Code itself (no flag); else
+// the mode they chose for this folder in the Claude app; else auto, the
+// Claude app's default. undefined means pass no --permission-mode.
+function claudePermissionMode(cwd, { autoMode = false, home, platform } = {}) {
+  if (claudeSettingsMode(cwd, { home, platform })) return undefined;
+  const appMode = claudeAppFolderMode(cwd, { home, platform });
+  if (appMode && (appMode !== "auto" || autoMode)) return appMode;
+  return autoMode ? "auto" : undefined;
+}
+
 async function listAgents(cwd) {
   const agents = await Promise.all(IDS.map((id) => inspectAgent(id, cwd)));
   return { agents: agents.map(publicAgent), default_agent: agents.find((item) => item.available)?.id || null };
@@ -239,7 +285,9 @@ function argumentsFor(agent, request) {
   // access and no approval prompts; read-only jobs stay read-only.
   if (agent === "codex") return [
     "-a", "never", "exec", "--json", "--color", "never", "--sandbox", request.sandbox === "workspace-write" ? "danger-full-access" : "read-only",
-    "-c", "sandbox_workspace_write.writable_roots=[]", "--skip-git-repo-check", "--cd", request.cwd, "-",
+    "-c", "sandbox_workspace_write.writable_roots=[]", "--skip-git-repo-check", "--cd", request.cwd,
+    // The person's attached images (saved in the job folder) with the prompt.
+    ...(request.images || []).map((image) => `--image=${image.path}`), "-",
   ];
   if (request.claudeHost) {
     // The person's own Claude Code: their permission mode and rules decide,
@@ -254,7 +302,9 @@ function argumentsFor(agent, request) {
     }
     return args;
   }
-  const args = ["--print", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"];
+  const args = ["--print", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none",
+    // Images travel in a stream-json user message with the prompt.
+    ...(request.images?.length ? ["--input-format", "stream-json"] : [])];
   // A session the person can open: a new one under the id Bridge chose, or the
   // same session continued. The name is joined to its flag so a title can't
   // be read as another option.
@@ -269,13 +319,12 @@ function argumentsFor(agent, request) {
     // https://code.claude.com/docs/en/cli-reference
     args.push("--permission-mode", "dontAsk", "--tools", "Read,Grep,Glob",
       "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--disallowedTools", "mcp__*");
-  } else {
-    // Full autonomy for this task: no permission prompts, no per-command
-    // approvals. The person already granted this computer to the chat.
-    // https://code.claude.com/docs/en/cli-reference
-    args.push("--dangerously-skip-permissions");
+  } else if (request.permissionMode) {
+    // A CLI without host prompts: the person's own mode and rules still decide;
+    // what would need asking is denied and reported, never bypassed.
+    args.push("--permission-mode", request.permissionMode);
   }
   return args;
 }
 
-module.exports = { listAgents, selectAgent, inspectAgent, publicAgent, argumentsFor, claudeSettingsMode, desktopClaudeCandidates, windowsCandidates, verifyInteractiveCodex };
+module.exports = { listAgents, selectAgent, inspectAgent, publicAgent, argumentsFor, claudeSettingsMode, claudeAppFolderMode, claudePermissionMode, desktopClaudeCandidates, windowsCandidates, verifyInteractiveCodex };

@@ -88,7 +88,7 @@ async function createSession(body) {
       || typeof body.cwd !== "string" || (body.workspace_write !== undefined && typeof body.workspace_write !== "boolean")
       || body.funding !== "shapes_credits") throw error("Supply immutable cwd, workspace_write, and shapes_credits funding.");
   const sandbox = body.workspace_write ? "workspace-write" : "read-only";
-  const cwd = validateCwd(expandHome(body.cwd), sandbox);
+  const cwd = validateCwd(expandHome(body.cwd));
   return locked(body.session_id, () => {
     if (fs.existsSync(file(body.session_id))) {
       const existing = load(body.session_id, body.scope_id);

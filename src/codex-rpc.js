@@ -1,5 +1,6 @@
 "use strict";
 
+const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { StringDecoder } = require("node:string_decoder");
 const { localEnvironment } = require("./local-workspace");
@@ -254,8 +255,16 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
   async function start(prompt) {
     if (started) throw new Error("A Codex RPC session can start only one task.");
     if (closing) throw new Error("A closed Codex RPC session cannot start a task.");
-    const input = Array.isArray(prompt) ? normalizeSessionInput(prompt).map(({ context_key: _key, ...item }) => item) : [{ type: "text", text: prompt }];
-    if (!Array.isArray(prompt) && (typeof prompt !== "string" || !prompt.trim())) throw new Error("A nonempty prompt is required.");
+    // A personal run's images are the person's attachments, saved by this
+    // Bridge in the job folder: Codex reads them by path (localImage).
+    const local = prompt && typeof prompt === "object" && !Array.isArray(prompt) ? prompt : null;
+    if (local && (typeof local.text !== "string" || !local.text.trim() || !Array.isArray(local.localImages)
+        || local.localImages.length > 4 || local.localImages.some((file) => typeof file !== "string" || !path.isAbsolute(file)))) {
+      throw new Error("A prompt with local images needs text and at most 4 absolute image paths.");
+    }
+    const input = local ? [{ type: "text", text: local.text }, ...local.localImages.map((file) => ({ type: "localImage", path: file }))]
+      : Array.isArray(prompt) ? normalizeSessionInput(prompt).map(({ context_key: _key, ...item }) => item) : [{ type: "text", text: prompt }];
+    if (!local && !Array.isArray(prompt) && (typeof prompt !== "string" || !prompt.trim())) throw new Error("A nonempty prompt is required.");
     started = true;
     enterPhase("initialize");
     child = spawnOwned(executable, launchArgs || ["app-server", "--listen", "stdio://", "-c", "sandbox_workspace_write.writable_roots=[]"],

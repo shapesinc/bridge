@@ -90,7 +90,7 @@ test("a Claude Code session starts under its own id and later turns continue tha
   assert.deepEqual(second.args.slice(second.args.indexOf("--resume"), second.args.indexOf("--resume") + 2), ["--resume", id]);
   assert.ok(!second.args.includes("--session-id") && !second.args.some((arg) => arg.startsWith("--name")));
   assert.equal(second.cwd, first.cwd);
-  assert.ok(second.args.includes("--dangerously-skip-permissions"), "the session's write access carries over");
+  assert.ok(!second.args.includes("--tools"), "the session's write access carries over");
 
   const status = await f.codex.sessionStatus({ agentSessionId: id, sessionScope: SCOPE_A });
   assert.equal(status.state, "idle");
