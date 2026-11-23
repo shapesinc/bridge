@@ -194,7 +194,7 @@ own description or the program's name, never the raw command; the live
 `activity` line names a command's program the same way. `permission_denied` is only for a run
 that did not succeed because of a denial. The final assistant message is kept
 in the job's result file regardless of the log cap, and status adds
-`activity {text, at}` (the current step) and `started_at`.
+`activity {text, at}` (the current step) and `started_at`. Claude Code can end a turn while a command it started in the background is still running; it stays alive and continues when that command reports. The job stays `running` for that time, and after a few seconds with nothing streamed its `activity` reads "Waiting on a command it left running" until it streams again.
 
 Older Claude Code without host prompts still never skips permissions: it runs
 in the person's own mode (the same choice as above) with `--permission-prompts

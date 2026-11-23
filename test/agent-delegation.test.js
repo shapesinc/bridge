@@ -95,6 +95,38 @@ test("a read-only Claude run (asked for by the person) still gets the image thro
   assert.equal(JSON.parse(stdin).message.content[1].source.media_type, "image/jpeg");
 });
 
+test("a turn that ended with a background command still running says so instead of its last step", async (t) => {
+  const f = claudeFixture(t);
+  // A Claude Code that ends its turn, stays alive for a background command, then picks the work up again.
+  fs.writeFileSync(path.join(f.dir, "fake-claude"), `#!${process.execPath}
+const a=process.argv.slice(2);
+if(a.includes('--version')){console.log('2.1.300 (Claude Code)');process.exit(0);}
+if(a[0]==='auth'){console.log(JSON.stringify({loggedIn:true}));process.exit(0);}
+if(a[0]==='agents'){console.log('[]');process.exit(0);}
+if(a.includes('--help')){console.log('Options:\\n  -p, --print   Print\\n  --output-format <f>  Output\\n  --verbose  Verbose\\n  --permission-mode <mode>  Mode\\n        (choices: "acceptEdits", "auto", "manual", "plan")\\n  --permission-prompts <target>  Who answers\\n        --print: "host" (the SDK host) or "none"\\n  --tools <tools...>  Tools\\n  --strict-mcp-config  Strict\\n  --mcp-config <c>  MCP\\n  --disallowedTools <t>  Deny');process.exit(0);}
+const say=(text)=>console.log(JSON.stringify({type:'assistant',message:{model:'m',content:[{type:'text',text}]}}));
+const end=(result)=>console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result}));
+let started=false;process.stdin.on('data',()=>{if(started)return;started=true;
+  console.log(JSON.stringify({type:'system',subtype:'init',session_id:'s-1',permissionMode:'auto'}));
+  say('Started the dev server.');end('Waiting on the first page compile.');
+  setTimeout(()=>{say('The page compiled.');},700);
+  setTimeout(()=>{end('Opened the pull request.');process.exit(0);},1400);});`, { mode: 0o700 });
+  process.env.SHAPES_BACKGROUND_WAIT_NOTE_MS = "150";
+  t.after(() => { delete process.env.SHAPES_BACKGROUND_WAIT_NOTE_MS; });
+  const start = await f.codex.startJob({ prompt: "Open the pull request", cwd: f.work, agent: "claude", sandbox: "workspace-write" });
+  const seen = [];
+  let done;
+  for (let i = 0; i < 400 && !done; i++) {
+    const status = f.codex.publicStatus(start.job_id);
+    if (status.activity?.text && seen.at(-1) !== status.activity.text) seen.push(status.activity.text);
+    if (TERMINAL.has(status.state)) done = status; else await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  // Still running between the two turns, and it says what it is doing there.
+  assert.ok(seen.includes("Waiting on a command it left running"), JSON.stringify(seen));
+  assert.ok(seen.indexOf("The page compiled.") > seen.indexOf("Waiting on a command it left running"), JSON.stringify(seen));
+  assert.deepEqual([done.state, done.final], ["completed", "Opened the pull request."]);
+});
+
 test("a run with no images keeps the plain prompt", async (t) => {
   const f = claudeFixture(t, { hostPrompts: false });
   const start = await f.codex.startJob({ prompt: "Plain task", cwd: f.work, agent: "claude", sandbox: "workspace-write" });
