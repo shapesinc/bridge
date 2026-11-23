@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { localEnvironment } = require("./local-workspace");
+const { agentEnvironment, loadLoginShellAuth, refreshLoginShellAuth, loginShellAuthVersion } = require("./login-shell-env");
 const { spawnOwned, signalOwned } = require("./owned-process");
 
 const IDS = ["codex", "claude"];
@@ -71,7 +72,7 @@ function probe(executable, args, cwd) {
       finish(null, true);
     }
     try {
-      child = spawnOwned(executable, args, { cwd, env: localEnvironment(), stdio: ["ignore", "pipe", "pipe"] });
+      child = spawnOwned(executable, args, { cwd, env: agentEnvironment(), stdio: ["ignore", "pipe", "pipe"] });
       child.stdout.on("data", (part) => { output += part; if (output.length > 65536) stop(); });
       child.stderr.on("data", (part) => { error += part; if (error.length > 65536) stop(); });
       child.once("error", () => finish(null, true));
@@ -144,17 +145,28 @@ const readyCache = new Map();
 async function inspectAgent(id, cwd = process.cwd(), { reuse = false } = {}) {
   if (!IDS.includes(id)) throw new Error("Unknown local agent.");
   const cached = reuse && readyCache.get(id);
-  if (cached && Date.now() - cached.at < READY_TTL_MS) {
+  if (cached && Date.now() - cached.at < READY_TTL_MS && cached.profile === loginShellAuthVersion()) {
     try { if (fs.statSync(cached.agent.executable).mtimeMs === cached.mtime) return cached.agent; } catch {}
   }
   const agent = await inspectFresh(id, cwd);
   if (agent.available && agent.executable && !process.env.SHAPES_CLAUDE_BINARY && !process.env.SHAPES_CODEX_BINARY) {
-    try { readyCache.set(id, { agent, at: Date.now(), mtime: fs.statSync(agent.executable).mtimeMs }); } catch {}
+    try { readyCache.set(id, { agent, at: Date.now(), mtime: fs.statSync(agent.executable).mtimeMs, profile: loginShellAuthVersion() }); } catch {}
   } else readyCache.delete(id);
   return agent;
 }
 
 async function inspectFresh(id, cwd) {
+  // Sign-in settings from their login shell, before any probe decides "signed out".
+  await loadLoginShellAuth();
+  const since = loginShellAuthVersion();
+  const found = await inspectInstalls(id, cwd);
+  // Signed out: their profile may have just gained a token or config folder
+  // ("add this to ~/.zshrc, then ask again"). Read it again and check once more.
+  if (found.status === "auth_required" && await refreshLoginShellAuth({ since })) return inspectInstalls(id, cwd);
+  return found;
+}
+
+async function inspectInstalls(id, cwd) {
   const paths = [];
   for (const candidate of candidates(id)) {
     try {
@@ -191,7 +203,7 @@ function claudeSettingsMode(cwd, { home = os.homedir(), platform = process.platf
   const files = [
     path.join(managed, "managed-settings.json"),
     ...dropIns.map((name) => path.join(managed, "managed-settings.d", name)),
-    path.join(process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude"), "settings.json"),
+    path.join(agentEnvironment().CLAUDE_CONFIG_DIR || path.join(home, ".claude"), "settings.json"),
     ...(cwd ? [path.join(cwd, ".claude", "settings.json"), path.join(cwd, ".claude", "settings.local.json")] : []),
   ];
   for (const file of files) {

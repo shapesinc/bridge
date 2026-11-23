@@ -9,6 +9,7 @@ const { selectAgent, argumentsFor, verifyInteractiveCodex, claudePermissionMode 
 const agentImages = require("./agent-images");
 const { normalizeRequest, nativeResponse } = require("./approvals");
 const { localEnvironment } = require("./local-workspace");
+const { agentEnvironment } = require("./login-shell-env");
 const { bundledRuntime, launchConfiguration } = require("./bundled-runtime");
 const { spawnOwned, signalOwned } = require("./owned-process");
 const { createNativeToolProxy } = require("./native-tool-proxy");
@@ -146,9 +147,23 @@ function loadState(directory) {
 // claude").
 function validateCwd(value) {
   if (!value || !path.isAbsolute(value)) throw new Error("--cwd must be an explicit absolute directory.");
-  const cwd = fs.realpathSync(value);
+  const cwd = onDiskPath(value);
   if (!fs.statSync(cwd).isDirectory()) throw new Error("--cwd must be a directory.");
   return cwd;
+}
+
+// The folder as it is spelled on disk. macOS and Windows open
+// "/applications/shapesinc/app" as /Applications/shapesinc/app, but Claude Code,
+// Codex and the Claude app key sessions and saved permission modes by the exact
+// spelling. The native lookup gives that spelling (and Windows' long names for
+// short ones like RUNNER~1); symlinks resolve as before. A mapped Windows drive
+// that comes back as its network share keeps the drive the person named.
+function onDiskPath(value, realpath = fs.realpathSync) {
+  const resolved = realpath(value);
+  let native;
+  try { native = realpath.native(value); } catch { return resolved; }
+  if (typeof native !== "string" || !native || (/^[a-z]:/i.test(resolved) && !/^[a-z]:/i.test(native))) return resolved;
+  return native;
 }
 
 const REQUEST_KEY = /^[A-Za-z0-9_-]{16,128}$/;
@@ -354,7 +369,8 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     const child = spawnOwned(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
       // Durable jobs outlive a short CLI start request. On Windows the native
       // app's enclosing Job still owns the full runtime and every nested job.
-      parentPid: null, detached: true, stdio: "ignore", env: { ...localEnvironment(), SHAPES_CODEX_JOB_DIR: root(),
+      parentPid: null, detached: true, stdio: "ignore", // Profile sign-in settings are for the person's own agents, never a credits-funded built-in session.
+      env: { ...(builtIn ? localEnvironment() : agentEnvironment()), SHAPES_CODEX_JOB_DIR: root(),
         ...(builtIn ? { SHAPES_RUNTIME_TOKEN: builtIn.token, SHAPES_NATIVE_TOOL_TOKEN: builtIn.toolToken || "" } : {}) },
     });
     await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
@@ -1167,7 +1183,7 @@ async function supervise(id) {
     saveState(directory, state);
     if (fs.existsSync(path.join(directory, "cancel"))) { finish("cancelled"); return; }
     child = spawnOwned(request.executable, argumentsFor(agent, request),
-      { cwd: request.cwd, env: localEnvironment(), detached: true, cleanupReceipt: true, stdio: ["pipe", "pipe", "pipe"] });
+      { cwd: request.cwd, env: agentEnvironment(), detached: true, cleanupReceipt: true, stdio: ["pipe", "pipe", "pipe"] });
     if (child.pid) { state.agentPid = child.pid; saveState(directory, state); }
     child.stdin.on("error", () => {}); // Early CLI exits can close stdin before the prompt is consumed.
     // Host approvals keep stdin open for answers; the session's result ends it.
@@ -1242,5 +1258,5 @@ async function supervise(id) {
   }
 }
 
-module.exports = { startJob, getStatus, publicStatus, listJobs, cancelJob, respondJob, supervise, validateCwd, failureReason, jobEvents, resumeContext, MAX_OUTPUT,
+module.exports = { startJob, getStatus, publicStatus, listJobs, cancelJob, respondJob, supervise, validateCwd, onDiskPath, failureReason, jobEvents, resumeContext, MAX_OUTPUT,
   sendTurn, sessionStatus, readSession, stopSession, listSessions };

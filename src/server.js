@@ -44,6 +44,7 @@ const { createSession, startSessionTurn, readSession, sessionEvents } = require(
 const { runtimeCapabilities } = require("./runtime-capabilities");
 const { runCommand: startCommandProcess } = require("./command-process");
 const { commandStatus, cancelCommand } = require("./commands");
+const { loadLoginShellAuth } = require("./login-shell-env");
 
 const MAX_OUTPUT = 20000;
 const MAX_FILE_READ = 100000;
@@ -332,13 +333,14 @@ function startServer({ port, token, computerControl = createComputerControl(), p
           const cwd = body.cwd ? expandHome(body.cwd) : process.cwd();
           const agent = codexOnly ? "codex" : body.agent || "auto";
           const images = normalizeImages(body.images);
-          log(`AGENT START (${agent}, cwd=${cwd}, scope=${body.workspace_write ? "workspace-write" : "read-only"}${images.length ? `, images=${images.length}` : ""})`);
           const result = await startJob({
             prompt: body.prompt, cwd, agent, images,
             interactive: body.interactive === true, requestKey: body.request_key,
             sandbox: body.workspace_write ? "workspace-write" : "read-only",
             ...(body.session_scope !== undefined ? { sessionScope: body.session_scope, title: body.title, startedBy: body.started_by } : {}),
           });
+          // The folder as the job uses it: its on-disk spelling.
+          log(`AGENT START (${agent}, cwd=${result.cwd || cwd}, scope=${body.workspace_write ? "workspace-write" : "read-only"}${images.length ? `, images=${images.length}` : ""})`);
           if (result.deduplicated) log(`AGENT START deduplicated: ${result.job_id}`);
           return sendJson(res, result.deduplicated ? 200 : 202, result);
         } catch (err) {
@@ -542,6 +544,9 @@ function startServer({ port, token, computerControl = createComputerControl(), p
     }
   });
 
+  // The person's sign-in settings from their login shell, read in the background
+  // so the first Claude Code or Codex task doesn't wait on their profile.
+  loadLoginShellAuth().catch(() => {});
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", () => resolve(server));
