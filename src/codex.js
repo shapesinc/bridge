@@ -22,6 +22,12 @@ const sessions = require("./agent-sessions");
 const MAX_OUTPUT = 64 * 1024;
 const MAX_PROMPT = 64 * 1024;
 const TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"]);
+const BUILT_IN_TIMEOUT_SECONDS = 30 * 60;
+// A supervisor gets SIGTERM or SIGINT only from outside: the app that owns the
+// bridge quitting, restarting or updating, or the computer shutting down. The
+// person's Stop is the cancel file, so this is never reported as their Stop.
+const BRIDGE_STOPPED = Object.freeze({ errorType: "bridge_stopped",
+  error: "The run stopped partway because shapes.inc Bridge on this computer quit, restarted or updated, or the computer shut down. It may have made partial changes; its session can be continued." });
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 // Only inspect failed native tool results. A page or an agent's prose can quote
@@ -252,7 +258,7 @@ function publicStatus(id, expectedAgent) {
   return receipt;
 }
 
-async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInput, deliveredInputContext, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex", interactive = false, requestKey, builtIn, resumeThreadId, usageBaseline,
+async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInput, deliveredInputContext, cwd, sandbox = "read-only", timeoutSeconds, agent = "codex", interactive = false, requestKey, builtIn, resumeThreadId, usageBaseline,
   sessionScope, title, startedBy, resumeSessionId, preselected, images: suppliedImages }) {
   if (!["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
   // Already validated by the route; normalized again for direct callers.
@@ -271,8 +277,12 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
   if (title !== undefined && (typeof title !== "string" || title.length > 400)) throw new Error("title must be short text.");
   if (startedBy !== undefined && (typeof startedBy !== "string" || startedBy.length > 80)) throw new Error("started_by must be short text.");
   cwd = validateCwd(cwd);
-  const timeout = Number(timeoutSeconds);
-  if (!Number.isInteger(timeout) || timeout < 1 || timeout > 86400) throw new Error("Timeout must be between 1 and 86400 seconds.");
+  // The person's own Claude Code or Codex works as long as the task takes, days
+  // if need be, and Stop ends it. A caller can still set a deadline. Built-in
+  // sessions run on shapes.inc credits and keep theirs.
+  const timeout = timeoutSeconds === undefined || timeoutSeconds === null
+    ? (builtIn ? BUILT_IN_TIMEOUT_SECONDS : null) : Number(timeoutSeconds);
+  if (timeout !== null && (!Number.isInteger(timeout) || timeout < 1 || timeout > 86400)) throw new Error("Timeout must be between 1 and 86400 seconds.");
   if (promptFile && suppliedPrompt !== undefined) throw new Error("Supply a prompt or a prompt file, not both.");
   let prompt = suppliedPrompt;
   if (prompt === undefined) {
@@ -725,7 +735,12 @@ async function superviseInteractive(directory, state, request) {
     stopped = status;
     void closeResources();
   };
-  const onSignal = () => stop("cancelled");
+  const onSignal = () => {
+    if (stopped) return;
+    failed = true;
+    Object.assign(state, BRIDGE_STOPPED);
+    stop("failed");
+  };
   Object.assign(state, { supervisorPid: process.pid, status: "running", startedAt: new Date().toISOString() });
   persist();
   try {
@@ -835,7 +850,7 @@ async function superviseInteractive(directory, state, request) {
         }
       }
     }, 100);
-    timer = setTimeout(() => stop("timed_out"), request.timeout * 1000);
+    if (request.timeout) timer = setTimeout(() => stop("timed_out"), request.timeout * 1000);
     const completion = session.start(request.runtimeInput || request.input
       || (request.images?.length ? agentImages.codexInput(request.prompt, request.images) : request.prompt));
     state.agentPid = session.child?.pid;
@@ -1218,8 +1233,13 @@ async function supervise(id) {
       if (lineBuffer.length > 1024 * 1024) lineBuffer = "";
     });
     child.stderr.on("data", (chunk) => capture("stderr", chunk));
-    process.once("SIGTERM", () => stop("cancelled"));
-    process.once("SIGINT", () => stop("cancelled"));
+    const onSignal = () => {
+      if (stopped) return;
+      Object.assign(state, BRIDGE_STOPPED);
+      stop("failed");
+    };
+    process.once("SIGTERM", onSignal);
+    process.once("SIGINT", onSignal);
     poll = setInterval(() => {
       if (fs.existsSync(path.join(directory, "cancel"))) { stop("cancelled"); return; }
       for (const [id, entry] of pending) {
@@ -1238,7 +1258,7 @@ async function supervise(id) {
       }
       clearHostRequest(id); // Removed from pending first, so a failed save never answers twice.
     }
-    deadline = setTimeout(() => stop("timed_out"), request.timeout * 1000);
+    if (request.timeout) deadline = setTimeout(() => stop("timed_out"), request.timeout * 1000);
     const exit = await new Promise((resolve, reject) => {
       finishExit = resolve;
       child.once("error", reject);

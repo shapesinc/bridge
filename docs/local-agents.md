@@ -227,7 +227,14 @@ See the official [CLI reference](https://code.claude.com/docs/en/cli-reference),
 
 Jobs run independently after start returns. **Closing the bridge does not stop
 an agent job already started**; cancel first if needed. Cancellation and timeout
-terminate the process group. The default timeout is 30 minutes. Prompts and
+terminate the process group. A job has no deadline unless its start sets
+`timeoutSeconds` (1 second to 24 hours): the person's own Claude Code or Codex
+can work for days, and cancelling ends it. Built-in sessions, which run on
+shapes.inc credits, keep a 30-minute default. A job's supervisor treats SIGTERM
+or SIGINT as its host stopping (for example the app that embeds the bridge
+quitting or updating, or the computer shutting down), not as cancellation: the
+job ends `failed` with `error_type` `bridge_stopped`, and its session can be
+continued with another turn. Prompts and
 bounded logs remain under `~/.shapes-bridge/codex-jobs/` with private permissions
 (directories 0700, files 0600); the historical directory name also holds Claude
 jobs. Remove a finished job's directory to delete its local records.
@@ -255,8 +262,8 @@ shapes-codex cancel JOB_ID
 ```
 
 CLI status additionally returns the private diagnostic directory. Use
-`--workspace-write` for edits and `--timeout-seconds` to change the 30-minute
-timeout (maximum 24 hours). A Codex `thread_id` can be opened in its desktop app
+`--workspace-write` for edits and `--timeout-seconds` to set a deadline
+(maximum 24 hours); without it a job runs until it finishes or is cancelled. A Codex `thread_id` can be opened in its desktop app
 using `codex://threads/THREAD_ID` through `open` when the user requests it;
 Claude session IDs are not Codex thread links.
 

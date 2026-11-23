@@ -4,13 +4,14 @@
 const { startJob, getStatus, listJobs, cancelJob, supervise } = require("../src/codex");
 
 const HELP = `Usage:
-  shapes-codex start --prompt-file FILE --cwd DIR [--workspace-write] [--timeout-seconds 1800] [--request-key KEY]
+  shapes-codex start --prompt-file FILE --cwd DIR [--workspace-write] [--timeout-seconds N] [--request-key KEY]
   shapes-codex status JOB_ID
   shapes-codex list [--request-key KEY]
   shapes-codex cancel JOB_ID
 
 Jobs use your local Codex sign-in and configuration. The default sandbox is
 read-only. Workspace writes require a linked Git worktree when DIR is in Git.
+Jobs run until they finish or are cancelled; --timeout-seconds sets a deadline.
 Results are JSON. Poll status for completed, failed, cancelled, or timed_out.
 Repeating start with the same --request-key returns the existing job instead of
 starting a duplicate; list finds recent jobs, or the job for a request key.
