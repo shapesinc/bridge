@@ -172,6 +172,22 @@ test("a session open but idle in the Claude app continues in a copy with its his
   assert.equal(f.runs().filter((run) => run.args.includes("--fork-session")).length, 1);
 });
 
+test("two follow-ups at once to a session open in the Claude app make one copy", async (t) => {
+  const f = claudeFixture(t);
+  const start = await f.codex.startJob({ prompt: "First", cwd: f.work, agent: "claude", sessionScope: SCOPE_A });
+  const id = start.agent_session_id;
+  await finished(f.codex, start.job_id);
+  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify([{ sessionId: id, kind: "interactive", status: "idle", pid: 4242 }]));
+  fs.writeFileSync(f.env.FAKE_HOLD, "");
+  const sent = await Promise.allSettled(["One", "Two"].map((prompt) => f.codex.sendTurn({ agentSessionId: id, sessionScope: SCOPE_A, prompt })));
+  const started = sent.filter((result) => result.status === "fulfilled").map((result) => result.value);
+  assert.equal(started.length, 1);
+  assert.equal(sent.find((result) => result.status === "rejected").reason.errorType, "session_busy");
+  fs.rmSync(f.env.FAKE_HOLD);
+  await finished(f.codex, started[0].job_id);
+  assert.equal(f.runs().filter((run) => run.args.includes("--fork-session")).length, 1);
+});
+
 test("a Claude Code transcript reads as the conversation, without tool traffic or bookkeeping", (t) => {
   const { claudeTranscriptMessages } = require("../src/agent-sessions");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "shapes-transcript-"));

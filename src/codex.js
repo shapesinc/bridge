@@ -657,8 +657,11 @@ async function sendTurn({ agentSessionId, sessionScope, prompt, requestKey, sand
   // The chat asked for this session; a turn that runs in a copy of it says so.
   const continued = (receipt) => receipt.agent_session_id !== requested.agent_session_id
     ? { ...receipt, forked_from: requested.agent_session_id } : receipt;
-  return withSessionLock(record.agent_session_id, async () => {
-    const fresh = scopedRecord(record.agent_session_id, sessionScope);
+  // Under the session's lock, follow any copy made meanwhile and take the copy's
+  // lock too, so two sends never fork the same session twice.
+  const turn = async (id) => {
+    const fresh = latestFork(scopedRecord(id, sessionScope), sessionScope);
+    if (fresh.agent_session_id !== id) return withSessionLock(fresh.agent_session_id, () => turn(fresh.agent_session_id));
     const previous = lastTurn(fresh);
     if (previous && !TERMINAL.has(previous.state)) {
       // A retry of the turn already running returns it instead of a refusal.
@@ -684,9 +687,11 @@ async function sendTurn({ agentSessionId, sessionScope, prompt, requestKey, sand
     if (!holder) return continued(await startJob({ ...common, resumeSessionId: fresh.agent_session_id }));
     const receipt = await startJob({ ...common, forkFromSessionId: fresh.agent_session_id, title: fresh.title || undefined,
       startedBy: fresh.started_by || undefined });
-    if (!receipt.deduplicated) markForked(fresh, receipt.agent_session_id);
+    // The receipt names the copy either way; without the pointer a later send just forks again.
+    if (!receipt.deduplicated) { try { markForked(fresh, receipt.agent_session_id); } catch { /* see above */ } }
     return continued(receipt);
-  });
+  };
+  return withSessionLock(record.agent_session_id, () => turn(record.agent_session_id));
 }
 
 async function sessionStatus({ agentSessionId, sessionScope }) {
