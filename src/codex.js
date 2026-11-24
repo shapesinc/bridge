@@ -28,6 +28,8 @@ const BUILT_IN_TIMEOUT_SECONDS = 30 * 60;
 // person's Stop is the cancel file, so this is never reported as their Stop.
 const BRIDGE_STOPPED = Object.freeze({ errorType: "bridge_stopped",
   error: "The run stopped partway because shapes.inc Bridge on this computer quit, restarted or updated, or the computer shut down. It may have made partial changes; its session can be continued." });
+// Shown with a turn that had to continue in a copy of the session.
+const FORK_NOTE = "The session was open in the Claude app or a terminal, so this message continued in a new copy of it with the same history. The copy is the one to open and follow from now on.";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 // Only inspect failed native tool results. A page or an agent's prose can quote
@@ -235,7 +237,7 @@ function claimRequest(requestKey, id, fingerprint) {
 
 // The Bridge's record of a session this chat started: which scope may use it,
 // its folder and its latest turn. The vendor keeps the conversation itself.
-function saveSessionRecord({ agent, id, scope, cwd, sandbox, title, startedBy, jobId, executable }) {
+function saveSessionRecord({ agent, id, scope, cwd, sandbox, title, startedBy, jobId, executable, forkedFrom }) {
   const directory = sessionsDirectory();
   const existing = sessions.readRecord(directory, agent, id);
   if (existing && existing.scope !== scope) throw Object.assign(new Error("Unknown session for this chat."), { statusCode: 404 });
@@ -245,7 +247,35 @@ function saveSessionRecord({ agent, id, scope, cwd, sandbox, title, startedBy, j
     started_by: existing ? existing.started_by ?? null : startedBy ?? null,
     created_at: existing?.created_at || now, updated_at: now, last_job_id: jobId,
     turns: (existing?.turns || 0) + 1, ...(executable ? { executable } : {}),
+    ...(existing?.forked_from || forkedFrom ? { forked_from: existing?.forked_from || forkedFrom } : {}),
+    ...(existing?.forked_to ? { forked_to: existing.forked_to } : {}),
   }));
+}
+
+// A session forked because the person had it open: later turns sent to the
+// original go to its newest copy, which holds the whole history.
+function markForked(record, forkId) {
+  const directory = sessionsDirectory();
+  writePrivate(sessions.recordPath(directory, record.agent, record.agent_session_id),
+    JSON.stringify({ ...record, forked_to: forkId, updated_at: new Date().toISOString() }));
+}
+
+// The session a chat's request means: the one it named, or that one's newest copy.
+function resolvedSession(agentSessionId, sessionScope, agent) {
+  const requested = scopedRecord(agentSessionId, sessionScope, agent);
+  const record = latestFork(requested, sessionScope);
+  const marker = record.agent_session_id !== requested.agent_session_id ? { forked_from: requested.agent_session_id } : {};
+  return { requested, record, marker };
+}
+
+function latestFork(record, sessionScope) {
+  let current = record;
+  for (let hops = 0; current.forked_to && hops < 20; hops++) {
+    const next = sessions.findRecord(sessionsDirectory(), current.forked_to);
+    if (!next || next.scope !== sessionScope || next.agent !== current.agent) break;
+    current = next;
+  }
+  return current;
 }
 
 function sessionReceipt(agent, id, title) {
@@ -259,7 +289,7 @@ function publicStatus(id, expectedAgent) {
 }
 
 async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInput, deliveredInputContext, cwd, sandbox = "read-only", timeoutSeconds, agent = "codex", interactive = false, requestKey, builtIn, resumeThreadId, usageBaseline,
-  sessionScope, title, startedBy, resumeSessionId, preselected, images: suppliedImages }) {
+  sessionScope, title, startedBy, resumeSessionId, forkFromSessionId, preselected, images: suppliedImages }) {
   if (!["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
   // Already validated by the route; normalized again for direct callers.
   const images = Array.isArray(suppliedImages) && suppliedImages.every((image) => Buffer.isBuffer(image?.bytes))
@@ -273,6 +303,10 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
   }
   if (resumeSessionId !== undefined && (sessionScope === undefined || sessions.sessionId(resumeSessionId) !== resumeSessionId)) {
     throw new Error("A session turn needs its session id and scope.");
+  }
+  if (forkFromSessionId !== undefined && (sessionScope === undefined || resumeSessionId !== undefined || agent !== "claude"
+      || sessions.sessionId(forkFromSessionId) !== forkFromSessionId)) {
+    throw new Error("A fork needs the Claude Code session id it continues and its scope.");
   }
   if (title !== undefined && (typeof title !== "string" || title.length > 400)) throw new Error("title must be short text.");
   if (startedBy !== undefined && (typeof startedBy !== "string" || startedBy.length > 80)) throw new Error("started_by must be short text.");
@@ -302,7 +336,8 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     .update(JSON.stringify([prompt, cwd, sandbox, timeout, agent, interactive,
       ...(builtIn ? [builtIn.sessionId, builtIn.scopeId, builtIn.gateway.model] : []),
       ...(input ? [input] : []),
-      ...(sessionScope ? [sessionScope, resumeSessionId || null, sessionTitle || null] : [])])).digest("hex");
+      ...(sessionScope ? [sessionScope, resumeSessionId || null, sessionTitle || null] : []),
+      ...(forkFromSessionId ? [forkFromSessionId] : [])])).digest("hex");
   if (requestKey && fs.existsSync(root())) {
     const existing = existingRequest(requestKey, fingerprint);
     if (existing) return { ...publicStatus(existing), deduplicated: true };
@@ -343,6 +378,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     ...(builtIn ? { sessionId: builtIn.sessionId, scopeId: builtIn.scopeId, funding: "shapes_credits", runtimeVersion: selected.version,
       ...(usageBaseline ? { runtimeUsageTotal: usageBaseline } : {}) } : {}),
     ...(sessionScope ? { sessionScope, ...(agentSessionId ? { agentSessionId } : {}), ...(resumeSessionId ? { resumedSession: true } : {}) } : {}),
+    ...(forkFromSessionId ? { forkedFrom: forkFromSessionId, modelNote: FORK_NOTE } : {}),
     promptPreview: prompt.trim().replace(/\s+/g, " ").slice(0, 160) };
   writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable, agent, interactive,
     ...(savedImages.length ? { images: savedImages } : {}),
@@ -353,7 +389,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     ...(!builtIn && agent === "codex" && selected.transport !== "bundled_personal" ? { pickAvailableModel: true } : {}),
     ...(claudeHost ? { claudeHost: true } : {}),
     ...(permissionMode ? { permissionMode } : {}),
-    ...(sessionScope ? { sessionScope, title: sessionTitle, startedBy, agentSessionId, resumeSessionId,
+    ...(sessionScope ? { sessionScope, title: sessionTitle, startedBy, agentSessionId, resumeSessionId, forkFromSessionId,
       ...(agent === "claude" && selected.nameFlag ? { nameFlag: true } : {}) } : {}) }));
   saveState(directory, state);
   if (requestKey) {
@@ -366,7 +402,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     }
   }
   if (sessionScope && agentSessionId) {
-    try { saveSessionRecord({ agent, id: agentSessionId, scope: sessionScope, cwd, sandbox, title: sessionTitle, startedBy, jobId: id, executable }); }
+    try { saveSessionRecord({ agent, id: agentSessionId, scope: sessionScope, cwd, sandbox, title: sessionTitle, startedBy, jobId: id, executable, forkedFrom: forkFromSessionId }); }
     catch (error) {
       Object.assign(state, { status: "failed", error: error.message, errorType: "session_unavailable", finishedAt: new Date().toISOString() });
       saveState(directory, state);
@@ -397,6 +433,7 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     ...(savedImages.length ? { images: savedImages.length } : {}),
     ...(builtIn ? { session_id: builtIn.sessionId, funding: "shapes_credits", runtime_version: selected.version } : {}),
     ...(sessionScope ? sessionReceipt(agent, agentSessionId, resumeSessionId ? sessions.readRecord(sessionsDirectory(), agent, agentSessionId)?.title : sessionTitle) : {}),
+    ...(forkFromSessionId ? { forked_from: forkFromSessionId, model_note: FORK_NOTE } : {}),
     ...(agent === "claude" ? { permission_scope: claudeScope(sandbox, claudeHost) } : {}) };
 }
 
@@ -493,6 +530,7 @@ function getStatus(id, expectedAgent) {
     final: finalResult, error: state.error ? bounded(state.error, 1000) : null,
     cwd: state.cwd, sandbox: state.sandbox, thread_id: typeof state.threadId === "string" ? bounded(state.threadId, 512) : null,
     ...(state.sessionScope ? sessionReceipt(agent, state.agentSessionId) : {}),
+    ...(typeof state.forkedFrom === "string" ? { forked_from: state.forkedFrom } : {}),
     ...(typeof state.modelNote === "string" ? { model_note: state.modelNote } : {}),
     // What the agent actually got and ran under: how many of the person's
     // images, and Claude Code's own permission mode from its init event.
@@ -599,18 +637,26 @@ async function withSessionLock(id, work) {
 }
 
 // Is the person (or anything else) running this Claude Code session right now,
-// outside the turn this Bridge runs? null means Claude Code couldn't say.
-// Asked only when this Bridge runs no turn of the session, so any running
-// process with this session id is the person's (or another tool's).
-async function claudeOpenElsewhere(record) {
+// outside the turn this Bridge runs? Returns that process's entry, false when
+// none holds it, or null when Claude Code couldn't say. Asked only when this
+// Bridge runs no turn of the session, so any holder is the person's (or another tool's).
+async function claudeHolder(record) {
   const active = await sessions.claudeActiveSessions(await sessionExecutable(record));
   if (!active) return null;
-  return active.some((entry) => entry.session_id === record.agent_session_id);
+  return active.find((entry) => entry.session_id === record.agent_session_id) || false;
+}
+
+async function claudeOpenElsewhere(record) {
+  const holder = await claudeHolder(record);
+  return holder === null ? null : Boolean(holder);
 }
 
 async function sendTurn({ agentSessionId, sessionScope, prompt, requestKey, sandbox, agent, images }) {
-  const record = scopedRecord(agentSessionId, sessionScope, agent);
+  const { requested, record } = resolvedSession(agentSessionId, sessionScope, agent);
   if (sandbox !== undefined && !["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
+  // The chat asked for this session; a turn that runs in a copy of it says so.
+  const continued = (receipt) => receipt.agent_session_id !== requested.agent_session_id
+    ? { ...receipt, forked_from: requested.agent_session_id } : receipt;
   return withSessionLock(record.agent_session_id, async () => {
     const fresh = scopedRecord(record.agent_session_id, sessionScope);
     const previous = lastTurn(fresh);
@@ -618,23 +664,33 @@ async function sendTurn({ agentSessionId, sessionScope, prompt, requestKey, sand
       // A retry of the turn already running returns it instead of a refusal.
       if (requestKey) {
         const mapped = readRequest(validRequestKey(requestKey));
-        if (mapped?.job_id === previous.job_id) return { ...previous, deduplicated: true };
+        if (mapped?.job_id === previous.job_id) return continued({ ...previous, deduplicated: true });
       }
       throw Object.assign(new Error("This session is still working on its last message. Wait for it, or stop it, before sending another."),
         { statusCode: 409, errorType: "session_busy", jobId: previous.job_id });
     }
     const selected = await selectAgent(fresh.agent, fresh.cwd);
-    if (fresh.agent === "claude" && await claudeOpenElsewhere({ ...fresh, executable: selected.executable })) {
-      throw Object.assign(new Error("This Claude Code session is open on this computer right now (in the Claude app or a terminal). Continue it there, or close it there first."),
-        { statusCode: 409, errorType: "session_open_elsewhere" });
+    // Open in the Claude app or a terminal: two processes must never write one
+    // session. An idle holder keeps its copy and this turn continues in a fork
+    // with the same history; a working one is the person's to finish or stop.
+    // Codex threads have no such list; they always resume.
+    const holder = fresh.agent === "claude" ? await claudeHolder({ ...fresh, executable: selected.executable }) : false;
+    if (holder && holder.status !== "idle") {
+      throw Object.assign(new Error("This Claude Code session is working in the Claude app or a terminal on this computer right now. Wait for it to finish there, or stop it there, then send this again."),
+        { statusCode: 409, errorType: "session_open_elsewhere", holderStatus: holder.status || "running" });
     }
-    return startJob({ prompt, cwd: fresh.cwd, sandbox: sandbox || fresh.sandbox, agent: fresh.agent,
-      interactive: fresh.agent === "codex", requestKey, sessionScope, resumeSessionId: fresh.agent_session_id, preselected: selected, images });
+    const common = { prompt, cwd: fresh.cwd, sandbox: sandbox || fresh.sandbox, agent: fresh.agent,
+      interactive: fresh.agent === "codex", requestKey, sessionScope, preselected: selected, images };
+    if (!holder) return continued(await startJob({ ...common, resumeSessionId: fresh.agent_session_id }));
+    const receipt = await startJob({ ...common, forkFromSessionId: fresh.agent_session_id, title: fresh.title || undefined,
+      startedBy: fresh.started_by || undefined });
+    if (!receipt.deduplicated) markForked(fresh, receipt.agent_session_id);
+    return continued(receipt);
   });
 }
 
 async function sessionStatus({ agentSessionId, sessionScope }) {
-  const record = scopedRecord(agentSessionId, sessionScope);
+  const { record, marker } = resolvedSession(agentSessionId, sessionScope);
   const turn = lastTurn(record);
   const running = turn && !TERMINAL.has(turn.state);
   let openElsewhere = null;
@@ -644,7 +700,7 @@ async function sessionStatus({ agentSessionId, sessionScope }) {
     try { openElsewhere = await claudeOpenElsewhere(record); } catch { openElsewhere = null; }
   }
   return {
-    agent_session_id: record.agent_session_id, agent: record.agent, title: record.title, cwd: record.cwd,
+    agent_session_id: record.agent_session_id, ...marker, agent: record.agent, title: record.title, cwd: record.cwd,
     sandbox: record.sandbox, started_by: record.started_by, created_at: record.created_at, updated_at: record.updated_at,
     turns: record.turns || 0,
     state: running ? (turn.state === "waiting_on_user" ? "waiting_on_user" : "running") : "idle",
@@ -658,7 +714,7 @@ async function sessionStatus({ agentSessionId, sessionScope }) {
 }
 
 async function readSession({ agentSessionId, sessionScope, limit = 10, agent }) {
-  const record = scopedRecord(agentSessionId, sessionScope, agent);
+  const { record, marker } = resolvedSession(agentSessionId, sessionScope, agent);
   const count = Number(limit);
   if (!Number.isInteger(count) || count < 1 || count > 30) throw new Error("limit must be between 1 and 30.");
   let read;
@@ -672,20 +728,20 @@ async function readSession({ agentSessionId, sessionScope, limit = 10, agent }) 
         { statusCode: 502, errorType: "session_read_failed" });
     }
   }
-  return { agent_session_id: record.agent_session_id, agent: record.agent, title: record.title,
+  return { agent_session_id: record.agent_session_id, ...marker, agent: record.agent, title: record.title,
     source: record.agent === "claude" ? "claude_code_session" : "codex_thread", ...read,
     open: sessions.openLinks(record.agent, record.agent_session_id) };
 }
 
 function stopSession({ agentSessionId, sessionScope }) {
-  const record = scopedRecord(agentSessionId, sessionScope);
+  const { record, marker } = resolvedSession(agentSessionId, sessionScope);
   const turn = lastTurn(record);
   if (!turn || TERMINAL.has(turn.state)) {
-    return { agent_session_id: record.agent_session_id, agent: record.agent, stopped: false, state: "idle",
+    return { agent_session_id: record.agent_session_id, ...marker, agent: record.agent, stopped: false, state: "idle",
       ...(turn ? { job_id: turn.job_id } : {}) };
   }
   const cancelled = cancelJob(turn.job_id, record.agent);
-  return { agent_session_id: record.agent_session_id, agent: record.agent, stopped: cancelled.cancel_requested === true,
+  return { agent_session_id: record.agent_session_id, ...marker, agent: record.agent, stopped: cancelled.cancel_requested === true,
     job_id: turn.job_id, state: cancelled.state, cancel_requested: cancelled.cancel_requested };
 }
 

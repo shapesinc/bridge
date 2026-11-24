@@ -27,7 +27,7 @@ if(a[0]==='agents'){const f=process.env.FAKE_ACTIVE;console.log(f&&fs.existsSync
 if(a.includes('--help')){console.log('--print --output-format --verbose --permission-prompts --permission-mode --tools --strict-mcp-config --mcp-config --disallowedTools --session-id --resume -n, --name <name>');process.exit(0);}
 let prompt='';process.stdin.on('data',b=>prompt+=b);process.stdin.on('end',async()=>{
   fs.appendFileSync(process.env.FAKE_LOG,JSON.stringify({args:a,prompt,cwd:process.cwd()})+'\\n');
-  const id=a.includes('--resume')?a[a.indexOf('--resume')+1]:a[a.indexOf('--session-id')+1];
+  const id=a.includes('--resume')&&!a.includes('--fork-session')?a[a.indexOf('--resume')+1]:a[a.indexOf('--session-id')+1];
   while(process.env.FAKE_HOLD&&fs.existsSync(process.env.FAKE_HOLD))await new Promise(r=>setTimeout(r,20));
   const folder=path.join(process.env.CLAUDE_CONFIG_DIR,'projects',process.cwd().replace(/[^a-zA-Z0-9]/g,'-'));
   fs.mkdirSync(folder,{recursive:true});
@@ -133,13 +133,43 @@ test("a session refuses a message while its turn runs or while the person has it
   assert.equal((await finished(f.codex, start.job_id)).state, "cancelled");
   fs.rmSync(f.env.FAKE_HOLD);
 
-  // Open in the person's Claude app: never two writers on one conversation.
-  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify([{ sessionId: id.toUpperCase(), kind: "interactive", status: "idle", pid: 4242 }]));
+  // Working in the person's Claude app: never two writers on one conversation,
+  // and the refusal says what's going on there.
+  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify([{ sessionId: id.toUpperCase(), kind: "interactive", status: "busy", pid: 4242 }]));
   await assert.rejects(f.codex.sendTurn({ agentSessionId: id, sessionScope: SCOPE_A, prompt: "Another" }),
-    { statusCode: 409, errorType: "session_open_elsewhere" });
+    { statusCode: 409, errorType: "session_open_elsewhere", holderStatus: "busy" });
   assert.equal((await f.codex.sessionStatus({ agentSessionId: id, sessionScope: SCOPE_A })).open_elsewhere, true);
   assert.equal(f.runs().length, 1);
   assert.equal(f.codex.stopSession({ agentSessionId: id, sessionScope: SCOPE_A }).stopped, false, "Stop never reaches a session the person runs");
+});
+
+test("a session open but idle in the Claude app continues in a copy with its history, and later turns follow the copy", async (t) => {
+  const f = claudeFixture(t);
+  const start = await f.codex.startJob({ prompt: "First", cwd: f.work, agent: "claude", sessionScope: SCOPE_A, title: "Tod: presets", startedBy: "Tod" });
+  const id = start.agent_session_id;
+  await finished(f.codex, start.job_id);
+  // Opened from the card: the Claude app keeps a resident, idle process on it.
+  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify([{ sessionId: id, kind: "interactive", status: "idle", pid: 4242 }]));
+  const fork = await f.codex.sendTurn({ agentSessionId: id, sessionScope: SCOPE_A, prompt: "Now benchmark it" });
+  assert.notEqual(fork.agent_session_id, id);
+  assert.equal(fork.forked_from, id);
+  assert.match(fork.model_note, /open in the Claude app/);
+  assert.equal(fork.session_title, "Tod: presets");
+  assert.equal((await finished(f.codex, fork.job_id)).state, "completed");
+  const forkRun = f.runs().at(-1).args;
+  assert.deepEqual(forkRun.slice(forkRun.indexOf("--resume"), forkRun.indexOf("--resume") + 5),
+    ["--resume", id, "--fork-session", "--session-id", fork.agent_session_id]);
+  // The chat still names the original: status, reads and later turns reach the copy,
+  // which nothing holds, so it resumes; the original in the app is never written.
+  const status = await f.codex.sessionStatus({ agentSessionId: id, sessionScope: SCOPE_A });
+  assert.deepEqual([status.agent_session_id, status.forked_from, status.state], [fork.agent_session_id, id, "idle"]);
+  const next = await f.codex.sendTurn({ agentSessionId: id, sessionScope: SCOPE_A, prompt: "And commit" });
+  assert.deepEqual([next.agent_session_id, next.forked_from], [fork.agent_session_id, id]);
+  await finished(f.codex, next.job_id);
+  const nextRun = f.runs().at(-1).args;
+  assert.equal(nextRun[nextRun.indexOf("--resume") + 1], fork.agent_session_id);
+  assert.ok(!nextRun.includes("--fork-session"));
+  assert.equal(f.runs().filter((run) => run.args.includes("--fork-session")).length, 1);
 });
 
 test("a Claude Code transcript reads as the conversation, without tool traffic or bookkeeping", (t) => {
@@ -269,6 +299,10 @@ test("session routes take only their own fields and answer refusals with typed e
   const mismatch = await call("POST", "/agents/send", { agent_session_id: id, session_scope: SCOPE_A, prompt: "x", agent: "codex" });
   assert.deepEqual([mismatch.status, mismatch.body.error_type], [409, "session_agent_mismatch"]);
   assert.equal((await call("POST", "/agents/send", { agent_session_id: id, session_scope: SCOPE_A, prompt: "x", cwd: "/" })).status, 400);
+  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify([{ sessionId: id, kind: "interactive", status: "busy", pid: 4242 }]));
+  const held = await call("POST", "/agents/send", { agent_session_id: id, session_scope: SCOPE_A, prompt: "x" });
+  assert.deepEqual([held.status, held.body.error_type, held.body.holder_status], [409, "session_open_elsewhere", "busy"]);
+  fs.rmSync(f.env.FAKE_ACTIVE);
   const idle = await call("POST", "/agents/session/stop", { agent_session_id: id, session_scope: SCOPE_A });
   assert.deepEqual([idle.status, idle.body.stopped], [200, false]);
   assert.equal(f.runs().length, 1, "no refused route ran the agent");

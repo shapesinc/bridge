@@ -307,7 +307,10 @@ function argumentsFor(agent, request) {
     const args = ["--print", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
       "--permission-prompts", "host", "--permission-prompt-tool", "stdio"];
     if (request.permissionMode) args.push("--permission-mode", request.permissionMode);
-    if (request.resumeSessionId) args.push("--resume", request.resumeSessionId);
+    if (request.forkFromSessionId) {
+      args.push("--resume", request.forkFromSessionId, "--fork-session", "--session-id", request.agentSessionId);
+      if (request.nameFlag && request.title) args.push(`--name=${request.title}`);
+    } else if (request.resumeSessionId) args.push("--resume", request.resumeSessionId);
     else if (request.agentSessionId) {
       args.push("--session-id", request.agentSessionId);
       if (request.nameFlag && request.title) args.push(`--name=${request.title}`);
@@ -319,8 +322,12 @@ function argumentsFor(agent, request) {
     ...(request.images?.length ? ["--input-format", "stream-json"] : [])];
   // A session the person can open: a new one under the id Bridge chose, or the
   // same session continued. The name is joined to its flag so a title can't
-  // be read as another option.
-  if (request.resumeSessionId) args.push("--resume", request.resumeSessionId);
+  // be read as another option. A fork continues a session the person has open
+  // elsewhere: its full history, under a new id, so two processes never write one.
+  if (request.forkFromSessionId) {
+    args.push("--resume", request.forkFromSessionId, "--fork-session", "--session-id", request.agentSessionId);
+    if (request.nameFlag && request.title) args.push(`--name=${request.title}`);
+  } else if (request.resumeSessionId) args.push("--resume", request.resumeSessionId);
   else if (request.agentSessionId) {
     args.push("--session-id", request.agentSessionId);
     if (request.nameFlag && request.title) args.push(`--name=${request.title}`);
