@@ -80,7 +80,8 @@ function sessionError(res, err) {
   if (err.errorType === "agent_unavailable") return sendJson(res, 409,
     { error: err.message, error_type: err.errorType, started: false, agents: err.agents });
   return sendJson(res, err.statusCode || 400, { error: err.message,
-    ...(err.errorType ? { error_type: err.errorType } : {}), ...(err.jobId ? { job_id: err.jobId } : {}) });
+    ...(err.errorType ? { error_type: err.errorType } : {}), ...(err.jobId ? { job_id: err.jobId } : {}),
+    ...(err.holderStatus ? { holder_status: err.holderStatus } : {}) });
 }
 
 function onlyKeys(value, keys) {
