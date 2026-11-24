@@ -640,10 +640,15 @@ async function withSessionLock(id, work) {
 // outside the turn this Bridge runs? Returns that process's entry, false when
 // none holds it, or null when Claude Code couldn't say. Asked only when this
 // Bridge runs no turn of the session, so any holder is the person's (or another tool's).
+// A listed session whose process ended (a finished background session, or a pid
+// that's gone) no longer holds it.
+const HOLDER_ENDED = new Set(["done", "completed", "finished", "stopped", "exited", "failed", "errored", "killed", "crashed", "dead"]);
+
 async function claudeHolder(record) {
   const active = await sessions.claudeActiveSessions(await sessionExecutable(record));
   if (!active) return null;
-  return active.find((entry) => entry.session_id === record.agent_session_id) || false;
+  return active.find((entry) => entry.session_id === record.agent_session_id
+    && !HOLDER_ENDED.has(entry.status) && !(Number.isInteger(entry.pid) && !alive(entry.pid))) || false;
 }
 
 async function claudeOpenElsewhere(record) {

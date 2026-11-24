@@ -135,7 +135,7 @@ test("a session refuses a message while its turn runs or while the person has it
 
   // Working in the person's Claude app: never two writers on one conversation,
   // and the refusal says what's going on there.
-  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify([{ sessionId: id.toUpperCase(), kind: "interactive", status: "busy", pid: 4242 }]));
+  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify([{ sessionId: id.toUpperCase(), kind: "interactive", status: "busy", pid: process.pid }]));
   await assert.rejects(f.codex.sendTurn({ agentSessionId: id, sessionScope: SCOPE_A, prompt: "Another" }),
     { statusCode: 409, errorType: "session_open_elsewhere", holderStatus: "busy" });
   assert.equal((await f.codex.sessionStatus({ agentSessionId: id, sessionScope: SCOPE_A })).open_elsewhere, true);
@@ -149,7 +149,10 @@ test("a session open but idle in the Claude app continues in a copy with its his
   const id = start.agent_session_id;
   await finished(f.codex, start.job_id);
   // Opened from the card: the Claude app keeps a resident, idle process on it.
-  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify([{ sessionId: id, kind: "interactive", status: "idle", pid: 4242 }]));
+  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify([{ sessionId: id, kind: "interactive", status: "idle", pid: process.pid }]));
+  // A pid of its own keeps it listed as a live holder; a finished background run doesn't hold it.
+  const holders = [{ sessionId: id, kind: "background", state: "done" }, { sessionId: id, kind: "interactive", status: "idle", pid: process.pid }];
+  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify(holders));
   const fork = await f.codex.sendTurn({ agentSessionId: id, sessionScope: SCOPE_A, prompt: "Now benchmark it" });
   assert.notEqual(fork.agent_session_id, id);
   assert.equal(fork.forked_from, id);
@@ -169,6 +172,11 @@ test("a session open but idle in the Claude app continues in a copy with its his
   const nextRun = f.runs().at(-1).args;
   assert.equal(nextRun[nextRun.indexOf("--resume") + 1], fork.agent_session_id);
   assert.ok(!nextRun.includes("--fork-session"));
+  // A listed process that's gone holds nothing: the copy simply resumes.
+  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify([{ sessionId: fork.agent_session_id, kind: "interactive", status: "busy", pid: 2 ** 22 + 7 }]));
+  const third = await f.codex.sendTurn({ agentSessionId: id, sessionScope: SCOPE_A, prompt: "Ship it" });
+  assert.equal(third.agent_session_id, fork.agent_session_id);
+  await finished(f.codex, third.job_id);
   assert.equal(f.runs().filter((run) => run.args.includes("--fork-session")).length, 1);
 });
 
@@ -177,7 +185,7 @@ test("two follow-ups at once to a session open in the Claude app make one copy",
   const start = await f.codex.startJob({ prompt: "First", cwd: f.work, agent: "claude", sessionScope: SCOPE_A });
   const id = start.agent_session_id;
   await finished(f.codex, start.job_id);
-  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify([{ sessionId: id, kind: "interactive", status: "idle", pid: 4242 }]));
+  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify([{ sessionId: id, kind: "interactive", status: "idle", pid: process.pid }]));
   fs.writeFileSync(f.env.FAKE_HOLD, "");
   const sent = await Promise.allSettled(["One", "Two"].map((prompt) => f.codex.sendTurn({ agentSessionId: id, sessionScope: SCOPE_A, prompt })));
   const started = sent.filter((result) => result.status === "fulfilled").map((result) => result.value);
@@ -315,7 +323,7 @@ test("session routes take only their own fields and answer refusals with typed e
   const mismatch = await call("POST", "/agents/send", { agent_session_id: id, session_scope: SCOPE_A, prompt: "x", agent: "codex" });
   assert.deepEqual([mismatch.status, mismatch.body.error_type], [409, "session_agent_mismatch"]);
   assert.equal((await call("POST", "/agents/send", { agent_session_id: id, session_scope: SCOPE_A, prompt: "x", cwd: "/" })).status, 400);
-  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify([{ sessionId: id, kind: "interactive", status: "busy", pid: 4242 }]));
+  fs.writeFileSync(f.env.FAKE_ACTIVE, JSON.stringify([{ sessionId: id, kind: "interactive", status: "busy", pid: process.pid }]));
   const held = await call("POST", "/agents/send", { agent_session_id: id, session_scope: SCOPE_A, prompt: "x" });
   assert.deepEqual([held.status, held.body.error_type, held.body.holder_status], [409, "session_open_elsewhere", "busy"]);
   fs.rmSync(f.env.FAKE_ACTIVE);
