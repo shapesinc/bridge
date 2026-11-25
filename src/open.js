@@ -4,7 +4,7 @@
 // should do, from the saved local state alone. No network, no account calls.
 const { spawn } = require("node:child_process");
 
-const COMPUTERS_PAGE = "https://talk.shapes.inc/settings/computers";
+const COMPUTERS_PAGE = "https://shapes.inc/settings/computers";
 
 function describeOpenAction(config) {
   if (!config?.device_token) return { action: "setup", message: "This computer is not connected yet. Finish setup from the Computers page in shapes.inc.", openPage: true };
