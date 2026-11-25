@@ -164,7 +164,6 @@ function images(value) {
         "Typed original image survives tool calls, resume, feature removal and crash recovery exactly once");
       assert.equal(JSON.stringify(request.body).includes("context_key"), false);
     }
-    const enabledPrompt = strings(requests[0].body.input[0]).join("\n");
     const disabledPrompt = strings(requests.find(value => value.scenario === "feature-disabled-resume").body.input[0]).join("\n");
     const resumedDisabledSchemaRetained = disabledPrompt.includes("### `shapes_discover`");
     // MCP discovery follows the current runtime configuration on resume.
