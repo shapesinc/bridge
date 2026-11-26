@@ -4,6 +4,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { version } = require("../package.json");
 
 const argv = process.argv.slice(2);
 const stateIndex = argv.indexOf("--state-dir");
@@ -49,7 +50,7 @@ function showStatus() {
   const status = readState("status");
   const recent = status?.updated_at && Date.now() - Date.parse(status.updated_at) < 90000;
   const connection = config.paused ? "paused" : config.revoked ? "removed from your account" : recent ? status.connection : "offline";
-  log(`shapes.inc Bridge: ${connection}\nComputer: ${config.name}\nVersion: ${require("../package.json").version}\nKeep awake: ${config.keep_awake === false ? "off" : "on"}`);
+  log(`shapes.inc Bridge: ${connection}\nComputer: ${config.name}\nVersion: ${version}\nKeep awake: ${config.keep_awake === false ? "off" : "on"}`);
   if (config.revoked) log("Run install to connect this computer again.");
   if (status?.last_heartbeat) log(`Last connected: ${status.last_heartbeat}`);
   if (recent && status?.permissions) {
@@ -125,6 +126,7 @@ async function waitForConnection(timeoutMs = 45000) {
 
 async function main() {
   const command = argv[0] || (readState("config") ? "status" : "install");
+  if (["version", "--version", "-v"].includes(command)) return log(version);
   if (command === "install" || command === "setup") return install();
   if (command === "status") return showStatus();
   if (command === "open") { await require("../src/open").openApp({ log }); return; }
@@ -158,8 +160,11 @@ async function main() {
     return;
   }
   if (["--help", "help", "-h"].includes(command)) {
-    log("shapes.inc Bridge\n  install       Pair once and install the background connection\n  status        Connection and native permission status\n  restart       Restart the background connection\n  update        Install the latest shapes.inc Bridge without pairing again\n  open          What opening the app does: restart, or resume when paused\n  pause         Disconnect and stop automatic startup\n  resume        Reconnect and restore automatic startup\n  permissions   Set up every computer permission in one pass (or name one:\n                accessibility, screen_recording, full_disk_access, automation)\n  awake on|off  Keep the computer awake while connected\n  logs          Recent local activity (may contain private command text)\n  acknowledge-command  Release a stuck command lock after checking that\n                nothing from it is still running (status shows when one is pending)\n  uninstall     Revoke account access and remove the background service\n  foreground    Temporary legacy connection until the terminal closes\n\nInstall options: --name <name>, --no-open, --no-awake, --no-permissions\nDevelopment: --api-url http://127.0.0.1:<port>, --state-dir <directory>");
+    log("shapes.inc Bridge\n  install       Pair once and install the background connection\n  status        Connection and native permission status\n  version       Print the installed version\n  restart       Restart the background connection\n  update        Install the latest shapes.inc Bridge without pairing again\n  open          What opening the app does: restart, or resume when paused\n  pause         Disconnect and stop automatic startup\n  resume        Reconnect and restore automatic startup\n  permissions   Set up every computer permission in one pass (or name one:\n                accessibility, screen_recording, full_disk_access, automation)\n  awake on|off  Keep the computer awake while connected\n  logs          Recent local activity (may contain private command text)\n  acknowledge-command  Release a stuck command lock after checking that\n                nothing from it is still running (status shows when one is pending)\n  uninstall     Revoke account access and remove the background service\n  foreground    Temporary legacy connection until the terminal closes\n\nInstall options: --name <name>, --no-open, --no-awake, --no-permissions\nDevelopment: --api-url http://127.0.0.1:<port>, --state-dir <directory>");
     return;
+  }
+  if (!["pause", "restart", "update", "resume", "permissions", "awake", "uninstall"].includes(command)) {
+    throw new Error(`Unknown command: ${command}. Run help for available commands.`);
   }
   const config = readState("config");
   if (!config?.device_token) throw new Error("Run install first to connect this computer to shapes.inc.");
@@ -219,7 +224,7 @@ async function main() {
     removeState("config"); removeState("status"); removeState("permission-request");
     log("Disconnected and removed from your shapes.inc account. Automatic startup is removed. Local runtime and private logs remain in " + stateDir() + ".");
     lockNotice();
-  } else throw new Error(`Unknown command: ${command}. Run help for available commands.`);
+  }
 }
 
 main().catch((error) => { process.stderr.write(`shapes.inc Bridge: ${error.message}\n`); process.exitCode = 1; });
