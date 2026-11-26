@@ -15,11 +15,13 @@ const fixture = process.env.SHAPES_TEST_COMPUTER_FIXTURE;
 const skipped = process.platform !== "win32" ? "requires the actual Windows desktop"
   : !helper || !fixture ? "requires compiled helper and owned fixture paths" : false;
 const pause = () => new Promise(resolve => setTimeout(resolve, 80));
-async function until(read, check, message) {
-  const deadline = Date.now() + 7000;
-  let value;
-  do { try { value = await read(); if (check(value)) return value; } catch {} await pause(); } while (Date.now() < deadline);
-  assert.fail(`${message}; no matching state before deadline`);
+async function until(read, check, message, timeoutMs = 7000) {
+  const deadline = Date.now() + timeoutMs;
+  let value, error, reads = 0;
+  do { try { value = await read(); reads++; error = undefined; if (check(value)) return value; } catch (caught) { error = caught; } await pause(); } while (Date.now() < deadline);
+  // Say what was last seen, so a failure tells input that never arrived from a stale or unreadable status file.
+  const { targets: _targets, ...seen } = value || {};
+  assert.fail(`${message}; no matching state before deadline (${reads} reads; last ${JSON.stringify(seen)}${error ? `; last read error ${error.code || error.message}` : ""})`);
 }
 function native(request) {
   return new Promise((resolve, reject) => {
@@ -46,7 +48,10 @@ test("Windows actual screenshot and one-use mouse/Unicode/key actions affect onl
     fs.rmSync(directory, { recursive: true, force: true });
   });
   const state = () => JSON.parse(fs.readFileSync(statusPath, "utf8"));
-  await until(state, value => value.pid === child.pid, "fixture opened");
+  // The fixture writes its first status once its window is shown. On a cold CI
+  // runner a freshly compiled WinForms executable can take longer than an input
+  // takes to land (seen as "0 reads; ENOENT" at 7 s), so opening gets its own wait.
+  await until(state, value => value.pid === child.pid, "fixture opened", 30000);
   const controller = createComputerControl({ platform: "win32", binary: helper });
   const scope = "a".repeat(64);
   const run = control => controller.execute({ scope, control });
@@ -70,6 +75,8 @@ test("Windows actual screenshot and one-use mouse/Unicode/key actions affect onl
     assert.equal(reply.success, true, `${reply.error_type || ""}: ${reply.error || ""}`);
     assert.equal(reply.result.dispatched, true); assert.equal(reply.result.delivery_verified, false);
     assert.equal((await run(request)).error_type, "stale_observation");
+    // The release is sent on its own; Windows must not have dropped it.
+    assert.equal(reply.result.button_release_repeated, undefined, `${operation}: Windows dropped the button release`);
     return reply;
   };
   const initial = await observe();

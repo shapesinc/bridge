@@ -1,5 +1,6 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -27,8 +28,54 @@ function replaceStateFile(temporary, destination, { platform = process.platform,
   }
 }
 
+const WINDOWS_ACL_TIMEOUT_MS = 60000;
+
 function stateDir() {
   return process.env.SHAPES_BRIDGE_HOME || path.join(os.homedir(), ".shapes-bridge");
+}
+
+const SYSTEM_SID = "S-1-5-18";
+// Local, domain and Microsoft Entra (S-1-12-1-…) accounts.
+const ACCOUNT_SID = /^S-1-\d+(-\d+)+$/i;
+// Rewriting an ACL makes Windows reapply it to every file inside, so it takes
+// longer the more receipts and sessions the store holds, and longer still while
+// other Bridge processes do the same. The timeout is only a runaway guard:
+// cutting it short refused commands on a busy store.
+const windowsTool = (file, args) => spawnSync(file, args, { encoding: "utf8", windowsHide: true, timeout: WINDOWS_ACL_TIMEOUT_MS, maxBuffer: 65536 });
+
+// True only for exactly the DACL ensureStateDir grants: inheritance removed,
+// full control for this account and SYSTEM, inherited by everything inside,
+// and no other entry. Anything else (or anything unparsed) is rewritten.
+function isPrivateWindowsAcl(sddl, sid) {
+  const dacl = /D:([A-Z]*)((?:\([^()]*\))+)/.exec(typeof sddl === "string" ? sddl : "");
+  if (!dacl || !dacl[1].includes("P") || typeof sid !== "string" || !ACCOUNT_SID.test(sid) || sid === SYSTEM_SID) return false;
+  const trustees = new Set();
+  for (const ace of dacl[2].slice(1, -1).split(")(")) {
+    const [type, flags, rights, object, inherited, trustee, ...extra] = ace.split(";");
+    if (type !== "A" || object || inherited || extra.length || !["fa", "0x1f01ff"].includes(String(rights).toLowerCase())) return false;
+    if (typeof flags !== "string" || flags.length !== 4 || (flags.match(/../g) || []).sort().join() !== "CI,OI") return false;
+    // SDDL names a few well-known accounts by alias: the built-in
+    // Administrator (RID 500) is LA and the built-in Guest (RID 501) is LG.
+    const who = trustee === "SY" ? SYSTEM_SID
+      : (trustee === "LA" && /-500$/.test(sid)) || (trustee === "LG" && /-501$/.test(sid)) ? sid.toUpperCase()
+        : trustee?.toUpperCase();
+    if (who !== SYSTEM_SID && who !== sid.toUpperCase()) return false;
+    trustees.add(who);
+  }
+  return trustees.size === 2;
+}
+
+// The directory's own DACL as SDDL. `icacls /save` without /T reads only the
+// named object, so this never walks the files inside.
+function windowsDirectoryAcl(dir) {
+  const file = path.join(os.tmpdir(), `shapes-bridge-acl-${process.pid}-${crypto.randomBytes(8).toString("hex")}`);
+  try {
+    if (windowsTool("icacls.exe", [dir, "/save", file, "/q"]).status !== 0) return null;
+    const raw = fs.readFileSync(file);
+    const text = (raw.length > 1 && raw[1] === 0 ? raw.toString("utf16le") : raw.toString("utf8")).replace(/^\uFEFF/, "");
+    return text.split(/\r?\n/)[1]?.trim() || null;
+  } catch { return null; }
+  finally { fs.rmSync(file, { force: true }); }
 }
 
 function ensureStateDir() {
@@ -36,15 +83,19 @@ function ensureStateDir() {
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") fs.chmodSync(dir, 0o700);
   // A command supervisor is started by a Bridge process that has just secured
-  // this directory and says so in the environment it hands down. Repeating the
-  // ACL rewrite in every supervisor walks the whole directory, and several
-  // commands starting together then time each other out.
+  // this directory and says so in the environment it hands down.
   else if (!securedWindowsDirectories.has(dir) && process.env.SHAPES_BRIDGE_STATE_SECURED !== dir) {
     // POSIX modes do not restrict Windows ACLs, particularly for a custom path.
-    const identity = spawnSync("whoami.exe", [], { encoding: "utf8", windowsHide: true, timeout: 1500, maxBuffer: 65536 });
-    if (identity.status !== 0 || !identity.stdout?.trim()) throw Object.assign(new Error("Could not identify the Windows account to protect computer credentials."), { code: "STATE_IDENTITY_UNAVAILABLE" });
-    const secured = spawnSync("icacls.exe", [dir, "/inheritance:r", "/grant:r", `${identity.stdout.trim()}:(OI)(CI)F`, "*S-1-5-18:(OI)(CI)F"], { encoding: "utf8", windowsHide: true, timeout: 1500, maxBuffer: 65536 });
-    if (secured.status !== 0) throw Object.assign(new Error("Could not make the shapes.inc Bridge directory private. Choose a directory owned by your Windows account."), { code: "STATE_PERMISSIONS_UNAVAILABLE" });
+    const identity = windowsTool("whoami.exe", ["/user", "/fo", "csv", "/nh"]);
+    const sid = /"(S-1-\d+(?:-\d+)+)"\s*$/.exec(identity.stdout || "")?.[1];
+    if (identity.status !== 0 || !sid) throw Object.assign(new Error("Could not identify the Windows account to protect computer credentials."), { code: "STATE_IDENTITY_UNAVAILABLE" });
+    // Rewriting the ACL makes Windows propagate it to every file inside. Each
+    // new Bridge process did that, so several starting together over a large
+    // store timed each other out. An already private directory is left alone.
+    if (!isPrivateWindowsAcl(windowsDirectoryAcl(dir), sid)) {
+      const secured = windowsTool("icacls.exe", [dir, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`, `*${SYSTEM_SID}:(OI)(CI)F`]);
+      if (secured.status !== 0) throw Object.assign(new Error("Could not make the shapes.inc Bridge directory private. Choose a directory owned by your Windows account."), { code: "STATE_PERMISSIONS_UNAVAILABLE" });
+    }
     securedWindowsDirectories.add(dir);
   }
   return dir;
@@ -90,4 +141,4 @@ function removeState(name) {
   fs.rmSync(path.join(stateDir(), `${name}.json`), { force: true });
 }
 
-module.exports = { stateDir, ensureStateDir, readState, writeState, removeState, replaceStateFile };
+module.exports = { stateDir, ensureStateDir, readState, writeState, removeState, replaceStateFile, isPrivateWindowsAcl, windowsDirectoryAcl };

@@ -217,51 +217,29 @@ test("old Codex binaries are rejected before job creation", (t) => {
   assert.match(JSON.parse(result.stderr).error, /lacks required headless controls/);
 });
 
-test("write mode rejects a primary checkout including subdirectories and symlinks", (t) => {
+test("write mode takes any folder the person names, a primary checkout included, without asking Git", (t) => {
+  // A Bridge worktree rule boxed in the person's own agent (2026-11-22): where
+  // to branch is the agent's call under the person's own settings.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "shapes-codex-git-"));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const previous = process.env.PATH;
+  t.after(() => { process.env.PATH = previous; fs.rmSync(dir, { recursive: true, force: true }); });
   const repo = path.join(dir, "repo");
   fs.mkdirSync(repo);
-  const git = (...args) => execFileSync("git", ["-C", repo, ...args], { stdio: "pipe" });
-  git("init");
-  git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "fixture");
+  execFileSync("git", ["-C", repo, "init"], { stdio: "pipe" });
+  execFileSync("git", ["-C", repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "fixture"], { stdio: "pipe" });
   fs.mkdirSync(path.join(repo, "subdir"));
   fs.symlinkSync(repo, path.join(dir, "alias"));
-  for (const target of [repo, path.join(repo, "subdir"), path.join(dir, "alias")]) {
-    assert.throws(() => validateCwd(target, "workspace-write"), /dedicated Git worktree/);
-    assert.equal(validateCwd(target, "read-only"), fs.realpathSync(target));
-  }
-  const worktree = path.join(dir, "worktree");
-  git("worktree", "add", "--detach", worktree);
-  assert.equal(validateCwd(worktree, "workspace-write"), fs.realpathSync(worktree));
-  assert.equal(validateCwd(dir, "workspace-write"), fs.realpathSync(dir));
-});
-
-test("plain writable folders do not need Git, while explicit Git contexts still validate", (t) => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "shapes-codex-no-git-"));
-  const previous = { PATH: process.env.PATH, GIT_DIR: process.env.GIT_DIR, GIT_WORK_TREE: process.env.GIT_WORK_TREE };
-  t.after(() => {
-    for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
-    fs.rmSync(directory, { recursive: true, force: true });
-  });
-  // A first PATH entry emulates the macOS command-line-tools shim without
-  // invoking a system installer. Any accidental Git invocation fails loudly.
-  const bin = path.join(directory, "bin"), calls = path.join(directory, "git-called");
+  // Any Git call fails loudly: validating a folder never runs Git.
+  const bin = path.join(dir, "bin"), calls = path.join(dir, "git-called");
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, "git"), `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(calls)},'called');process.exit(127);`, { mode: 0o700 });
   process.env.PATH = bin;
-  delete process.env.GIT_DIR; delete process.env.GIT_WORK_TREE;
-  assert.equal(validateCwd(directory, "workspace-write"), fs.realpathSync(directory));
+  for (const target of [repo, path.join(repo, "subdir"), path.join(dir, "alias"), dir]) {
+    assert.equal(validateCwd(target, "workspace-write"), fs.realpathSync(target));
+  }
   assert.equal(fs.existsSync(calls), false);
-  process.env.GIT_DIR = path.join(directory, "explicit-git-dir");
-  assert.throws(() => validateCwd(directory, "workspace-write"), /Cannot validate Git worktree/);
-  assert.equal(fs.existsSync(calls), true);
-  delete process.env.GIT_DIR;
-  fs.unlinkSync(calls);
-  fs.mkdirSync(path.join(directory, "objects")); fs.mkdirSync(path.join(directory, "refs"));
-  fs.writeFileSync(path.join(directory, "HEAD"), "ref: refs/heads/main\n");
-  assert.throws(() => validateCwd(directory, "workspace-write"), /Cannot validate Git worktree/);
-  assert.equal(fs.existsSync(calls), true);
+  assert.throws(() => validateCwd("relative/folder"), /absolute directory/);
+  assert.throws(() => validateCwd(path.join(repo, "missing")), /ENOENT/);
 });
 
 test("invalid job IDs and unsafe inputs fail without starting Codex", (t) => {
@@ -271,4 +249,27 @@ test("invalid job IDs and unsafe inputs fail without starting Codex", (t) => {
     assert.equal(result.status, 1);
     assert.ok(JSON.parse(result.stderr).error);
   }
+});
+
+test("a job finishing between the status read and the supervisor liveness check is not reported lost", (t) => {
+  const { getStatus } = require("../src/codex");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-codex-finish-race-")), previous = process.env.SHAPES_CODEX_JOB_DIR;
+  process.env.SHAPES_CODEX_JOB_DIR = dir;
+  t.after(() => {
+    if (previous === undefined) delete process.env.SHAPES_CODEX_JOB_DIR; else process.env.SHAPES_CODEX_JOB_DIR = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const id = "6f3c2a1e-4b5d-4c7e-8f90-1a2b3c4d5e6f", job = path.join(dir, id);
+  fs.mkdirSync(job, { mode: 0o700 });
+  const running = { agent: "codex", status: "running", supervisorPid: 99999999, createdAt: new Date().toISOString(), startedAt: new Date().toISOString() };
+  fs.writeFileSync(path.join(job, "state.json"), JSON.stringify(running));
+  // The supervisor saves its terminal state and exits exactly while the status
+  // reader is checking whether it is still alive.
+  t.mock.method(process, "kill", () => {
+    fs.writeFileSync(path.join(job, "state.json"), JSON.stringify({ ...running, status: "completed", finishedAt: new Date().toISOString() }));
+    throw Object.assign(new Error("exited"), { code: "ESRCH" });
+  });
+  const status = getStatus(id);
+  assert.equal(status.state, "completed");
+  assert.equal(status.error, null);
 });

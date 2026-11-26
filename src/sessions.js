@@ -82,17 +82,24 @@ async function locked(id, operation) {
   finally { fs.rmSync(lock, { force: true }); }
 }
 
+// A session saved before folders were stored in their on-disk spelling
+// ("/applications/x" for /Applications/x) is still the same folder.
+function sameFolder(stored, cwd) {
+  if (stored === cwd) return true;
+  try { return validateCwd(stored) === cwd; } catch { return false; }
+}
+
 async function createSession(body) {
   validateIdentity(body?.session_id, body?.scope_id);
   if (Object.keys(body).some((key) => !["session_id", "scope_id", "cwd", "workspace_write", "funding"].includes(key))
       || typeof body.cwd !== "string" || (body.workspace_write !== undefined && typeof body.workspace_write !== "boolean")
       || body.funding !== "shapes_credits") throw error("Supply immutable cwd, workspace_write, and shapes_credits funding.");
   const sandbox = body.workspace_write ? "workspace-write" : "read-only";
-  const cwd = validateCwd(expandHome(body.cwd), sandbox);
+  const cwd = validateCwd(expandHome(body.cwd));
   return locked(body.session_id, () => {
     if (fs.existsSync(file(body.session_id))) {
       const existing = load(body.session_id, body.scope_id);
-      if (existing.cwd !== cwd || existing.sandbox !== sandbox || existing.funding !== body.funding) throw error("This session already has different immutable settings.", 409);
+      if (!sameFolder(existing.cwd, cwd) || existing.sandbox !== sandbox || existing.funding !== body.funding) throw error("This session already has different immutable settings.", 409);
       recoverPending(existing);
       return status(existing);
     }

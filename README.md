@@ -175,10 +175,37 @@ These map 1:1 to the `SHAPES_BRIDGE` tool in shapes.inc.
 | `agent_status` | wait for an agent job and read its result | `GET /agents/status?job_id=…` |
 | `agent_cancel` | request that an agent job stops | `POST /agents/cancel` |
 | `agent_jobs` | list recent agent jobs to find a `job_id` again | `GET /agents/jobs` |
+| `agent_send` | send the next message to a session a chat started | `POST /agents/send` |
+| `agent_read` | read a session's recent messages, yours included | `GET /agents/read` |
+| `agent_status` (session) | is a session running, open elsewhere, its last turn | `GET /agents/session` |
+| `agent_cancel` (session) | stop a session's running turn | `POST /agents/session/stop` |
 | `codex_start` | start a task in local Codex                 | `POST /codex/start` |
 | `codex_status` | wait for a job and read its result         | `GET /codex/status?job_id=…` |
 | `codex_cancel` | request that a job stops                  | `POST /codex/cancel` |
 | `codex_jobs` | list recent Codex jobs                     | `GET /codex/jobs` |
+
+### Your own Claude Code and Codex sessions
+
+When a shape uses your Claude Code or Codex, it works in a real session in your own
+apps, on your own sign-in and plan. The Claude Code session is named after the shape
+and the task (for example "Tod: Fix the build"); open it in the Claude app with
+`claude://resume?session=<id>` or in a terminal with `claude --resume <id>`. The Codex
+thread shows in your Codex app's thread list; open it with `codex://threads/<id>` or
+`codex resume <id>`. Follow-ups from the same chat continue that same session, so
+you can watch, steer or take over at any point. A chat can only reach the sessions it
+started. While a Claude Code session is open in your Claude app or a terminal, shapes
+won't send to it. If your Codex config names a model your account doesn't offer, the
+shape's turn uses your account's default model and says so.
+
+Claude Code keeps your own permission settings: your allow, ask and deny rules,
+additional directories and default permission mode (auto when you haven't set
+one, as in the Claude app). When it needs your OK, the chat shows the exact
+command or file and its folder with **Approve once** and **Deny**; only you, as
+this computer's owner, can answer, and the same session carries on. Nothing is
+approved for you, and a folder outside the task's folder is reached only through
+such an approval. A run that finishes its work is reported as done, with anything
+that was denied listed alongside its result. The chat's task card shows what the
+agent is doing right now and has Stop.
 
 ## Documentation
 

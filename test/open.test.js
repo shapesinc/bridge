@@ -1,7 +1,7 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { describeOpenAction, openApp } = require("../src/open");
+const { COMPUTERS_PAGE, describeOpenAction, openApp, openPage } = require("../src/open");
 
 test("opening the app decides from local state only", () => {
   assert.equal(describeOpenAction(null).action, "setup");
@@ -32,4 +32,18 @@ test("opening without an account pairing sends the person to shapes.inc instead 
   assert.equal(result.action, "setup");
   assert.equal(started, 0);
   assert.equal(opened, 1);
+});
+
+test("the Computers page opens on shapes.inc", () => {
+  assert.equal(COMPUTERS_PAGE, "https://shapes.inc/settings/computers");
+  const launches = [];
+  const spawnProcess = (binary, args) => { launches.push([binary, args]); return { on() {}, unref() {} }; };
+  openPage(undefined, { platform: "darwin", spawnProcess });
+  openPage(undefined, { platform: "win32", spawnProcess });
+  openPage(undefined, { platform: "linux", spawnProcess });
+  assert.deepEqual(launches, [
+    ["open", ["https://shapes.inc/settings/computers"]],
+    ["rundll32.exe", ["url.dll,FileProtocolHandler", "https://shapes.inc/settings/computers"]],
+    ["xdg-open", ["https://shapes.inc/settings/computers"]],
+  ]);
 });

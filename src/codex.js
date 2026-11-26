@@ -4,21 +4,32 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const { spawnSync } = require("node:child_process");
 const { StringDecoder } = require("node:string_decoder");
-const { selectAgent, argumentsFor, verifyInteractiveCodex } = require("./agents");
+const { selectAgent, argumentsFor, verifyInteractiveCodex, claudePermissionMode } = require("./agents");
+const agentImages = require("./agent-images");
 const { normalizeRequest, nativeResponse } = require("./approvals");
 const { localEnvironment } = require("./local-workspace");
+const { agentEnvironment } = require("./login-shell-env");
 const { bundledRuntime, launchConfiguration } = require("./bundled-runtime");
 const { spawnOwned, signalOwned } = require("./owned-process");
 const { createNativeToolProxy } = require("./native-tool-proxy");
 const { createToolBroker } = require("./native-tool-broker");
 const { closeProcessGroup } = require("./process-close");
+const { replaceStateFile } = require("./state");
 const { normalizeSessionInput, runtimeSessionInput } = require("./session-input");
+const sessions = require("./agent-sessions");
 
 const MAX_OUTPUT = 64 * 1024;
 const MAX_PROMPT = 64 * 1024;
 const TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"]);
+const BUILT_IN_TIMEOUT_SECONDS = 30 * 60;
+// A supervisor gets SIGTERM or SIGINT only from outside: the app that owns the
+// bridge quitting, restarting or updating, or the computer shutting down. The
+// person's Stop is the cancel file, so this is never reported as their Stop.
+const BRIDGE_STOPPED = Object.freeze({ errorType: "bridge_stopped",
+  error: "The run stopped partway because shapes.inc Bridge on this computer quit, restarted or updated, or the computer shut down. It may have made partial changes; its session can be continued." });
+// Shown with a turn that had to continue in a copy of the session.
+const FORK_NOTE = "The session was open in the Claude app or a terminal, so this message continued in a new copy of it with the same history. The copy is the one to open and follow from now on.";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 // Only inspect failed native tool results. A page or an agent's prose can quote
@@ -107,6 +118,8 @@ function root() {
   return privateDir(path.resolve(process.env.SHAPES_CODEX_JOB_DIR || path.join(os.homedir(), ".shapes-bridge", "codex-jobs")));
 }
 
+function sessionsDirectory() { return privateDir(path.join(root(), "sessions")); }
+
 function jobDir(id) {
   if (!UUID.test(id)) throw new Error("Invalid job ID.");
   const directory = path.join(root(), id);
@@ -114,10 +127,17 @@ function jobDir(id) {
   return privateDir(directory);
 }
 
+// Job files are replaced whole. On Windows a status reader in another process
+// can hold the file for a moment and make the replacement fail;
+// replaceStateFile waits that out within a bounded budget. If it still fails,
+// this process's temporary file is removed so its next write (the terminal
+// receipt, say) is not refused because the temporary name is taken.
+const JOB_FILE_REPLACE_MS = 2000;
 function writePrivate(file, text) {
   const temporary = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, text, { mode: 0o600, flag: "wx" });
-  fs.renameSync(temporary, file);
+  try { replaceStateFile(temporary, file, { budgetMs: JOB_FILE_REPLACE_MS }); }
+  catch (error) { fs.rmSync(temporary, { force: true }); throw error; }
 }
 
 function saveState(directory, state) {
@@ -128,32 +148,30 @@ function loadState(directory) {
   return JSON.parse(fs.readFileSync(path.join(directory, "state.json"), "utf8"));
 }
 
-function validateCwd(value, sandbox) {
+// Any folder the person points at, as their own CLI would take it. Whether to
+// branch, use a worktree or touch a sibling repository is the agent's call
+// under the person's own settings and instructions, not this Bridge's: a
+// worktree rule here boxed in Claude Code (2026-11-22, "you lobotomized my
+// claude").
+function validateCwd(value) {
   if (!value || !path.isAbsolute(value)) throw new Error("--cwd must be an explicit absolute directory.");
-  const cwd = fs.realpathSync(value);
+  const cwd = onDiskPath(value);
   if (!fs.statSync(cwd).isDirectory()) throw new Error("--cwd must be a directory.");
-  if (sandbox === "workspace-write") {
-    // Plain file work must work on a fresh Mac without Command Line Tools.
-    // Only ask Git to classify folders that could actually be repositories.
-    let possibleRepository = Boolean(process.env.GIT_DIR || process.env.GIT_WORK_TREE);
-    for (let parent = cwd; !possibleRepository; parent = path.dirname(parent)) {
-      possibleRepository = fs.existsSync(path.join(parent, ".git"))
-        || (fs.existsSync(path.join(parent, "HEAD")) && fs.existsSync(path.join(parent, "objects")) && fs.existsSync(path.join(parent, "refs")));
-      if (parent === path.dirname(parent)) break;
-    }
-    if (!possibleRepository) return cwd;
-    const git = spawnSync("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8", timeout: 5000, env: { ...localEnvironment(), LC_ALL: "C" } });
-    if (git.error) throw new Error("Cannot validate Git worktree: git is unavailable or timed out.");
-    if (git.status === 0 && git.stdout.trim() === "true") {
-      const dirs = spawnSync("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], { encoding: "utf8", timeout: 5000, env: localEnvironment() });
-      if (dirs.status !== 0) throw new Error("Cannot validate Git worktree.");
-      const [gitDir, commonDir] = dirs.stdout.trim().split("\n").map((p) => fs.realpathSync(p));
-      if (gitDir === commonDir) throw new Error("Workspace writes require a dedicated Git worktree. Create one and pass its path as --cwd.");
-    } else if (git.status !== 128 || !/^fatal: not a git repository \(or any of the parent directories\): \.git\s*$/.test(git.stderr)) {
-      throw new Error("Cannot validate Git worktree.");
-    }
-  }
   return cwd;
+}
+
+// The folder as it is spelled on disk. macOS and Windows open
+// "/applications/shapesinc/app" as /Applications/shapesinc/app, but Claude Code,
+// Codex and the Claude app key sessions and saved permission modes by the exact
+// spelling. The native lookup gives that spelling (and Windows' long names for
+// short ones like RUNNER~1); symlinks resolve as before. A mapped Windows drive
+// that comes back as its network share keeps the drive the person named.
+function onDiskPath(value, realpath = fs.realpathSync) {
+  const resolved = realpath(value);
+  let native;
+  try { native = realpath.native(value); } catch { return resolved; }
+  if (typeof native !== "string" || !native || (/^[a-z]:/i.test(resolved) && !/^[a-z]:/i.test(native))) return resolved;
+  return native;
 }
 
 const REQUEST_KEY = /^[A-Za-z0-9_-]{16,128}$/;
@@ -217,16 +235,88 @@ function claimRequest(requestKey, id, fingerprint) {
   }
 }
 
+// The Bridge's record of a session this chat started: which scope may use it,
+// its folder and its latest turn. The vendor keeps the conversation itself.
+function saveSessionRecord({ agent, id, scope, cwd, sandbox, title, startedBy, jobId, executable, forkedFrom }) {
+  const directory = sessionsDirectory();
+  const existing = sessions.readRecord(directory, agent, id);
+  if (existing && existing.scope !== scope) throw Object.assign(new Error("Unknown session for this chat."), { statusCode: 404 });
+  const now = new Date().toISOString();
+  writePrivate(sessions.recordPath(directory, agent, id), JSON.stringify({
+    agent, agent_session_id: id, scope, cwd, sandbox, title: existing?.title || title || null,
+    started_by: existing ? existing.started_by ?? null : startedBy ?? null,
+    created_at: existing?.created_at || now, updated_at: now, last_job_id: jobId,
+    turns: (existing?.turns || 0) + 1, ...(executable ? { executable } : {}),
+    ...(existing?.forked_from || forkedFrom ? { forked_from: existing?.forked_from || forkedFrom } : {}),
+    ...(existing?.forked_to ? { forked_to: existing.forked_to } : {}),
+  }));
+}
+
+// A session forked because the person had it open: later turns sent to the
+// original go to its newest copy, which holds the whole history.
+function markForked(record, forkId) {
+  const directory = sessionsDirectory();
+  writePrivate(sessions.recordPath(directory, record.agent, record.agent_session_id),
+    JSON.stringify({ ...record, forked_to: forkId, updated_at: new Date().toISOString() }));
+}
+
+// The session a chat's request means: the one it named, or that one's newest copy.
+function resolvedSession(agentSessionId, sessionScope, agent) {
+  const requested = scopedRecord(agentSessionId, sessionScope, agent);
+  const record = latestFork(requested, sessionScope);
+  const marker = record.agent_session_id !== requested.agent_session_id ? { forked_from: requested.agent_session_id } : {};
+  return { requested, record, marker };
+}
+
+function latestFork(record, sessionScope) {
+  let current = record;
+  for (let hops = 0; current.forked_to && hops < 20; hops++) {
+    const next = sessions.findRecord(sessionsDirectory(), current.forked_to);
+    if (!next || next.scope !== sessionScope || next.agent !== current.agent) break;
+    current = next;
+  }
+  return current;
+}
+
+function sessionReceipt(agent, id, title) {
+  if (!id) return {};
+  return { agent_session_id: id, ...(title ? { session_title: title } : {}), open: sessions.openLinks(agent, id) };
+}
+
 function publicStatus(id, expectedAgent) {
   const { diagnostics_directory, diagnostics_available, ...receipt } = getStatus(id, expectedAgent);
   return receipt;
 }
 
-async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInput, deliveredInputContext, cwd, sandbox = "read-only", timeoutSeconds = 1800, agent = "codex", interactive = false, requestKey, builtIn, resumeThreadId, usageBaseline }) {
+async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInput, deliveredInputContext, cwd, sandbox = "read-only", timeoutSeconds, agent = "codex", interactive = false, requestKey, builtIn, resumeThreadId, usageBaseline,
+  sessionScope, title, startedBy, resumeSessionId, forkFromSessionId, preselected, images: suppliedImages }) {
   if (!["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
-  cwd = validateCwd(cwd, sandbox);
-  const timeout = Number(timeoutSeconds);
-  if (!Number.isInteger(timeout) || timeout < 1 || timeout > 86400) throw new Error("Timeout must be between 1 and 86400 seconds.");
+  // Already validated by the route; normalized again for direct callers.
+  const images = Array.isArray(suppliedImages) && suppliedImages.every((image) => Buffer.isBuffer(image?.bytes))
+    ? suppliedImages : agentImages.normalizeImages(suppliedImages);
+  if (images.length && builtIn) throw new Error("Images go to a built-in session through its typed input.");
+  // A session start or turn: the same Claude Code session or Codex thread the
+  // person sees in their own apps, bound to the chat's server-derived scope.
+  if (sessionScope !== undefined) {
+    sessions.sessionScope(sessionScope);
+    if (builtIn) throw new Error("Built-in sessions have their own continuation.");
+  }
+  if (resumeSessionId !== undefined && (sessionScope === undefined || sessions.sessionId(resumeSessionId) !== resumeSessionId)) {
+    throw new Error("A session turn needs its session id and scope.");
+  }
+  if (forkFromSessionId !== undefined && (sessionScope === undefined || resumeSessionId !== undefined || agent !== "claude"
+      || sessions.sessionId(forkFromSessionId) !== forkFromSessionId)) {
+    throw new Error("A fork needs the Claude Code session id it continues and its scope.");
+  }
+  if (title !== undefined && (typeof title !== "string" || title.length > 400)) throw new Error("title must be short text.");
+  if (startedBy !== undefined && (typeof startedBy !== "string" || startedBy.length > 80)) throw new Error("started_by must be short text.");
+  cwd = validateCwd(cwd);
+  // The person's own Claude Code or Codex works as long as the task takes, days
+  // if need be, and Stop ends it. A caller can still set a deadline. Built-in
+  // sessions run on shapes.inc credits and keep theirs.
+  const timeout = timeoutSeconds === undefined || timeoutSeconds === null
+    ? (builtIn ? BUILT_IN_TIMEOUT_SECONDS : null) : Number(timeoutSeconds);
+  if (timeout !== null && (!Number.isInteger(timeout) || timeout < 1 || timeout > 86400)) throw new Error("Timeout must be between 1 and 86400 seconds.");
   if (promptFile && suppliedPrompt !== undefined) throw new Error("Supply a prompt or a prompt file, not both.");
   let prompt = suppliedPrompt;
   if (prompt === undefined) {
@@ -241,10 +331,13 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
   const input = suppliedInput === undefined ? undefined : normalizeSessionInput(suppliedInput);
   if (typeof interactive !== "boolean") throw new Error("interactive must be boolean.");
   validRequestKey(requestKey);
+  const sessionTitle = sessionScope && !resumeSessionId ? sessions.sessionTitle(title, prompt) : undefined;
   const fingerprint = requestKey && crypto.createHash("sha256")
     .update(JSON.stringify([prompt, cwd, sandbox, timeout, agent, interactive,
       ...(builtIn ? [builtIn.sessionId, builtIn.scopeId, builtIn.gateway.model] : []),
-      ...(input ? [input] : [])])).digest("hex");
+      ...(input ? [input] : []),
+      ...(sessionScope ? [sessionScope, resumeSessionId || null, sessionTitle || null] : []),
+      ...(forkFromSessionId ? [forkFromSessionId] : [])])).digest("hex");
   if (requestKey && fs.existsSync(root())) {
     const existing = existingRequest(requestKey, fingerprint);
     if (existing) return { ...publicStatus(existing), deduplicated: true };
@@ -257,22 +350,47 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     const runtime = bundledRuntime();
     if (!runtime.available) throw new Error("The built-in runtime is unavailable. Update shapes.inc on this computer.");
     selected = { ...runtime, id: "codex" };
-  } else selected = await selectAgent(agent, cwd);
+  } else selected = preselected || await selectAgent(agent, cwd);
   agent = selected.id;
-  interactive = (interactive || selected.transport === "bundled_personal") && agent === "codex";
+  // Session Codex threads always use the app-server: `codex exec` threads are
+  // left out of the Codex app's thread list and can't be continued here.
+  interactive = (interactive || selected.transport === "bundled_personal" || Boolean(sessionScope)) && agent === "codex";
   if (interactive && !builtIn) await verifyInteractiveCodex(selected, cwd);
+  // Claude Code write runs ask the person through this Bridge instead of
+  // skipping permissions, in the person's own permission mode; read-only runs
+  // (only when the person asked for no changes) stay limited to read-only tools.
+  const claudeHost = agent === "claude" && sandbox === "workspace-write" && selected.hostPrompts === true;
+  // Every Claude Code write run uses the person's own mode, with or without host prompts.
+  const permissionMode = agent === "claude" && sandbox === "workspace-write"
+    ? claudePermissionMode(cwd, { autoMode: selected.autoMode }) : undefined;
+  if (claudeHost) interactive = true;
   const executable = selected.executable;
   const id = crypto.randomUUID();
+  // Claude Code takes the session id up front, so the session is bound before
+  // it runs; a Codex thread id is known once the app-server starts it.
+  const agentSessionId = resumeSessionId || (sessionScope && agent === "claude" ? crypto.randomUUID() : undefined);
   const directory = privateDir(path.join(root(), id));
+  const savedImages = agentImages.saveImages(directory, images, writePrivate);
   const state = { id, status: "queued", cwd, sandbox, agent, interactive, createdAt: new Date().toISOString(),
+    ...(savedImages.length ? { images: savedImages.length } : {}),
+    ...(claudeHost ? { claudeHost: true } : {}),
     ...(selected.transport === "bundled_personal" ? { funding: "personal", runtimeVersion: selected.version, personalTransport: selected.transport } : {}),
     ...(builtIn ? { sessionId: builtIn.sessionId, scopeId: builtIn.scopeId, funding: "shapes_credits", runtimeVersion: selected.version,
       ...(usageBaseline ? { runtimeUsageTotal: usageBaseline } : {}) } : {}),
+    ...(sessionScope ? { sessionScope, ...(agentSessionId ? { agentSessionId } : {}), ...(resumeSessionId ? { resumedSession: true } : {}) } : {}),
+    ...(forkFromSessionId ? { forkedFrom: forkFromSessionId, modelNote: FORK_NOTE } : {}),
     promptPreview: prompt.trim().replace(/\s+/g, " ").slice(0, 160) };
   writePrivate(path.join(directory, "request.json"), JSON.stringify({ prompt, cwd, sandbox, timeout, executable, agent, interactive,
+    ...(savedImages.length ? { images: savedImages } : {}),
     ...(input ? { input, ...preparedInput } : {}),
     ...(selected.transport === "bundled_personal" ? { personalProfile: selected.profile } : {}),
-    ...(builtIn ? { gateway: builtIn.gateway, resumeThreadId, usageBaseline } : {}) }));
+    ...(builtIn ? { gateway: builtIn.gateway, resumeThreadId, usageBaseline } : {}),
+    // The person's own Codex picks a model this account offers.
+    ...(!builtIn && agent === "codex" && selected.transport !== "bundled_personal" ? { pickAvailableModel: true } : {}),
+    ...(claudeHost ? { claudeHost: true } : {}),
+    ...(permissionMode ? { permissionMode } : {}),
+    ...(sessionScope ? { sessionScope, title: sessionTitle, startedBy, agentSessionId, resumeSessionId, forkFromSessionId,
+      ...(agent === "claude" && selected.nameFlag ? { nameFlag: true } : {}) } : {}) }));
   saveState(directory, state);
   if (requestKey) {
     let existing;
@@ -283,13 +401,22 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
       return { ...publicStatus(existing), deduplicated: true };
     }
   }
+  if (sessionScope && agentSessionId) {
+    try { saveSessionRecord({ agent, id: agentSessionId, scope: sessionScope, cwd, sandbox, title: sessionTitle, startedBy, jobId: id, executable, forkedFrom: forkFromSessionId }); }
+    catch (error) {
+      Object.assign(state, { status: "failed", error: error.message, errorType: "session_unavailable", finishedAt: new Date().toISOString() });
+      saveState(directory, state);
+      throw Object.assign(error, { jobId: id });
+    }
+  }
   // The job is durably queued and listable from here on; a launch failure is
   // recorded on it so a status or list call explains what happened.
   try {
     const child = spawnOwned(process.execPath, [path.join(__dirname, "../bin/codex.js"), "_supervise", id], {
       // Durable jobs outlive a short CLI start request. On Windows the native
       // app's enclosing Job still owns the full runtime and every nested job.
-      parentPid: null, detached: true, stdio: "ignore", env: { ...localEnvironment(), SHAPES_CODEX_JOB_DIR: root(),
+      parentPid: null, detached: true, stdio: "ignore", // Profile sign-in settings are for the person's own agents, never a credits-funded built-in session.
+      env: { ...(builtIn ? localEnvironment() : agentEnvironment()), SHAPES_CODEX_JOB_DIR: root(),
         ...(builtIn ? { SHAPES_RUNTIME_TOKEN: builtIn.token, SHAPES_NATIVE_TOOL_TOKEN: builtIn.toolToken || "" } : {}) },
     });
     await new Promise((resolve, reject) => { child.once("spawn", resolve); child.once("error", reject); });
@@ -303,8 +430,18 @@ async function startJob({ promptFile, prompt: suppliedPrompt, input: suppliedInp
     throw failure;
   }
   return { job_id: id, state: "queued", cwd, sandbox, agent, interactive, created_at: state.createdAt,
+    ...(savedImages.length ? { images: savedImages.length } : {}),
     ...(builtIn ? { session_id: builtIn.sessionId, funding: "shapes_credits", runtime_version: selected.version } : {}),
-    ...(agent === "claude" ? { permission_scope: sandbox === "read-only" ? "read-only-tools" : "full-access" } : {}) };
+    ...(sessionScope ? sessionReceipt(agent, agentSessionId, resumeSessionId ? sessions.readRecord(sessionsDirectory(), agent, agentSessionId)?.title : sessionTitle) : {}),
+    ...(forkFromSessionId ? { forked_from: forkFromSessionId, model_note: FORK_NOTE } : {}),
+    ...(agent === "claude" ? { permission_scope: claudeScope(sandbox, claudeHost) } : {}) };
+}
+
+// Read-only tools; the person's own Claude Code permissions with approvals
+// asked in chat; or (older Claude Code) their own permissions, prompts denied.
+function claudeScope(sandbox, host) {
+  if (sandbox === "read-only") return "read-only-tools";
+  return host ? "ask-in-chat" : "own-settings";
 }
 
 function listJobs({ requestKey, limit = 10, agent } = {}) {
@@ -331,6 +468,7 @@ function listJobs({ requestKey, limit = 10, agent } = {}) {
         job_id: id, state: status.state, agent: status.agent, interactive: status.interactive, cwd: status.cwd,
         sandbox: status.sandbox, created_at: status.created_at, finished_at: status.finished_at,
         error: status.error, error_type: status.error_type, thread_id: status.thread_id,
+        ...(status.agent_session_id ? { agent_session_id: status.agent_session_id } : {}),
         task_preview: typeof state.promptPreview === "string" ? state.promptPreview : null,
       });
     } catch { /* A partially written or removed job is not listable. */ }
@@ -361,9 +499,13 @@ function bounded(value, budget, tail = false) {
 
 function getStatus(id, expectedAgent) {
   const directory = jobDir(id);
-  const state = loadState(directory);
+  let state = loadState(directory);
   const agent = state.agent || "codex";
   if (expectedAgent && agent !== expectedAgent) throw new Error("This job belongs to a different local agent.");
+  // The supervisor can save its terminal state and exit between our read and
+  // the liveness check. Once it is gone its last save is complete, so read
+  // again before calling the job lost.
+  if (!TERMINAL.has(state.status) && state.supervisorPid && !alive(state.supervisorPid)) state = loadState(directory);
   if (!TERMINAL.has(state.status)) {
     let lost = false;
     if (state.supervisorPid) {
@@ -387,13 +529,23 @@ function getStatus(id, expectedAgent) {
     ...(state.sessionId ? { session_id: state.sessionId, funding: state.funding, runtime_version: state.runtimeVersion, usage: state.usage || null } : {}),
     final: finalResult, error: state.error ? bounded(state.error, 1000) : null,
     cwd: state.cwd, sandbox: state.sandbox, thread_id: typeof state.threadId === "string" ? bounded(state.threadId, 512) : null,
+    ...(state.sessionScope ? sessionReceipt(agent, state.agentSessionId) : {}),
+    ...(typeof state.forkedFrom === "string" ? { forked_from: state.forkedFrom } : {}),
+    ...(typeof state.modelNote === "string" ? { model_note: state.modelNote } : {}),
+    // What the agent actually got and ran under: how many of the person's
+    // images, and Claude Code's own permission mode from its init event.
+    ...(Number.isInteger(state.images) ? { images: state.images } : {}),
+    ...(typeof state.permissionMode === "string" ? { permission_mode: bounded(state.permissionMode, 40) } : {}),
+    ...(state.activity?.text ? { activity: { text: bounded(state.activity.text, 400), at: state.activity.at } } : {}),
+    ...(Array.isArray(state.deniedActions) && state.deniedActions.length ? { denied_actions: state.deniedActions.slice(0, 10) } : {}),
+    started_at: state.startedAt || null,
     created_at: state.createdAt, finished_at: state.finishedAt || null,
     exit_code: state.exitCode ?? null,
     error_type: state.errorType || null,
     permission_denials: state.permissionDenials || 0,
     ...(state.errorType === "permission_denied" && state.status === "failed"
       ? { needs_user_action: true } : {}),
-    ...(agent === "claude" ? { permission_scope: state.sandbox === "read-only" ? "read-only-tools" : "full-access" } : {}),
+    ...(agent === "claude" ? { permission_scope: claudeScope(state.sandbox, state.claudeHost) } : {}),
     cancel_requested: fs.existsSync(path.join(directory, "cancel")),
     diagnostics_available: fs.existsSync(path.join(directory, "stdout.log")) || fs.existsSync(path.join(directory, "stderr.log")),
     diagnostics_directory: directory,
@@ -437,6 +589,185 @@ function cancelJob(id, expectedAgent) {
   return { job_id: id, state: state.state, agent: state.agent, cancel_requested: !TERMINAL.has(state.state) || state.cancel_requested };
 }
 
+// --- Sessions: the person's own Claude Code sessions and Codex threads -----
+// Each operation names a session by its vendor id plus the scope the server
+// derived for this chat. A record from another scope is "unknown", the same
+// answer as no record, so a chat can't probe for another chat's sessions.
+
+function scopedRecord(agentSessionId, sessionScope, expectedAgent) {
+  const id = sessions.sessionId(agentSessionId);
+  const scope = sessions.sessionScope(sessionScope);
+  if (expectedAgent !== undefined && !["claude", "codex"].includes(expectedAgent)) throw new Error("agent must be codex or claude.");
+  const record = sessions.findRecord(sessionsDirectory(), id);
+  if (!record || record.scope !== scope) {
+    throw Object.assign(new Error("No session with that id was started from this chat on this computer."), { statusCode: 404, errorType: "unknown_session" });
+  }
+  // A task bound to one agent (say, the person's saved Codex) never reaches the other's session.
+  if (expectedAgent && record.agent !== expectedAgent) {
+    throw Object.assign(new Error("That session belongs to the other local agent."), { statusCode: 409, errorType: "session_agent_mismatch" });
+  }
+  return record;
+}
+
+function lastTurn(record) {
+  if (!UUID.test(record.last_job_id || "")) return null;
+  try { return publicStatus(record.last_job_id, record.agent); } catch { return null; }
+}
+
+// The executable that ran the session, if it is still there; otherwise the
+// current install. Reads and checks never need a fresh sign-in probe.
+async function sessionExecutable(record) {
+  try {
+    if (record.executable && fs.statSync(record.executable).isFile()) return record.executable;
+  } catch {}
+  return (await selectAgent(record.agent, record.cwd)).executable;
+}
+
+// One turn at a time per session, inside this Bridge process.
+const sessionLocks = new Map();
+async function withSessionLock(id, work) {
+  const previous = sessionLocks.get(id) || Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => { release = resolve; });
+  const chained = previous.then(() => current);
+  sessionLocks.set(id, chained);
+  await previous;
+  try { return await work(); }
+  finally { release(); if (sessionLocks.get(id) === chained) sessionLocks.delete(id); }
+}
+
+// Is the person (or anything else) running this Claude Code session right now,
+// outside the turn this Bridge runs? Returns that process's entry, false when
+// none holds it, or null when Claude Code couldn't say. Asked only when this
+// Bridge runs no turn of the session, so any holder is the person's (or another tool's).
+// A listed session whose process ended (a finished background session, or a pid
+// that's gone) no longer holds it.
+const HOLDER_ENDED = new Set(["done", "completed", "finished", "stopped", "exited", "failed", "errored", "killed", "crashed", "dead"]);
+
+async function claudeHolder(record) {
+  const active = await sessions.claudeActiveSessions(await sessionExecutable(record));
+  if (!active) return null;
+  return active.find((entry) => entry.session_id === record.agent_session_id
+    && !HOLDER_ENDED.has(entry.status) && !(Number.isInteger(entry.pid) && !alive(entry.pid))) || false;
+}
+
+async function claudeOpenElsewhere(record) {
+  const holder = await claudeHolder(record);
+  return holder === null ? null : Boolean(holder);
+}
+
+async function sendTurn({ agentSessionId, sessionScope, prompt, requestKey, sandbox, agent, images }) {
+  const { requested, record } = resolvedSession(agentSessionId, sessionScope, agent);
+  if (sandbox !== undefined && !["read-only", "workspace-write"].includes(sandbox)) throw new Error("Unsupported sandbox.");
+  // The chat asked for this session; a turn that runs in a copy of it says so.
+  const continued = (receipt) => receipt.agent_session_id !== requested.agent_session_id
+    ? { ...receipt, forked_from: requested.agent_session_id } : receipt;
+  // Under the session's lock, follow any copy made meanwhile and take the copy's
+  // lock too, so two sends never fork the same session twice.
+  const turn = async (id) => {
+    const fresh = latestFork(scopedRecord(id, sessionScope), sessionScope);
+    if (fresh.agent_session_id !== id) return withSessionLock(fresh.agent_session_id, () => turn(fresh.agent_session_id));
+    const previous = lastTurn(fresh);
+    if (previous && !TERMINAL.has(previous.state)) {
+      // A retry of the turn already running returns it instead of a refusal.
+      if (requestKey) {
+        const mapped = readRequest(validRequestKey(requestKey));
+        if (mapped?.job_id === previous.job_id) return continued({ ...previous, deduplicated: true });
+      }
+      throw Object.assign(new Error("This session is still working on its last message. Wait for it, or stop it, before sending another."),
+        { statusCode: 409, errorType: "session_busy", jobId: previous.job_id });
+    }
+    const selected = await selectAgent(fresh.agent, fresh.cwd);
+    // Open in the Claude app or a terminal: two processes must never write one
+    // session. An idle holder keeps its copy and this turn continues in a fork
+    // with the same history; a working one is the person's to finish or stop.
+    // Codex threads have no such list; they always resume.
+    const holder = fresh.agent === "claude" ? await claudeHolder({ ...fresh, executable: selected.executable }) : false;
+    if (holder && holder.status !== "idle") {
+      throw Object.assign(new Error("This Claude Code session is working in the Claude app or a terminal on this computer right now. Wait for it to finish there, or stop it there, then send this again."),
+        { statusCode: 409, errorType: "session_open_elsewhere", holderStatus: holder.status || "running" });
+    }
+    const common = { prompt, cwd: fresh.cwd, sandbox: sandbox || fresh.sandbox, agent: fresh.agent,
+      interactive: fresh.agent === "codex", requestKey, sessionScope, preselected: selected, images };
+    if (!holder) return continued(await startJob({ ...common, resumeSessionId: fresh.agent_session_id }));
+    const receipt = await startJob({ ...common, forkFromSessionId: fresh.agent_session_id, title: fresh.title || undefined,
+      startedBy: fresh.started_by || undefined });
+    // The receipt names the copy either way; without the pointer a later send just forks again.
+    if (!receipt.deduplicated) { try { markForked(fresh, receipt.agent_session_id); } catch { /* see above */ } }
+    return continued(receipt);
+  };
+  return withSessionLock(record.agent_session_id, () => turn(record.agent_session_id));
+}
+
+async function sessionStatus({ agentSessionId, sessionScope }) {
+  const { record, marker } = resolvedSession(agentSessionId, sessionScope);
+  const turn = lastTurn(record);
+  const running = turn && !TERMINAL.has(turn.state);
+  let openElsewhere = null;
+  // While this Bridge's own turn runs, the session is busy either way; only
+  // an idle session needs Claude Code's list of open sessions.
+  if (record.agent === "claude" && !running) {
+    try { openElsewhere = await claudeOpenElsewhere(record); } catch { openElsewhere = null; }
+  }
+  return {
+    agent_session_id: record.agent_session_id, ...marker, agent: record.agent, title: record.title, cwd: record.cwd,
+    sandbox: record.sandbox, started_by: record.started_by, created_at: record.created_at, updated_at: record.updated_at,
+    turns: record.turns || 0,
+    state: running ? (turn.state === "waiting_on_user" ? "waiting_on_user" : "running") : "idle",
+    last_turn: turn ? { job_id: turn.job_id, state: turn.state, final: turn.final, error: turn.error, error_type: turn.error_type,
+      created_at: turn.created_at, finished_at: turn.finished_at, ...(turn.model_note ? { model_note: turn.model_note } : {}) } : null,
+    // Claude Code only: the session is running in the person's Claude app or a
+    // terminal, beyond this Bridge's own turn. Codex can't report this.
+    open_elsewhere: openElsewhere,
+    open: sessions.openLinks(record.agent, record.agent_session_id),
+  };
+}
+
+async function readSession({ agentSessionId, sessionScope, limit = 10, agent }) {
+  const { record, marker } = resolvedSession(agentSessionId, sessionScope, agent);
+  const count = Number(limit);
+  if (!Number.isInteger(count) || count < 1 || count > 30) throw new Error("limit must be between 1 and 30.");
+  let read;
+  if (record.agent === "claude") {
+    const file = sessions.claudeTranscriptFile(record.agent_session_id, record.cwd);
+    read = file ? sessions.claudeTranscriptMessages(file, count) : { messages: [], truncated: false, not_saved_yet: true };
+  } else {
+    try { read = await sessions.codexThreadMessages(await sessionExecutable(record), record.agent_session_id, { cwd: record.cwd, limit: count }); }
+    catch (error) {
+      throw Object.assign(new Error("Codex could not read this thread right now. Check that Codex is installed and signed in, then retry."),
+        { statusCode: 502, errorType: "session_read_failed" });
+    }
+  }
+  return { agent_session_id: record.agent_session_id, ...marker, agent: record.agent, title: record.title,
+    source: record.agent === "claude" ? "claude_code_session" : "codex_thread", ...read,
+    open: sessions.openLinks(record.agent, record.agent_session_id) };
+}
+
+function stopSession({ agentSessionId, sessionScope }) {
+  const { record, marker } = resolvedSession(agentSessionId, sessionScope);
+  const turn = lastTurn(record);
+  if (!turn || TERMINAL.has(turn.state)) {
+    return { agent_session_id: record.agent_session_id, ...marker, agent: record.agent, stopped: false, state: "idle",
+      ...(turn ? { job_id: turn.job_id } : {}) };
+  }
+  const cancelled = cancelJob(turn.job_id, record.agent);
+  return { agent_session_id: record.agent_session_id, ...marker, agent: record.agent, stopped: cancelled.cancel_requested === true,
+    job_id: turn.job_id, state: cancelled.state, cancel_requested: cancelled.cancel_requested };
+}
+
+function listSessions({ sessionScope, limit = 10 }) {
+  const scope = sessions.sessionScope(sessionScope);
+  const count = Number(limit);
+  if (!Number.isInteger(count) || count < 1 || count > 30) throw new Error("limit must be between 1 and 30.");
+  return { sessions: sessions.listRecords(sessionsDirectory(), scope, count).map((record) => {
+    const turn = lastTurn(record);
+    return { agent_session_id: record.agent_session_id, agent: record.agent, title: record.title, cwd: record.cwd,
+      started_by: record.started_by, updated_at: record.updated_at, turns: record.turns || 0,
+      state: turn && !TERMINAL.has(turn.state) ? "running" : "idle", last_job_id: turn?.job_id || null,
+      open: sessions.openLinks(record.agent, record.agent_session_id) };
+  }) };
+}
+
 async function superviseInteractive(directory, state, request) {
   const { createCodexRpcSession } = require("./codex-rpc");
   const pending = new Map();
@@ -470,7 +801,12 @@ async function superviseInteractive(directory, state, request) {
     stopped = status;
     void closeResources();
   };
-  const onSignal = () => stop("cancelled");
+  const onSignal = () => {
+    if (stopped) return;
+    failed = true;
+    Object.assign(state, BRIDGE_STOPPED);
+    stop("failed");
+  };
   Object.assign(state, { supervisorPid: process.pid, status: "running", startedAt: new Date().toISOString() });
   persist();
   try {
@@ -487,7 +823,10 @@ async function superviseInteractive(directory, state, request) {
     session = createCodexRpcSession({
       executable: request.executable, cwd: request.cwd, sandbox: request.sandbox,
       ...(request.personalProfile ? require("./personal-codex").personalConfiguration(request.personalProfile) : {}),
-      ...(request.gateway ? { ...runtimeConfig, resumeThreadId: request.resumeThreadId, usageBaseline: request.usageBaseline } : {}),
+      ...(request.gateway ? { ...runtimeConfig, resumeThreadId: request.resumeThreadId, usageBaseline: request.usageBaseline } : {
+        ...(request.resumeSessionId ? { resumeThreadId: request.resumeSessionId } : { threadName: request.title }),
+        pickAvailableModel: request.pickAvailableModel === true,
+      }),
       startupRetries: request.gateway ? 1 : 0,
       onLifecycle(value) {
         state.runtimeStartup = { ...value, at: new Date().toISOString() };
@@ -498,9 +837,18 @@ async function superviseInteractive(directory, state, request) {
       },
       onEvent(value) {
         if (request.gateway) value = redactRuntimeValue(value);
+        if (!request.gateway) noteActivity(directory, state, value);
         if (state.sessionId) appendJobEvent(directory, value);
         if (value.type === "usage.updated") { state.usage = value.usage; state.runtimeUsageTotal = value.total_usage; persist(); }
-        if (value.type === "thread.started") { state.threadId = value.thread_id; persist(); }
+        if (value.type === "thread.started") {
+          state.threadId = value.thread_id;
+          if (request.sessionScope) bindSession(state, request, value.thread_id);
+          persist();
+        }
+        if (value.type === "model.substituted") {
+          state.modelNote = `Codex's configured model ${value.configured} isn't offered on this account, so this turn used ${value.model}, the account's default.`;
+          persist();
+        }
         if (value.type === "input.delivered" && request.input) {
           state.inputDelivered = true;
           state.inputDeliveredThreadId = value.thread_id;
@@ -568,8 +916,9 @@ async function superviseInteractive(directory, state, request) {
         }
       }
     }, 100);
-    timer = setTimeout(() => stop("timed_out"), request.timeout * 1000);
-    const completion = session.start(request.runtimeInput || request.input || request.prompt);
+    if (request.timeout) timer = setTimeout(() => stop("timed_out"), request.timeout * 1000);
+    const completion = session.start(request.runtimeInput || request.input
+      || (request.images?.length ? agentImages.codexInput(request.prompt, request.images) : request.prompt));
     state.agentPid = session.child?.pid;
     persist();
     const result = await completion;
@@ -610,8 +959,10 @@ async function superviseInteractive(directory, state, request) {
     state.finishedAt = new Date().toISOString();
     if (state.status === "failed" && state.errorType === "permission_denied") state.error = "The local agent was blocked by tool permissions.";
     else if (state.status === "failed" && !state.error) Object.assign(state, failureReason({ agent: "codex", funding: state.funding, agentError: state.agentError, exitCode: state.exitCode, signal: state.signal, errorType: state.errorType }));
-    saveState(directory, state);
+    // The terminal state is the job's last write: whoever sees it can rely
+    // on the complete event history (and may remove the job directory).
     if (state.sessionId) appendJobEvent(directory, { type: "job.finished", state: state.status });
+    saveState(directory, state);
   }
 }
 
@@ -651,6 +1002,86 @@ function resumeContext(id) {
     inputContext: state.inputDelivered ? state.inputContext || {} : {} };
 }
 
+// "What it's doing now" for the chat's task card: one short line from the
+// agent's own stream (a step it named, a command, a file), never its private
+// reasoning. Saved at most every two seconds.
+// A command's program name only ("Running git"): commands can carry secrets
+// and the line can reach a group chat.
+function commandName(command) {
+  let text = Array.isArray(command) ? command.join(" ") : String(command || "");
+  text = text.replace(/^\s*(?:\S*[\\/])?(?:ba|z|da)?sh(?:\.exe)?\s+-\w*c\s+['"]?/i, "");
+  const token = text.trim().split(/\s+/).find((part) => part && !part.includes("=")) || "";
+  const name = path.basename(token.replace(/['"`]/g, ""));
+  return /^[A-Za-z0-9._+-]{1,40}$/.test(name) ? `Running ${name}` : "Running a command";
+}
+
+// How a denied action is named in receipts: the agent's own description of a
+// command, or the file's name; never the raw command or full path.
+function deniedSummary(tool, input) {
+  const value = input && typeof input === "object" ? input : {};
+  if (typeof value.description === "string" && value.description.trim()) return value.description;
+  if (tool === "Bash") return commandName(value.command);
+  const file = value.file_path || value.notebook_path;
+  if (typeof file === "string" && file) return `Editing ${path.basename(file)}`;
+  return "";
+}
+
+function activityLine(value) {
+  const short = (text, limit = 160) => String(text || "").replace(/\s+/g, " ").trim().slice(0, limit);
+  const base = (file) => path.basename(String(file || ""));
+  if (value?.type === "system" && value.subtype === "task_started") return short(value.description);
+  // API errors the CLI streams as synthetic assistant messages are not a step.
+  if (value?.type === "assistant" && Array.isArray(value.message?.content) && !value.error && value.message?.model !== "<synthetic>") {
+    for (const block of [...value.message.content].reverse()) {
+      if (block?.type === "tool_use") {
+        const input = block.input || {};
+        if (block.name === "Bash") return short(input.description || commandName(input.command));
+        if (["Edit", "MultiEdit", "Write", "NotebookEdit"].includes(block.name)) return short(`Editing ${base(input.file_path || input.notebook_path)}`);
+        if (block.name === "Read") return short(`Reading ${base(input.file_path)}`);
+        if (["Grep", "Glob"].includes(block.name)) return "Searching the code";
+        if (block.name === "Task" || block.name === "Agent") return short(input.description || "Working on a subtask");
+        return short(`Using ${block.name}`);
+      }
+      if (block?.type === "text" && block.text?.trim()) return short(block.text.split(/(?<=[.!?])\s/)[0]);
+    }
+  }
+  const item = value?.item;
+  if (value?.type === "item.started" && item?.type === "command_execution") return commandName(item.command);
+  if (value?.type === "item.started" && item?.type === "file_change") return "Editing files";
+  if (value?.type === "item.completed" && item?.type === "agent_message" && item.text?.trim()) return short(item.text.split(/(?<=[.!?])\s/)[0]);
+  return "";
+}
+
+// Claude Code ends a turn while a command it started in the background is still
+// running, stays alive for it, and picks the work up again when the command
+// reports. Between those two moments it streams nothing, so the status line kept
+// the last thing it did and the run looked stuck while its session looked idle.
+const BACKGROUND_WAIT = "Waiting on a command it left running";
+const BACKGROUND_WAIT_NOTE_MS = Number(process.env.SHAPES_BACKGROUND_WAIT_NOTE_MS) || 5000;
+
+function noteActivity(directory, state, value) {
+  const text = activityLine(value);
+  if (!text || state.activity?.text === text) return;
+  state.activity = { text, at: new Date().toISOString() };
+  const now = Date.now();
+  if (!state.activitySavedAt || now - state.activitySavedAt > 2000) { state.activitySavedAt = now; saveState(directory, state); }
+}
+
+// The vendor reported its session id. A new Codex thread registers here; if a
+// resumed Claude Code session continued under a new id, the record follows it
+// so later turns keep reaching the conversation the person sees.
+function bindSession(state, request, reported) {
+  const id = typeof reported === "string" ? reported.toLowerCase() : "";
+  if (!sessions.SESSION_ID.test(id) || state.agentSessionId === id) return;
+  const previous = state.agentSessionId;
+  state.agentSessionId = id;
+  try {
+    const record = previous ? sessions.readRecord(sessionsDirectory(), state.agent, previous) : null;
+    saveSessionRecord({ agent: state.agent, id, scope: request.sessionScope, cwd: request.cwd, sandbox: request.sandbox,
+      title: record?.title || request.title, startedBy: record?.started_by ?? request.startedBy, jobId: state.id, executable: request.executable });
+  } catch { /* The receipt still carries the vendor id. */ }
+}
+
 async function supervise(id) {
   const directory = jobDir(id);
   // A second supervisor invocation must never start the same task twice.
@@ -671,11 +1102,66 @@ async function supervise(id) {
   let deadline;
   let shutdown, finishExit;
   let stopped;
+  let backgroundWait;
   let turnCompleted = false;
   let turnFailed = false;
   let lineBuffer = "";
   const decoder = new StringDecoder("utf8");
   const logs = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+  // Claude Code approvals (`can_use_tool`) waiting for the person in the chat.
+  const pending = new Map();
+  const persistPending = () => {
+    state.pendingRequests = [...pending.values()].map((entry) => entry.display);
+    if (!stopped) state.status = pending.size ? "waiting_on_user" : "running";
+    saveState(directory, state);
+  };
+  let inputClosed = false;
+  const sendControl = (value) => { if (inputClosed) return; try { child.stdin.write(JSON.stringify(value) + "\n"); } catch {} };
+  const addDenied = ({ tool, summary, by }) => {
+    const entry = { tool: String(tool || "tool").slice(0, 80), summary: String(summary || "").replace(/\s+/g, " ").trim().slice(0, 300),
+      ...(by ? { by } : {}) };
+    const list = state.deniedActions || [];
+    if (!list.some((item) => item.tool === entry.tool && item.summary === entry.summary) && list.length < 10) state.deniedActions = [...list, entry];
+  };
+  function clearHostRequest(id) {
+    if (!pending.delete(id)) return;
+    fs.rmSync(path.join(directory, `${id}.request.json`), { force: true });
+    fs.rmSync(path.join(directory, `${id}.response.json`), { force: true });
+    persistPending();
+  }
+  function hostRequest(value) {
+    const ask = value.request || {};
+    // After the turn's result stdin is closed: an answer could never arrive, so never show the request.
+    if (inputClosed) return;
+    if (ask.subtype !== "can_use_tool" || typeof value.request_id !== "string") {
+      sendControl({ type: "control_response", response: { subtype: "error", request_id: value.request_id, error: "Not supported here." } });
+      return;
+    }
+    const native = { method: "claude/canUseTool", params: { tool_name: ask.tool_name, input: ask.input, description: ask.description, cwd: request.cwd } };
+    let display;
+    try {
+      if (stopped || pending.size >= 16) throw new Error("No room for another approval.");
+      display = normalizeRequest(native);
+    } catch {
+      // Never approve what the chat can't show; the agent hears why.
+      sendControl({ type: "control_response", response: { subtype: "success", request_id: value.request_id,
+        response: { behavior: "deny", message: "This approval couldn't be shown in the shapes.inc chat. Continue without it, or say what you need." } } });
+      addDenied({ tool: ask.tool_name, summary: deniedSummary(ask.tool_name, ask.input) });
+      try { saveState(directory, state); } catch {}
+      return;
+    }
+    try {
+      pending.set(display.id, { native, display, requestId: value.request_id });
+      writePrivate(path.join(directory, `${display.id}.request.json`), JSON.stringify({ native, display }));
+      persistPending();
+    } catch {
+      // Unsaved means nobody can answer it: deny now rather than leave Claude Code waiting.
+      pending.delete(display.id);
+      sendControl({ type: "control_response", response: { subtype: "success", request_id: value.request_id,
+        response: { behavior: "deny", message: "This approval couldn't be shown in the shapes.inc chat. Continue without it, or say what you need." } } });
+      addDenied({ tool: ask.tool_name, summary: deniedSummary(ask.tool_name, ask.input) });
+    }
+  }
   const killGroup = (signal) => {
     if (child && child.pid) {
       signalOwned(child, signal);
@@ -687,8 +1173,13 @@ async function supervise(id) {
     shutdown = closeProcessGroup(child).then((result) => { finishExit?.(result); return result; });
   };
   const finish = (status, detail = {}) => {
-    clearInterval(poll); clearTimeout(deadline);
-    Object.assign(state, detail, { status, finishedAt: new Date().toISOString() });
+    clearInterval(poll); clearTimeout(deadline); clearTimeout(backgroundWait);
+    for (const id of pending.keys()) {
+      fs.rmSync(path.join(directory, `${id}.request.json`), { force: true });
+      fs.rmSync(path.join(directory, `${id}.response.json`), { force: true });
+    }
+    pending.clear();
+    Object.assign(state, detail, { status, pendingRequests: [], finishedAt: new Date().toISOString() });
     saveState(directory, state);
   };
   function capture(kind, chunk) {
@@ -701,22 +1192,57 @@ async function supervise(id) {
     try {
       const value = JSON.parse(line);
       if (agent === "claude") {
-        if (value.type === "system" && value.subtype === "init" && typeof value.session_id === "string") state.threadId = value.session_id;
+        if (value.type === "control_request" && request.claudeHost) { hostRequest(value); return; }
+        if (value.type === "control_cancel_request" && request.claudeHost) {
+          for (const [id, entry] of pending) if (entry.requestId === value.request_id) clearHostRequest(id);
+          return;
+        }
+        // Anything it streams after a turn's result means it is working again.
+        clearTimeout(backgroundWait);
+        noteActivity(directory, state, value);
+        if (value.type === "system" && value.subtype === "init" && typeof value.session_id === "string") {
+          state.threadId = value.session_id;
+          if (typeof value.permissionMode === "string") state.permissionMode = value.permissionMode.slice(0, 40);
+          if (request.sessionScope) bindSession(state, request, value.session_id);
+        }
+        // A denied action is a fact about the run, not its outcome: the agent
+        // often works around it and finishes. The result decides.
         if (value.type === "system" && value.subtype === "permission_denied") {
           state.permissionDenials = (state.permissionDenials || 0) + 1;
-          state.errorType = "permission_denied";
-          turnFailed = true;
+        }
+        if (value.type === "assistant" && !turnCompleted && !value.parent_tool_use_id && !value.error
+            && value.message?.model !== "<synthetic>") {
+          // The latest thing it said (its own words, not a subagent's or an API error)
+          // survives a stop, a crash or a lost result.
+          const text = (value.message?.content || []).filter((part) => part?.type === "text").map((part) => part.text).join("\n").trim();
+          if (text) {
+            const bytes = Buffer.from(text);
+            state.resultTruncated = bytes.length > MAX_OUTPUT;
+            writePrivate(path.join(directory, "result.txt"), bytes.subarray(0, MAX_OUTPUT));
+          }
         }
         if (value.type !== "result") return;
+        if (request.claudeHost) { inputClosed = true; try { child.stdin.end(); } catch {} } // The session's turn is over.
+        // Still alive a few seconds after its turn ended: it is waiting on its own background command.
+        backgroundWait = setTimeout(() => {
+          if (stopped) return;
+          state.activity = { text: BACKGROUND_WAIT, at: new Date().toISOString() };
+          try { saveState(directory, state); } catch { /* The next change saves it. */ }
+        }, BACKGROUND_WAIT_NOTE_MS);
         if (typeof value.session_id === "string") state.threadId = value.session_id;
-        state.permissionDenials = Math.max(state.permissionDenials || 0, Array.isArray(value.permission_denials) ? value.permission_denials.length : 0);
-        const denied = state.permissionDenials > 0;
+        const denials = Array.isArray(value.permission_denials) ? value.permission_denials : [];
+        state.permissionDenials = Math.max(state.permissionDenials || 0, denials.length);
+        // Named by the agent's own description, never the raw command or path:
+        // receipts can reach a group chat.
+        for (const denial of denials) addDenied({ tool: denial?.tool_name, summary: deniedSummary(denial?.tool_name, denial?.tool_input) });
         const success = value.subtype === "success" && value.is_error === false && typeof value.result === "string" && Boolean(value.result.trim());
-        if (!success || denied) {
+        if (!success) {
           turnFailed = true;
-          state.errorType = denied ? "permission_denied" : "agent_error";
-          if (!denied && typeof value.result === "string" && value.result.trim()) state.agentError = value.result.slice(0, 4000);
-          else if (!denied && Array.isArray(value.errors) && typeof value.errors[0] === "string") state.agentError = value.errors[0].slice(0, 4000);
+          if (typeof value.result === "string" && value.result.trim()) state.agentError = value.result.slice(0, 4000);
+          else if (Array.isArray(value.errors) && typeof value.errors[0] === "string") state.agentError = value.errors[0].slice(0, 4000);
+          // A denial it worked around doesn't explain a usage limit, sign-in or network failure.
+          const known = typeof state.agentError === "string" && FAILURE_HINTS.some(([, pattern]) => pattern.test(state.agentError));
+          state.errorType = state.permissionDenials > 0 && !known ? "permission_denied" : "agent_error";
           return;
         }
         turnCompleted = true;
@@ -754,9 +1280,15 @@ async function supervise(id) {
     saveState(directory, state);
     if (fs.existsSync(path.join(directory, "cancel"))) { finish("cancelled"); return; }
     child = spawnOwned(request.executable, argumentsFor(agent, request),
-      { cwd: request.cwd, env: localEnvironment(), detached: true, cleanupReceipt: true, stdio: ["pipe", "pipe", "pipe"] });
+      { cwd: request.cwd, env: agentEnvironment(), detached: true, cleanupReceipt: true, stdio: ["pipe", "pipe", "pipe"] });
+    if (child.pid) { state.agentPid = child.pid; saveState(directory, state); }
     child.stdin.on("error", () => {}); // Early CLI exits can close stdin before the prompt is consumed.
-    child.stdin.end(request.prompt);
+    // Host approvals keep stdin open for answers; the session's result ends it.
+    // The person's images go in the same first message as their task.
+    const message = JSON.stringify(agentImages.claudeUserMessage(request.prompt, request.images)) + "\n";
+    if (request.claudeHost) child.stdin.write(message);
+    else if (request.images?.length) child.stdin.end(message); // --input-format stream-json (argumentsFor)
+    else child.stdin.end(request.prompt);
     child.stdout.on("data", (chunk) => {
       capture("stdout", chunk);
       lineBuffer += decoder.write(chunk);
@@ -767,12 +1299,32 @@ async function supervise(id) {
       if (lineBuffer.length > 1024 * 1024) lineBuffer = "";
     });
     child.stderr.on("data", (chunk) => capture("stderr", chunk));
-    process.once("SIGTERM", () => stop("cancelled"));
-    process.once("SIGINT", () => stop("cancelled"));
+    const onSignal = () => {
+      if (stopped) return;
+      Object.assign(state, BRIDGE_STOPPED);
+      stop("failed");
+    };
+    process.once("SIGTERM", onSignal);
+    process.once("SIGINT", onSignal);
     poll = setInterval(() => {
-      if (fs.existsSync(path.join(directory, "cancel"))) stop("cancelled");
+      if (fs.existsSync(path.join(directory, "cancel"))) { stop("cancelled"); return; }
+      for (const [id, entry] of pending) {
+        const file = path.join(directory, `${id}.response.json`);
+        if (!fs.existsSync(file)) continue;
+        let answer;
+        try { answer = JSON.parse(fs.readFileSync(file, "utf8")); } catch { continue; }
+        if (answer.cancel) { stop("cancelled"); return; }
+        try { answerHost(id, entry, answer); } catch { /* State is saved again on the next change or at the end. */ }
+      }
     }, 250);
-    deadline = setTimeout(() => stop("timed_out"), request.timeout * 1000);
+    function answerHost(id, entry, answer) {
+      sendControl({ type: "control_response", response: { subtype: "success", request_id: entry.requestId, response: answer.result } });
+      if (answer.result?.behavior === "deny") {
+        addDenied({ tool: entry.native.params.tool_name, summary: deniedSummary(entry.native.params.tool_name, entry.native.params.input), by: "person" });
+      }
+      clearHostRequest(id); // Removed from pending first, so a failed save never answers twice.
+    }
+    if (request.timeout) deadline = setTimeout(() => stop("timed_out"), request.timeout * 1000);
     const exit = await new Promise((resolve, reject) => {
       finishExit = resolve;
       child.once("error", reject);
@@ -791,7 +1343,9 @@ async function supervise(id) {
       ...exit,
       ...(!stopped && !success ? {
         ...(state.errorType === "permission_denied" ? {
-          error: "The local agent was blocked by tool permissions. This background runner cannot handle interactive approval; review access in the local agent before continuing.",
+          error: request.claudeHost
+            ? "Claude Code couldn't finish: an action it needed was denied."
+            : "The local agent was blocked by tool permissions. This background runner cannot handle interactive approval; review access in the local agent before continuing.",
           errorType: "permission_denied",
         } : failureReason({ agent, agentError: state.agentError, exitCode: exit.exitCode, signal: exit.signal,
           errorType: state.errorType || (exit.exitCode === 0 ? undefined : "process_error") })),
@@ -806,4 +1360,5 @@ async function supervise(id) {
   }
 }
 
-module.exports = { startJob, getStatus, publicStatus, listJobs, cancelJob, respondJob, supervise, validateCwd, failureReason, jobEvents, resumeContext, MAX_OUTPUT };
+module.exports = { startJob, getStatus, publicStatus, listJobs, cancelJob, respondJob, supervise, validateCwd, onDiskPath, failureReason, jobEvents, resumeContext, MAX_OUTPUT,
+  sendTurn, sessionStatus, readSession, stopSession, listSessions };

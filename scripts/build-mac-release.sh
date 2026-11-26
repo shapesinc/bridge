@@ -41,7 +41,7 @@ echo "==> Build native connection controls and launcher"
 for arch in arm64 x86_64; do
   xcrun clang -arch "$arch" -mmacosx-version-min=11.0 scripts/mac/launcher.c -o "$CACHE/launcher-$arch"
   xcrun swiftc -j 1 -target "$arch-apple-macosx11.0" scripts/mac/controls.swift -o "$CACHE/controls-$arch"
-  xcrun swiftc -parse-as-library -j 1 -target "$arch-apple-macosx11.0" scripts/mac/computer.swift -o "$CACHE/computer-$arch"
+  xcrun swiftc -parse-as-library -j 1 -target "$arch-apple-macosx11.0" scripts/mac/computer.swift scripts/mac/cursor.swift -o "$CACHE/computer-$arch"
 done
 lipo -create "$CACHE/launcher-arm64" "$CACHE/launcher-x86_64" -output "$CACHE/launcher-universal"
 lipo -create "$CACHE/controls-arm64" "$CACHE/controls-x86_64" -output "$CACHE/controls-universal"

@@ -1,8 +1,9 @@
 "use strict";
 
+const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { StringDecoder } = require("node:string_decoder");
-const { localEnvironment } = require("./local-workspace");
+const { agentEnvironment } = require("./login-shell-env");
 const { spawnOwned } = require("./owned-process");
 const { closeProcessGroup } = require("./process-close");
 const { normalizeSessionInput } = require("./session-input");
@@ -25,6 +26,7 @@ function normalizedItem(item) {
 // This transport never converts model text into approvals or answers a request.
 function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", onEvent = () => {},
   resumeThreadId, launchArgs, environment, model, modelProvider, usageBaseline, requiredAccountType,
+  threadName, pickAvailableModel = false,
   onServerRequest, onRequestResolved = () => {}, onDiagnostic = () => {}, onLifecycle = () => {},
   startupTimeoutMs = 30000, requestTimeoutMs = 30000, shutdownTimeoutMs = 1500,
   maxLineBytes = 1024 * 1024 } = {}) {
@@ -253,12 +255,20 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
   async function start(prompt) {
     if (started) throw new Error("A Codex RPC session can start only one task.");
     if (closing) throw new Error("A closed Codex RPC session cannot start a task.");
-    const input = Array.isArray(prompt) ? normalizeSessionInput(prompt).map(({ context_key: _key, ...item }) => item) : [{ type: "text", text: prompt }];
-    if (!Array.isArray(prompt) && (typeof prompt !== "string" || !prompt.trim())) throw new Error("A nonempty prompt is required.");
+    // A personal run's images are the person's attachments, saved by this
+    // Bridge in the job folder: Codex reads them by path (localImage).
+    const local = prompt && typeof prompt === "object" && !Array.isArray(prompt) ? prompt : null;
+    if (local && (typeof local.text !== "string" || !local.text.trim() || !Array.isArray(local.localImages)
+        || local.localImages.length > 4 || local.localImages.some((file) => typeof file !== "string" || !path.isAbsolute(file)))) {
+      throw new Error("A prompt with local images needs text and at most 4 absolute image paths.");
+    }
+    const input = local ? [{ type: "text", text: local.text }, ...local.localImages.map((file) => ({ type: "localImage", path: file }))]
+      : Array.isArray(prompt) ? normalizeSessionInput(prompt).map(({ context_key: _key, ...item }) => item) : [{ type: "text", text: prompt }];
+    if (!local && !Array.isArray(prompt) && (typeof prompt !== "string" || !prompt.trim())) throw new Error("A nonempty prompt is required.");
     started = true;
     enterPhase("initialize");
     child = spawnOwned(executable, launchArgs || ["app-server", "--listen", "stdio://", "-c", "sandbox_workspace_write.writable_roots=[]"],
-      { cwd, env: environment || localEnvironment(), detached: true, cleanupReceipt: true, stdio: ["pipe", "pipe", "pipe"] });
+      { cwd, env: environment || agentEnvironment(), detached: true, cleanupReceipt: true, stdio: ["pipe", "pipe", "pipe"] });
     child.stdin.on("error", fail);
     child.stdout.on("data", (chunk) => { try { consume(chunk); } catch (error) { fail(error); } });
     child.stderr.on("data", (chunk) => callback(onDiagnostic, "stderr", chunk));
@@ -280,6 +290,11 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
         const account = await rpc("account/read", { refreshToken: false });
         if (account?.account?.type !== requiredAccountType) throw new Error("The selected personal account is no longer signed in.");
       }
+      // The person's own Codex: when its configured model isn't one this
+      // account offers, use the account's default, as the Codex app does,
+      // instead of failing the task. Best effort; Codex still decides.
+      let chosenModel = model;
+      if (pickAvailableModel && !chosenModel) chosenModel = await availableModel();
       enterPhase("thread_start");
       // Granting a chat this computer is the consent: no per-command approval
       // prompts. Writes run with full access; read-only stays sandboxed.
@@ -287,9 +302,14 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
       const thread = await rpc(resumeThreadId ? "thread/resume" : "thread/start", {
         ...(resumeThreadId ? { threadId: resumeThreadId } : {}),
         cwd, sandbox: sandbox === "workspace-write" ? "danger-full-access" : "read-only", approvalPolicy: "never",
-        ...(model ? { model } : {}), ...(modelProvider ? { modelProvider } : {}),
+        ...(chosenModel ? { model: chosenModel } : {}), ...(modelProvider ? { modelProvider } : {}),
       });
       rememberThread(thread.thread?.id);
+      if (!resumeThreadId && typeof threadName === "string" && threadName) {
+        // The name the person sees in their Codex thread list. Naming is
+        // cosmetic: a failure never fails the task.
+        await rpc("thread/name/set", { threadId, name: threadName }).catch(() => {});
+      }
       if (thread.approvalPolicy !== undefined && thread.approvalPolicy !== "never") throw new Error("Codex did not disable approval prompts.");
       const revision = turnRevision;
       enterPhase("turn_start");
@@ -309,6 +329,28 @@ function createSingleCodexRpcSession({ executable, cwd, sandbox = "read-only", o
       await close();
       throw fatalError || error;
     }
+  }
+  async function availableModel() {
+    try {
+      // Bounded on its own: a slow model list delays the task by seconds at
+      // most, and then Codex keeps its configured model.
+      let timer;
+      const [config, models] = await Promise.race([
+        Promise.all([rpc("config/read", { includeLayers: false, cwd }), rpc("model/list", { includeHidden: true })]),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("model check timed out")), 5000); }),
+      ]).finally(() => clearTimeout(timer));
+      const configured = config?.config?.model;
+      // A hidden model is still one the account can use; only the fallback
+      // itself comes from the models the Codex app shows.
+      const usable = (Array.isArray(models?.data) ? models.data : [])
+        .filter((item) => item && typeof item.model === "string" && item.model);
+      const shown = usable.filter((item) => item.hidden !== true);
+      if (typeof configured !== "string" || !configured || !shown.length
+          || usable.some((item) => item.model === configured || item.id === configured)) return undefined;
+      const chosen = (shown.find((item) => item.isDefault === true) || shown[0]).model;
+      emit({ type: "model.substituted", configured: configured.slice(0, 80), model: chosen.slice(0, 80) });
+      return chosen;
+    } catch { return undefined; }
   }
   function respond(id, result) {
     if (!pending.has(id) || terminal || fatalError || closing) throw new Error("This Codex request is no longer pending.");

@@ -179,12 +179,13 @@ test("Claude receives literal stdin and restricted read-only tools without crede
   for (const file of fs.readdirSync(jobDir)) assert.equal(fs.statSync(path.join(jobDir, file)).mode & 0o777, 0o600);
 });
 
-test("Claude write mode requires a Git worktree and enables per-run edits without overriding rules", async (t) => {
+test("Claude write mode works in the person's own checkout and enables per-run edits without overriding rules", async (t) => {
   const f = fixture(t, { claude: { body: `console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:JSON.stringify(process.argv.slice(2))}));` } });
   const git = (...args) => execFileSync("git", ["-C", f.dir, ...args], { stdio: "pipe" });
   git("init");
   git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-m", "fixture");
-  await assert.rejects(f.start({ sandbox: "workspace-write" }), /dedicated Git worktree/);
+  // The primary checkout itself: no worktree rule (2026-11-22).
+  assert.equal((await done((await f.start({ sandbox: "workspace-write" })).job_id)).state, "completed");
   const worktree = path.join(f.dir, "worktree");
   git("worktree", "add", "--detach", worktree);
   const settings = path.join(worktree, ".claude", "settings.json");
@@ -193,12 +194,14 @@ test("Claude write mode requires a Git worktree and enables per-run edits withou
   fs.writeFileSync(settings, rules);
   const result = await done((await f.start({ sandbox: "workspace-write", cwd: worktree })).job_id);
   assert.equal(result.state, "completed");
-  assert.equal(result.permission_scope, "full-access");
-  assert.deepEqual(JSON.parse(result.final), ["--print", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none", "--dangerously-skip-permissions"]);
+  // Without host prompts their own settings still decide (here defaultMode plan, applied by
+  // Claude Code itself): nothing is bypassed; what would ask is denied and reported.
+  assert.equal(result.permission_scope, "own-settings");
+  assert.deepEqual(JSON.parse(result.final), ["--print", "--output-format", "stream-json", "--verbose", "--permission-prompts", "none"]);
   assert.equal(fs.readFileSync(settings, "utf8"), rules);
 });
 
-test("Claude requires an explicit successful result, exit zero, and no permission denial", async (t) => {
+test("Claude requires an explicit successful result and exit zero; a denied action alone doesn't fail a run", async (t) => {
   for (const [name, body, errorType] of [
     ["assistant text only", `console.log(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:'Done'}]}}));`, "missing_completion"],
     ["tool events only", `console.log(JSON.stringify({type:'assistant',message:{content:[{type:'tool_use',name:'Read',input:{file_path:'private'}}]}}));`, "missing_completion"],
@@ -206,9 +209,11 @@ test("Claude requires an explicit successful result, exit zero, and no permissio
     ["error flag", `console.log(JSON.stringify({type:'result',subtype:'success',is_error:true,result:'private error'}));`, "agent_error"],
     ["error subtype", `console.log(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:false,result:'private error'}));`, "agent_error"],
     ["nonzero exit", `${COMPLETE}process.exitCode=2;`, "process_error"],
-    ["permission array", `console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:'private partial output',permission_denials:[{tool_name:'Bash',tool_input:{command:'private command'}}]}));`, "permission_denied"],
-    ["permission event", `console.log(JSON.stringify({type:'system',subtype:'permission_denied',tool_name:'Bash'}));${COMPLETE}`, "permission_denied"],
-    ["late permission event", `${COMPLETE}console.log(JSON.stringify({type:'system',subtype:'permission_denied',tool_name:'Bash'}));`, "permission_denied"],
+    ["denied, then an error result", `console.log(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,result:'private error',permission_denials:[{tool_name:'Bash',tool_input:{command:'private command'}}]}));`, "permission_denied"],
+    // A denial it worked around doesn't hide the real failure.
+    ["denied, then a usage limit", `console.log(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,result:'private error: usage limit reached',permission_denials:[{tool_name:'Bash',tool_input:{command:'private command'}}]}));`, "agent_error"],
+    // An API error the CLI streams as a synthetic assistant message is never the result.
+    ["API error as assistant text", `console.log(JSON.stringify({type:'assistant',message:{model:'<synthetic>',content:[{type:'text',text:'private error'}]}}));console.log(JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,result:''}));`, "agent_error"],
   ]) await t.test(name, async (t) => {
     const f = fixture(t, { claude: { body } });
     const result = await done((await f.start()).job_id);
@@ -219,6 +224,55 @@ test("Claude requires an explicit successful result, exit zero, and no permissio
     assert.ok(!JSON.stringify(result).includes("private command"));
     assert.ok(!JSON.stringify(result).includes("private partial output"));
   });
+  // The agent worked around a denial and finished: the run is done, the
+  // denial is a listed fact, and the raw command never reaches the receipt.
+  for (const [name, body] of [
+    ["permission array", `console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:'Built it',permission_denials:[{tool_name:'Bash',tool_input:{command:'private command',description:'Commit it'}}]}));`],
+    ["permission event", `console.log(JSON.stringify({type:'system',subtype:'permission_denied',tool_name:'Bash'}));${COMPLETE}`],
+    ["late permission event", `${COMPLETE}console.log(JSON.stringify({type:'system',subtype:'permission_denied',tool_name:'Bash'}));`],
+  ]) await t.test(`${name} on a successful run`, async (t) => {
+    const f = fixture(t, { claude: { body } });
+    const result = await done((await f.start()).job_id);
+    assert.deepEqual([result.state, result.error_type, result.permission_denials], ["completed", null, 1]);
+    assert.ok(!JSON.stringify(result).includes("private command"));
+  });
+});
+
+// The supervisor's long timers fire within milliseconds, so a default deadline
+// would end a run at once. Only tests can do this: the app's host drops NODE_OPTIONS.
+function fastClock(t, dir) {
+  const preload = path.join(dir, "fast-clock.js");
+  fs.writeFileSync(preload, "const later=global.setTimeout;global.setTimeout=(fn,ms,...rest)=>later(fn,ms>=600000?10:ms,...rest);\n");
+  const previous = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = `${previous ? `${previous} ` : ""}--require ${JSON.stringify(preload)}`;
+  t.after(() => { if (previous === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = previous; });
+}
+
+test("the person's own Claude Code works past any deadline unless its start sets one", async (t) => {
+  await t.test("no deadline", async (t) => {
+    const f = fixture(t, { claude: { body: `setTimeout(()=>{${COMPLETE}},800);` } });
+    fastClock(t, f.dir);
+    const result = await done((await f.start()).job_id);
+    assert.deepEqual([result.state, result.error_type], ["completed", null]);
+  });
+  await t.test("a deadline the start asked for", async (t) => {
+    const f = fixture(t, { claude: { body: `setTimeout(()=>{${COMPLETE}},800);` } });
+    fastClock(t, f.dir);
+    assert.equal((await done((await f.start({ timeoutSeconds: 3600 })).job_id)).state, "timed_out");
+  });
+});
+
+test("the bridge quitting mid-run is reported as the bridge stopping, never as the person's Stop", async (t) => {
+  const f = fixture(t, { claude: { body: "setInterval(()=>{},1000);" } });
+  const job = await f.start();
+  const stateFile = path.join(process.env.SHAPES_CODEX_JOB_DIR, job.job_id, "state.json");
+  let state;
+  for (let i = 0; i < 100 && !(state = JSON.parse(fs.readFileSync(stateFile, "utf8"))).agentPid; i++) await new Promise((resolve) => setTimeout(resolve, 30));
+  process.kill(state.supervisorPid, "SIGTERM");
+  const result = await done(job.job_id);
+  assert.deepEqual([result.state, result.error_type], ["failed", "bridge_stopped"]);
+  assert.match(result.error, /session can be continued/);
+  assert.throws(() => process.kill(state.agentPid, 0), (error) => error.code === "ESRCH");
 });
 
 test("Claude cancellation and timeout kill a process that ignores SIGTERM", async (t) => {
@@ -306,6 +360,10 @@ test("write jobs run the local agents with full access and no approval prompts; 
   assert.deepEqual(codexWrite.slice(0, 2), ["-a", "never"]);
   const codexRead = argumentsFor("codex", { sandbox: "read-only", cwd: "/w" });
   assert.equal(codexRead[codexRead.indexOf("--sandbox") + 1], "read-only");
-  assert.ok(argumentsFor("claude", { sandbox: "workspace-write", cwd: "/w" }).includes("--dangerously-skip-permissions"));
-  assert.ok(!argumentsFor("claude", { sandbox: "read-only", cwd: "/w" }).includes("--dangerously-skip-permissions"));
+  // Claude Code never skips the person's own permissions, with or without host prompts.
+  for (const sandbox of ["workspace-write", "read-only"]) {
+    assert.ok(!argumentsFor("claude", { sandbox, cwd: "/w" }).includes("--dangerously-skip-permissions"));
+  }
+  const ownMode = argumentsFor("claude", { sandbox: "workspace-write", cwd: "/w", permissionMode: "auto" });
+  assert.deepEqual(ownMode.slice(ownMode.indexOf("--permission-mode"), ownMode.indexOf("--permission-mode") + 2), ["--permission-mode", "auto"]);
 });

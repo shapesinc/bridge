@@ -16,6 +16,27 @@ availability, quota, or task success. No prompt is sent during discovery, and
 no account identity, authentication output, or credentials are copied to shapes.inc.
 Sign in to the agent locally if it reports `auth_required`.
 
+**Sign-in from your shell profile.** The desktop app starts from launchd, which
+never reads `~/.zprofile` or `~/.zshrc`. On macOS the Bridge reads your login
+shell's environment once (`$SHELL -l -i -c`, 5 s limit, cached ten minutes, read
+again at most every 15 s while an agent looks signed out; started in the
+background when the Bridge starts) and keeps only the names Claude Code and Codex
+document for sign-in and provider choice: `ANTHROPIC_*`, `CLAUDE_CODE_OAUTH_*`,
+`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_USE_*`/`CLAUDE_CODE_SKIP_*`, `CLAUDE_CODE_CLIENT_*`,
+`AWS_*`, `CLOUD_ML_REGION`, `GOOGLE_APPLICATION_CREDENTIALS`, `CODEX_HOME`,
+`OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENAI_BASE_URL` and each Codex provider's
+`env_key` from `config.toml`. They go only to discovery checks and the agent
+processes; anything the Bridge's own environment already sets wins. They are never
+logged, written to job files or receipts, or sent to shapes.inc. Windows apps
+already inherit the user's environment, so Windows skips this.
+`SHAPES_LOGIN_SHELL` points the read at another shell (tests, support checks).
+
+Claude Code on the command line has its own sign-in, separate from the Claude
+app's, and documents no way to reuse the app's. A Mac with only the Claude app
+finds its bundled Claude Code signed out until `claude auth login` runs once; the
+shapes.inc app's **sign in to Claude Code** link runs exactly that, and the next
+request checks again (signed-out answers are never cached).
+
 On macOS, Codex discovery checks its ChatGPT/Codex app bundles and PATH. Claude
 discovery checks PATH, `~/.local/bin`, legacy `~/.claude/local` installs,
 Homebrew locations, and bounded version directories under Claude Desktop's
@@ -78,22 +99,30 @@ actual task result. Codex browser/app permission rejections produce `failed`
 with `error_type: "permission_denied"`, a positive `permission_denials` count,
 and `needs_user_action: true`, even if the CLI exits zero after explaining the
 blocker. Cancellation and timeout retain their own states. Claude requires an
-explicit successful result, a nonempty final answer, exit code zero, and no
-reported permission denials. Assistant text or tool activity alone never
+explicit successful result, a nonempty final answer and exit code zero; denied
+actions on a successful run are reported, not a failure. Assistant text or tool activity alone never
 counts as completion. Error details remain in private local diagnostics.
 
 ## Permissions and task lifetime
 
-The default `workspace_write: false` uses Codex's read-only shell sandbox.
-Claude uses **read-only tools**, not an OS sandbox: only its `Read`, `Grep`, and
-`Glob` built-ins are exposed, with `dontAsk` mode, an empty strict MCP config,
-and MCP tools denied. User hooks and other local configuration still apply.
-Its receipt says `permission_scope: "read-only-tools"` to distinguish this.
+`workspace_write: false` is only for a person who asked for no changes. It uses
+Codex's read-only shell sandbox. Claude uses **read-only tools**, not an OS
+sandbox: only its `Read`, `Grep`, and `Glob` built-ins are exposed, with
+`dontAsk` mode (shown as "Don't ask" in the Claude app), an empty strict MCP
+config, and MCP tools denied. User hooks and other local configuration still
+apply. Its receipt says `permission_scope: "read-only-tools"` to distinguish this.
+The shapes.inc backend sends `workspace_write: true` for the person's own
+computer unless they asked for a look only.
 
-For edits, set `workspace_write: true` and a dedicated Git worktree path. The
-launcher refuses writes in a repository's primary checkout; create the worktree
-first. A directory outside Git can also be used, but has no Git worktree
-protection. Granting a chat this computer is the consent: write jobs run with
+For edits, set `workspace_write: true` and any absolute folder: a primary
+checkout, a worktree or a plain directory. The folder is stored and run in its
+on-disk spelling (`/applications/shapesinc/app` becomes `/Applications/shapesinc/app`,
+symlinks resolved), because Claude Code, Codex and the Claude app key sessions and
+saved per-folder modes by the exact path; a mapped Windows drive keeps its letter. The launcher has no worktree rule
+(removed 2026-11-23: it made a shape fall back to read-only and box in the
+person's Claude Code). Whether to branch, use a worktree or work in a sibling
+repository is the agent's call under the person's own settings and instructions,
+as when they run it themselves. Granting a chat this computer is the consent: write jobs run with
 **full access and no per-command approval prompts**. Headless and interactive
 Codex both use `danger-full-access` with approvals set to `never`; the shape is
 still asked real questions (`item/tool/requestUserInput`), never for permission.
@@ -142,21 +171,70 @@ the [desktop task link](https://learn.chatgpt.com/docs/reference/commands)
 `codex://threads/THREAD_ID` opens the saved task without granting permission or
 retrying it. The bridge never switches browser or agent to bypass a denial.
 
-Claude write jobs run with `--dangerously-skip-permissions`: no permission
-prompts and no per-command approvals for this task. Managed policy, MCP
-services, hooks, and model preferences remain in effect; the launcher changes
-no saved settings. The worktree check validates the starting directory only: it
-does not make Claude an OS sandbox. Read-only jobs keep `--permission-prompts
-none`, so a request that would need interactive permission fails with
-`error_type: "permission_denied"` instead of waiting. The write receipt says
-`permission_scope: "full-access"`.
+Claude write jobs ask the person instead of skipping permissions when the CLI
+supports host prompts (`--permission-prompt-tool`): they run with
+`--input-format stream-json --permission-prompts host --permission-prompt-tool
+stdio`, under the person's own settings (allow/ask/deny rules, additional
+directories) and their own permission mode: a `permissions.defaultMode` in managed
+settings (including `managed-settings.d/` drop-ins), user, project or local
+settings is applied by Claude Code itself (no flag); without one, the mode they
+chose for that folder (or its nearest parent) in the Claude app's Code tab
+(`default`, `acceptEdits`, `auto`, `plan` or `dontAsk`; best effort, read from the
+app's preferences); otherwise `--permission-mode auto`, the Claude app's default.
+The mode a run actually used comes back as `permission_mode` (from Claude Code's
+init event). Each `can_use_tool`
+request becomes a `waiting_on_user` job with one pending request ("Allow this
+command?" with the folder and exact command or path; Approve once, Deny, Stop
+task). Approve answers `allow` and the same session continues; Deny answers
+`deny` with a note not to retry; nothing is auto-approved. The receipt says
+`permission_scope: "ask-in-chat"`. A run that ends in success is `completed`;
+actions denied along the way (by the person, or by Claude Code's own auto-mode
+check) are listed in `denied_actions` as `{tool, summary, by}` with the agent's
+own description or the program's name, never the raw command; the live
+`activity` line names a command's program the same way. `permission_denied` is only for a run
+that did not succeed because of a denial. The final assistant message is kept
+in the job's result file regardless of the log cap, and status adds
+`activity {text, at}` (the current step) and `started_at`. Claude Code can end a turn while a command it started in the background is still running; it stays alive and continues when that command reports. The job stays `running` for that time, and after a few seconds with nothing streamed its `activity` reads "Waiting on a command it left running" until it streams again.
+
+Older Claude Code without host prompts still never skips permissions: it runs
+in the person's own mode (the same choice as above) with `--permission-prompts
+none`, so what would need asking is denied and listed in `denied_actions`, and
+`permission_scope: "own-settings"`. Managed policy, MCP services, hooks, and
+model preferences remain in effect; the launcher changes no saved settings.
+Read-only jobs keep `--permission-prompts none`, so an action that
+would need interactive permission is denied instead of waiting: a run that still
+finishes is `completed` with the denial in `denied_actions`, and one that doesn't is
+`permission_denied`.
+
+**Images.** `POST /agents/start` and `POST /agents/send` take optional `images`:
+up to four `{media_type, data, name?}` (PNG, JPEG, WebP or GIF; base64; each at
+most 5 MB, 12 MB in all; the signature must match the type). They are the
+person's own chat attachments, read and downsized by the backend; the Bridge
+fetches nothing. Each is saved in the job folder (`images/<n>.<ext>`, private
+files) and goes with the task: Claude Code gets them as image blocks in the same
+stream-json user message (read-only runs switch to `--input-format stream-json`
+for this), Codex as `localImage` inputs on the app-server or `--image=<path>` on
+`codex exec`. The prompt also names the saved copies so the agent can open or
+copy them. The receipt and status say `images: <n>`. Images are not part of the
+request fingerprint: they come from the same chat message, so a retry whose
+download went differently is still the same request and keeps its first job.
+`/capabilities` advertises `features.agent_images` and
+`features.agent_any_folder`.
+
 See the official [CLI reference](https://code.claude.com/docs/en/cli-reference),
 [headless guide](https://code.claude.com/docs/en/headless), and
 [permission modes](https://code.claude.com/docs/en/permission-modes).
 
 Jobs run independently after start returns. **Closing the bridge does not stop
 an agent job already started**; cancel first if needed. Cancellation and timeout
-terminate the process group. The default timeout is 30 minutes. Prompts and
+terminate the process group. A job has no deadline unless its start sets
+`timeoutSeconds` (1 second to 24 hours): the person's own Claude Code or Codex
+can work for days, and cancelling ends it. Built-in sessions, which run on
+shapes.inc credits, keep a 30-minute default. A job's supervisor treats SIGTERM
+or SIGINT as its host stopping (for example the app that embeds the bridge
+quitting or updating, or the computer shutting down), not as cancellation: the
+job ends `failed` with `error_type` `bridge_stopped`, and its session can be
+continued with another turn. Prompts and
 bounded logs remain under `~/.shapes-bridge/codex-jobs/` with private permissions
 (directories 0700, files 0600); the historical directory name also holds Claude
 jobs. Remove a finished job's directory to delete its local records.
@@ -184,8 +262,8 @@ shapes-codex cancel JOB_ID
 ```
 
 CLI status additionally returns the private diagnostic directory. Use
-`--workspace-write` for edits and `--timeout-seconds` to change the 30-minute
-timeout (maximum 24 hours). A Codex `thread_id` can be opened in its desktop app
+`--workspace-write` for edits and `--timeout-seconds` to set a deadline
+(maximum 24 hours); without it a job runs until it finishes or is cancelled. A Codex `thread_id` can be opened in its desktop app
 using `codex://threads/THREAD_ID` through `open` when the user requests it;
 Claude session IDs are not Codex thread links.
 

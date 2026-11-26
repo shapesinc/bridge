@@ -34,6 +34,8 @@ let turns=0;
 require('node:readline').createInterface({input:process.stdin}).on('line',line=>{
  const value=JSON.parse(line);
  if(value.method==='initialize') send({id:value.id,result:{userAgent:'test'}});
+ // Like a Codex that predates model listing: a JSON-RPC error, not silence.
+ if(value.method==='config/read'||value.method==='model/list') send({id:value.id,error:{code:-32601,message:'method not found'}});
  if(value.method==='thread/start') {fs.appendFileSync(${JSON.stringify(path.join(directory, "starts"))},'start\\n');send({id:value.id,result:{thread:{id:threadId},approvalPolicy:'never'}});}
  if(value.method==='turn/start') {
    turns++;
@@ -120,6 +122,24 @@ test("headless-only Codex is rejected with an update instruction before creating
   await assert.rejects(f.start(), (error) => error.errorType === "agent_unavailable" && error.agents[0].status === "unsupported" && /Update Codex/.test(error.message));
   assert.equal(fs.existsSync(path.join(f.directory, "jobs")), false);
   assert.equal(fs.existsSync(path.join(f.directory, "starts")), false);
+});
+
+test("the person's own Codex can wait on them with no deadline, and quitting the bridge is not their Stop", async (t) => {
+  const f = await fixture(t);
+  // Long supervisor timers fire within milliseconds: a default deadline would end the wait at once.
+  const preload = path.join(f.directory, "fast-clock.js");
+  fs.writeFileSync(preload, "const later=global.setTimeout;global.setTimeout=(fn,ms,...rest)=>later(fn,ms>=600000?10:ms,...rest);\n");
+  const previous = process.env.NODE_OPTIONS;
+  process.env.NODE_OPTIONS = `${previous ? `${previous} ` : ""}--require ${JSON.stringify(preload)}`;
+  t.after(() => { if (previous === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = previous; });
+  const id = await f.start(null);
+  await until(id, (value) => value.state === "waiting_on_user");
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(getStatus(id).state, "waiting_on_user");
+  const state = JSON.parse(fs.readFileSync(path.join(f.directory, "jobs", id, "state.json"), "utf8"));
+  process.kill(state.supervisorPid, "SIGTERM");
+  const result = await until(id, (value) => terminal.has(value.state));
+  assert.deepEqual([result.state, result.error_type, result.pending_requests], ["failed", "bridge_stopped", []]);
 });
 
 test("cancel and deadline invalidate a live prompt without granting permission", async (t) => {

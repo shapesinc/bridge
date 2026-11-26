@@ -72,7 +72,12 @@ func observe(_ request: [String: Any]) async throws -> [String: Any] {
     config.showsCursor = true; config.queueDepth = 1
     config.pixelFormat = kCVPixelFormatType_32BGRA
     let receiver = FrameReceiver()
-    let filter = SCContentFilter(display: display, excludingWindows: [])
+    let filter = SCContentFilter(display: display, excludingWindows: content.windows.filter { window in
+        // The shape's own pointer is drawn by this executable's --cursor process.
+        window.owningApplication.map { owner in
+            NSRunningApplication(processIdentifier: owner.processID)?.executableURL?.resolvingSymlinksInPath()
+                == Bundle.main.executableURL?.resolvingSymlinksInPath() } ?? false
+    })
     let stream = SCStream(filter: filter, configuration: config, delegate: nil)
     try stream.addStreamOutput(receiver, type: .screen, sampleHandlerQueue: DispatchQueue(label: "shapes.computer.frame"))
     try await stream.startCapture()
@@ -93,120 +98,772 @@ func observe(_ request: [String: Any]) async throws -> [String: Any] {
             "image_base64": jpeg.base64EncodedString(), "image_content_type": "image/jpeg"]
 }
 
+// Whole-screen input is not available on a Mac: it would move the person's
+// pointer and type into whatever they have in front. Input goes to one
+// observed app's window instead (appInput), in the background.
+func wholeScreenInputRefused() -> ControlError {
+    fail("background_target_required", "A whole-screen view is look-only on a Mac. Observe the app to act in it; the person's pointer and keyboard stay theirs.")
+}
+
+
+// MARK: - App-scoped background control
+//
+// These operations act on one named app's window without bringing it forward,
+// so the person can keep using the Mac. The window is captured on its own
+// (even behind other windows), its accessibility elements are listed with
+// indexes, and input goes to that app only: accessibility actions first, then
+// events posted to that process. Nothing is ever sent to the frontmost app.
+
+let actionableRoles: Set<String> = ["AXButton", "AXTextField", "AXTextArea", "AXLink", "AXCheckBox", "AXRadioButton",
+    "AXMenuItem", "AXMenuButton", "AXPopUpButton", "AXComboBox", "AXRow", "AXCell", "AXTab", "AXTabGroup",
+    "AXSearchField", "AXSlider", "AXDisclosureTriangle", "AXOutlineRow", "AXSegment", "AXIncrementor", "AXSecureTextField"]
+let textRoles: Set<String> = ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"]
+
+func axValue<T>(_ element: AXUIElement, _ attribute: String) -> T? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+    return value as? T
+}
+func axFrame(_ element: AXUIElement) -> CGRect? {
+    var position = CGPoint.zero, size = CGSize.zero
+    guard let p: AXValue = axValue(element, kAXPositionAttribute), let s: AXValue = axValue(element, kAXSizeAttribute),
+          AXValueGetValue(p, .cgPoint, &position), AXValueGetValue(s, .cgSize, &size) else { return nil }
+    return CGRect(origin: position, size: size)
+}
+func axActions(_ element: AXUIElement) -> [String] {
+    var names: CFArray?
+    guard AXUIElementCopyActionNames(element, &names) == .success else { return [] }
+    return (names as? [String]) ?? []
+}
+func clip(_ text: String?, _ limit: Int = 80) -> String? {
+    guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+    return text.count > limit ? String(text.prefix(limit)) + "…" : text
+}
+
+func pause(_ seconds: Double) { usleep(useconds_t(seconds * 1_000_000)) }
+
 @MainActor
-func input(_ request: [String: Any]) throws -> [String: Any] {
-    guard AXIsProcessTrusted(), CGPreflightPostEventAccess() else { throw fail("accessibility_denied", "Allow Keyboard and mouse in the Mac app's computer setup.") }
-    guard CGPreflightScreenCaptureAccess() else { throw fail("screen_recording_denied", "Screen Recording is required to observe the target before input.") }
-    guard !IsSecureEventInputEnabled() else { throw fail("secure_input", "Secure input is active. The person must complete that interaction.") }
-    let app = try activeApp()
-    guard let expected = request["expected"] as? [String: Any],
-          let pid = expected["pid"] as? Int32, app.processIdentifier == pid,
-          let displayID = (expected["display_id"] as? NSNumber)?.uint32Value,
-          let bounds = expected["bounds"] as? [String: Double], bounds == rectangle(CGDisplayBounds(displayID)),
-          CGDisplayIsActive(displayID) != 0,
-          let width = expected["width"] as? Double, let height = expected["height"] as? Double, width > 0, height > 0 else {
-        throw fail("desktop_changed", "The observed app or display changed. Observe again before input.")
+func consoleSession() throws {
+    guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+          session[kCGSessionOnConsoleKey as String] as? Bool == true,
+          (session[kCGSessionUserIDKey as String] as? NSNumber)?.uint32Value == getuid() else {
+        throw fail("session_unavailable", "Unlock the Mac and use its active desktop before computer control.")
     }
-    let rect = CGDisplayBounds(displayID)
-    func point(_ name: String) throws -> CGPoint {
+}
+
+@MainActor
+func findApp(_ name: String) -> NSRunningApplication? {
+    let wanted = name.lowercased()
+    let apps = NSWorkspace.shared.runningApplications.filter { !$0.isTerminated && $0.activationPolicy == .regular }
+    return apps.first { $0.bundleIdentifier?.lowercased() == wanted }
+        ?? apps.first { $0.localizedName?.lowercased() == wanted }
+        ?? apps.first { ($0.localizedName?.lowercased() ?? "").hasPrefix(wanted) }
+}
+
+@MainActor
+func launchInBackground(_ name: String) async throws -> NSRunningApplication {
+    let workspace = NSWorkspace.shared
+    var url = workspace.urlForApplication(withBundleIdentifier: name)
+    if url == nil {
+        for dir in ["/Applications", "/System/Applications", "/System/Applications/Utilities", "/Applications/Utilities",
+                    NSHomeDirectory() + "/Applications"] {
+            let candidate = URL(fileURLWithPath: dir).appendingPathComponent(name.hasSuffix(".app") ? name : name + ".app")
+            if FileManager.default.fileExists(atPath: candidate.path) { url = candidate; break }
+        }
+    }
+    guard let url else { throw fail("app_not_found", "No running or installed app has that name or bundle id. Use operation apps to list running apps.") }
+    let configuration = NSWorkspace.OpenConfiguration()
+    configuration.activates = false
+    configuration.addsToRecentItems = false
+    let app = try await workspace.openApplication(at: url, configuration: configuration)
+    // Give the app a moment to create its first window.
+    for _ in 0..<25 {
+        if axWindows(AXUIElementCreateApplication(app.processIdentifier)).isEmpty == false { break }
+        try await Task.sleep(nanoseconds: 200_000_000)
+    }
+    return app
+}
+
+func axWindows(_ appElement: AXUIElement) -> [AXUIElement] {
+    (axValue(appElement, kAXWindowsAttribute) as [AXUIElement]?) ?? []
+}
+
+// Electron/Chromium apps (Slack, Discord, VS Code...) only expose their
+// accessibility tree after a client asks for it.
+func enableAccessibilityTree(_ appElement: AXUIElement) {
+    AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+}
+
+// The same deterministic walk runs in the observing and the acting process,
+// so an index refers to the same element; role and frame are checked again
+// before any action.
+func collectElements(_ window: AXUIElement, limit: Int = 150) -> [AXUIElement] {
+    var found: [AXUIElement] = [], visited = 0
+    func walk(_ element: AXUIElement, _ depth: Int) {
+        guard found.count < limit, visited < 6000, depth < 60 else { return }
+        visited += 1
+        let role: String = axValue(element, kAXRoleAttribute) ?? ""
+        if actionableRoles.contains(role), let frame = axFrame(element), frame.width >= 2, frame.height >= 2 { found.append(element) }
+        let children: [AXUIElement] = axValue(element, kAXChildrenAttribute) ?? []
+        for child in children { walk(child, depth + 1) }
+    }
+    walk(window, 0)
+    return found
+}
+
+func describe(_ element: AXUIElement) -> [String: Any] {
+    let role: String = axValue(element, kAXRoleAttribute) ?? ""
+    var entry: [String: Any] = ["role": role.hasPrefix("AX") ? String(role.dropFirst(2)) : role]
+    let title = clip(axValue(element, kAXTitleAttribute)) ?? clip(axValue(element, kAXDescriptionAttribute))
+        ?? clip(axValue(element, kAXHelpAttribute))
+    if let title { entry["label"] = title }
+    if role != "AXSecureTextField", let value: String = axValue(element, kAXValueAttribute), let v = clip(value) { entry["value"] = v }
+    if let enabled: Bool = axValue(element, kAXEnabledAttribute), !enabled { entry["enabled"] = false }
+    return entry
+}
+
+
+// Chromium and Electron apps stop drawing a window that is completely
+// covered, so a capture would show an old frame. Such a window is raised with
+// the accessibility raise action: it moves just below the active app's front
+// window without activating its app, so keyboard focus stays with the person.
+func drawsOnlyWhenVisible(_ app: NSRunningApplication) -> Bool {
+    guard let url = app.bundleURL?.appendingPathComponent("Contents/Frameworks"),
+          let names = try? FileManager.default.contentsOfDirectory(atPath: url.path) else { return false }
+    return names.contains { $0.contains("Electron") || $0.contains("Chromium") || $0.contains("Chrome") || $0.contains("Edge") || $0.contains("Brave") }
+}
+func fullyCovered(_ windowID: CGWindowID, _ frame: CGRect) -> Bool {
+    guard let list = CGWindowListCopyWindowInfo([.optionOnScreenAboveWindow], windowID) as? [[String: Any]] else { return false }
+    let covers = list.compactMap { w -> CGRect? in
+        guard (w[kCGWindowLayer as String] as? Int) == 0, let b = w[kCGWindowBounds as String] else { return nil }
+        return CGRect(dictionaryRepresentation: b as! CFDictionary)
+    }
+    let screens = NSScreen.screens.map { s -> CGRect in
+        // NSScreen is bottom-left based; window bounds are top-left based.
+        let h = NSScreen.screens.first?.frame.height ?? 0
+        return CGRect(x: s.frame.minX, y: h - s.frame.maxY, width: s.frame.width, height: s.frame.height)
+    }
+    for i in 0..<12 { for j in 0..<12 {
+        let p = CGPoint(x: frame.minX + frame.width * (Double(i) + 0.5) / 12, y: frame.minY + frame.height * (Double(j) + 0.5) / 12)
+        if screens.contains(where: { $0.contains(p) }) && !covers.contains(where: { $0.contains(p) }) { return false }
+    } }
+    return true
+}
+
+typealias WindowLocationStamp = @convention(c) (CGEvent, CGPoint) -> Void
+// From macOS 27, WindowServer reads a process-posted mouse event's window
+// location as window-local; earlier releases derive it from the screen point.
+// Without it a background click is dropped. The setter is not in the public
+// SDK, so it is optional.
+let windowLocationStamp: WindowLocationStamp? = {
+    guard ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27,
+          let symbol = dlsym(dlopen(nil, RTLD_NOW), "CGEventSetWindowLocation") else { return nil }
+    return unsafeBitCast(symbol, to: WindowLocationStamp.self)
+}()
+func sameFrame(_ a: CGRect, _ b: CGRect) -> Bool {
+    abs(a.minX - b.minX) < 2 && abs(a.minY - b.minY) < 2 && abs(a.width - b.width) < 2 && abs(a.height - b.height) < 2
+}
+
+struct AppWindow { let app: NSRunningApplication; let appElement: AXUIElement; let window: AXUIElement; let frame: CGRect; let windowID: CGWindowID }
+
+@available(macOS 12.3, *) @MainActor
+func resolveWindow(pid: pid_t, windowID: CGWindowID?) async throws -> (AppWindow, SCWindow) {
+    guard let app = NSRunningApplication(processIdentifier: pid), !app.isTerminated else {
+        throw fail("app_closed", "That app is no longer running. Observe it again.")
+    }
+    let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+    let candidates = content.windows.filter { $0.owningApplication?.processID == pid && $0.windowLayer == 0
+        && $0.frame.width >= 80 && $0.frame.height >= 60 }
+    let chosen = windowID.flatMap { id in candidates.first { $0.windowID == id } }
+        ?? candidates.filter { $0.isOnScreen }.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
+        ?? candidates.max { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height }
+    guard let window = chosen else {
+        throw fail("window_unavailable", "That app has no open window. Use the app's menu (operation menu) or ask the person to open one.")
+    }
+    if windowID != nil && window.windowID != windowID! { throw fail("desktop_changed", "That window closed. Observe the app again.") }
+    let appElement = AXUIElementCreateApplication(pid)
+    enableAccessibilityTree(appElement)
+    // Match the capture window to its accessibility window by frame.
+    let axWindow = axWindows(appElement).min { a, b in
+        let fa = axFrame(a) ?? .zero, fb = axFrame(b) ?? .zero
+        return abs(fa.minX - window.frame.minX) + abs(fa.minY - window.frame.minY) + abs(fa.width - window.frame.width)
+            < abs(fb.minX - window.frame.minX) + abs(fb.minY - window.frame.minY) + abs(fb.width - window.frame.width)
+    } ?? appElement
+    return (AppWindow(app: app, appElement: appElement, window: axWindow, frame: window.frame, windowID: window.windowID), window)
+}
+
+@available(macOS 12.3, *) @MainActor
+func listApps() async throws -> [String: Any] {
+    try consoleSession()
+    guard CGPreflightScreenCaptureAccess() else { throw fail("screen_recording_denied", "Allow Screen Recording in the Mac app's computer setup.") }
+    let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+    let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    let apps = NSWorkspace.shared.runningApplications.filter { !$0.isTerminated && $0.activationPolicy == .regular }.prefix(60)
+    return ["apps": apps.map { app -> [String: Any] in
+        let windows = content.windows.filter { $0.owningApplication?.processID == app.processIdentifier && $0.windowLayer == 0
+            && $0.frame.width >= 80 && $0.frame.height >= 60 }.prefix(8).map { w -> [String: Any] in
+            var entry: [String: Any] = ["window_id": Int(w.windowID), "on_screen": w.isOnScreen]
+            if let title = clip(w.title) { entry["title"] = title }
+            return entry
+        }
+        var entry: [String: Any] = ["name": app.localizedName ?? "", "bundle_id": app.bundleIdentifier ?? "",
+            "frontmost": app.processIdentifier == front, "windows": Array(windows)]
+        if app.isHidden { entry["hidden"] = true }
+        return entry
+    }]
+}
+
+@available(macOS 12.3, *) @MainActor
+func observeApp(_ request: [String: Any]) async throws -> [String: Any] {
+    try consoleSession()
+    guard CGPreflightScreenCaptureAccess() else { throw fail("screen_recording_denied", "Allow Screen Recording in the Mac app's computer setup.") }
+    guard AXIsProcessTrusted() else { throw fail("accessibility_denied", "Allow Keyboard and mouse in the Mac app's computer setup.") }
+    guard let name = request["app"] as? String else { throw fail("invalid_arguments", "Name the app to observe.") }
+    var launched = false
+    let app: NSRunningApplication
+    if let running = findApp(name) { app = running } else { app = try await launchInBackground(name); launched = true }
+    if app.isHidden { app.unhide() }
+    let windowID = (request["window_id"] as? NSNumber).map { CGWindowID($0.uint32Value) }
+    var resolved: (AppWindow, SCWindow)?
+    for attempt in 0..<(launched ? 10 : 1) {
+        do { resolved = try await resolveWindow(pid: app.processIdentifier, windowID: windowID); break }
+        catch let error as ControlError where error.code == "window_unavailable" && attempt < 9 && launched {
+            try await Task.sleep(nanoseconds: 300_000_000)
+        }
+    }
+    guard var (target, scWindow) = resolved else { throw fail("window_unavailable", "That app has no open window yet. Observe it again shortly.") }
+    var raised = false
+    if drawsOnlyWhenVisible(app), fullyCovered(target.windowID, target.frame),
+       AXUIElementPerformAction(target.window, kAXRaiseAction as CFString) == .success {
+        raised = true
+        try await Task.sleep(nanoseconds: 700_000_000)
+        (target, scWindow) = try await resolveWindow(pid: app.processIdentifier, windowID: target.windowID)
+    }
+    // Let a just-enabled Electron accessibility tree populate.
+    if collectElements(target.window, limit: 1).isEmpty { try await Task.sleep(nanoseconds: 400_000_000) }
+    let frame = target.frame
+    let scale = min(1, 1600 / max(frame.width, frame.height))
+    let config = SCStreamConfiguration()
+    config.width = max(1, Int((frame.width * scale).rounded()))
+    config.height = max(1, Int((frame.height * scale).rounded()))
+    config.showsCursor = false; config.queueDepth = 1
+    config.pixelFormat = kCVPixelFormatType_32BGRA
+    let receiver = FrameReceiver()
+    let stream = SCStream(filter: SCContentFilter(desktopIndependentWindow: scWindow), configuration: config, delegate: nil)
+    try stream.addStreamOutput(receiver, type: .screen, sampleHandlerQueue: DispatchQueue(label: "shapes.computer.window"))
+    try await stream.startCapture()
+    let image: CGImage
+    do { image = try await receiver.frame() }
+    catch {
+        try? await stream.stopCapture()
+        throw fail("window_unavailable", "The window could not be captured (it may be minimized or on another desktop). Use operation menu, or ask the person to show it.")
+    }
+    try await stream.stopCapture()
+    let bitmap = NSBitmapImageRep(cgImage: image)
+    guard let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.8]), jpeg.count <= 3_000_000 else {
+        throw fail("capture_failed", "Could not produce a bounded screenshot.")
+    }
+    let sx = Double(image.width) / frame.width, sy = Double(image.height) / frame.height
+    let elements = collectElements(target.window)
+    var listed: [[String: Any]] = [], identities: [[String: Any]] = []
+    for (index, element) in elements.enumerated() {
+        guard let f = axFrame(element) else { continue }
+        var entry = describe(element)
+        entry["index"] = index
+        entry["frame"] = [((f.minX - frame.minX) * sx).rounded(), ((f.minY - frame.minY) * sy).rounded(),
+                          (f.width * sx).rounded(), (f.height * sy).rounded()]
+        listed.append(entry)
+        identities.append(["index": index, "role": (axValue(element, kAXRoleAttribute) as String?) ?? "", "frame": rectangle(f)])
+    }
+    let front = NSWorkspace.shared.frontmostApplication
+    return ["width": image.width, "height": image.height, "display_id": 0,
+            "bounds": rectangle(frame), "window_id": Int(target.windowID), "window_title": clip(scWindow.title, 120) ?? "",
+            "app": ["pid": app.processIdentifier, "bundle_id": app.bundleIdentifier ?? "", "name": app.localizedName ?? ""],
+            "frontmost": ["pid": Int(front?.processIdentifier ?? 0), "bundle_id": front?.bundleIdentifier ?? "", "name": front?.localizedName ?? ""] as [String: Any],
+            "launched": launched, "raised": raised, "elements": listed, "element_identities": identities,
+            "image_base64": jpeg.base64EncodedString(), "image_content_type": "image/jpeg"]
+}
+
+struct MenuShortcut { let path: [String]; let enabled: Bool; let system: Bool; let element: AXUIElement }
+
+// The menu items a key chord triggers, read through Accessibility. An app in the
+// background turns off its commands for the document and selection (Save,
+// Select All, Copy, Undo...), so their shortcuts do nothing there; app commands
+// (New, Hide) still run. The Apple menu is the Mac's, not the app's. nil when
+// the menus can't be read within the budget: the chord is then sent as before.
+func menuShortcuts(_ app: AXUIElement, key: String, code: CGKeyCode, modifiers: Set<String>, budget: Double = 0.5) -> [MenuShortcut]? {
+    guard let bar: AXUIElement = axValue(app, kAXMenuBarAttribute), let menus: [AXUIElement] = axValue(bar, kAXChildrenAttribute) else { return nil }
+    // Accessibility's menu modifier bits: shift 1, option 2, control 4, no command 8.
+    var wanted = 0
+    if modifiers.contains("SHIFT") { wanted |= 1 }
+    if modifiers.contains("ALT") { wanted |= 2 }
+    if modifiers.contains("CTRL") { wanted |= 4 }
+    if !modifiers.contains("CMD") { wanted |= 8 }
+    let character = key.count == 1 ? key : ["SPACE": " ", "TAB": "\t", "RETURN": "\r"][key]
+    let names = [kAXTitleAttribute, kAXMenuItemCmdCharAttribute, kAXMenuItemCmdVirtualKeyAttribute,
+                 kAXMenuItemCmdModifiersAttribute, kAXEnabledAttribute, kAXChildrenAttribute] as CFArray
+    let deadline = Date().addingTimeInterval(budget)
+    var found: [MenuShortcut] = [], complete = true
+    func entries(_ children: [AXUIElement]) -> [AXUIElement] {
+        if children.count == 1, (axValue(children[0], kAXRoleAttribute) as String?) == "AXMenu" { return axValue(children[0], kAXChildrenAttribute) ?? [] }
+        return children
+    }
+    func walk(_ items: [AXUIElement], _ path: [String], _ system: Bool, _ depth: Int) {
+        for item in items {
+            guard Date() < deadline else { complete = false; return }
+            var copied: CFArray?
+            guard AXUIElementCopyMultipleAttributeValues(item, names, AXCopyMultipleAttributeOptions(rawValue: 0), &copied) == .success,
+                  let values = copied as? [AnyObject], values.count == 6 else { continue }
+            let title = values[0] as? String ?? ""
+            let modifiers = (values[3] as? NSNumber)?.intValue ?? 0
+            let matched = modifiers == wanted && ((values[2] as? NSNumber).map { $0.intValue == Int(code) }
+                ?? (values[1] as? String).map { !$0.isEmpty && $0.uppercased() == character } ?? false)
+            if matched { found.append(MenuShortcut(path: path + [title], enabled: values[4] as? Bool ?? true, system: system, element: item)) }
+            if depth < 2, let children = values[5] as? [AXUIElement], !children.isEmpty { walk(entries(children), path + [title], system, depth + 1) }
+        }
+    }
+    for (index, menu) in menus.enumerated() {
+        guard Date() < deadline else { complete = false; break }
+        walk(entries(axValue(menu, kAXChildrenAttribute) ?? []), [axValue(menu, kAXTitleAttribute) ?? ""], index == 0, 1)
+    }
+    // Cut short, a turned-off match may have an enabled twin further on: only
+    // an Apple menu match is then trusted, and the chord is otherwise sent.
+    if !complete && !found.contains(where: { $0.system || $0.enabled }) { return nil }
+    return found
+}
+
+// Why a menu command is off, and what the shape can do about it.
+func turnedOff(_ app: NSRunningApplication) -> String {
+    let name = app.localizedName ?? "the app"
+    return app.isActive ? "is turned off right now" : "is turned off while \(name) is in the background. Ask the person to bring \(name) to the front first, or to do this themselves"
+}
+
+// A command an app turns off in the background (Save, Copy, Undo...) runs only
+// while the app is active: no Accessibility press or posted key gets past
+// that. When the server allows it, such a command runs by making the app
+// active for a split second without raising its windows, pressing its menu
+// item and putting the person's front app straight back, and only while the
+// person isn't typing or holding a button, so none of their input lands in
+// the app. SkyLight is private API: without its calls the command is refused.
+typealias FrontProcess = @convention(c) (UnsafeMutablePointer<ProcessSerialNumber>) -> CGError
+typealias SetFrontProcess = @convention(c) (UnsafeMutablePointer<ProcessSerialNumber>, UInt32, UInt32) -> CGError
+typealias ProcessForPID = @convention(c) (pid_t, UnsafeMutablePointer<ProcessSerialNumber>) -> OSStatus
+let skyLight: (front: FrontProcess, setFront: SetFrontProcess, process: ProcessForPID)? = {
+    let loaded = UnsafeMutableRawPointer(bitPattern: -2) // RTLD_DEFAULT
+    guard let sky = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY),
+          let front = dlsym(sky, "_SLPSGetFrontProcess"), let setFront = dlsym(sky, "_SLPSSetFrontProcessWithOptions"),
+          let process = dlsym(loaded, "GetProcessForPID") else { return nil }
+    return (unsafeBitCast(front, to: FrontProcess.self), unsafeBitCast(setFront, to: SetFrontProcess.self), unsafeBitCast(process, to: ProcessForPID.self))
+}()
+
+// What the person is doing with their own keyboard or mouse right now, if anything.
+func personBusy() -> String? {
+    if NSEvent.pressedMouseButtons != 0 { return "holding a mouse button" }
+    let keys = [CGEventType.keyDown, .flagsChanged].map { CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: $0) }.min() ?? 0
+    let held: CGEventFlags = [.maskCommand, .maskShift, .maskAlternate, .maskControl]
+    if keys < 1 || !CGEventSource.flagsState(.hidSystemState).intersection(held).isEmpty { return "typing" }
+    if IsSecureEventInputEnabled() { return "entering a password" }
+    return nil
+}
+
+// Activates the app without raising a window, runs press, and puts the
+// person's front app back. ms is how long the app was active: from the
+// request until the person's app is confirmed in front again.
+@MainActor
+func activateBriefly(_ app: NSRunningApplication, _ appElement: AXUIElement, window: CGWindowID, label: String, press: () -> AXError) throws -> [String: Any] {
+    let name = app.localizedName ?? "the app"
+    guard let sky = skyLight else { throw fail("activation_failed", "\(label) could not be run: this Mac can't make \(name) active without bringing it forward. Nothing was sent.") }
+    // Activating an app whose window is on another desktop (or minimized) can
+    // switch the person's desktop to it, out of a full-screen app.
+    let listed = CGWindowListCopyWindowInfo(.optionIncludingWindow, window) as? [[String: Any]]
+    guard listed?.first?[kCGWindowIsOnscreen as String] as? Bool == true else {
+        throw fail("activation_failed", "\(label) needs \(name) active for a split second, but its window isn't on the person's current desktop, so nothing was sent. Ask the person to do it, or try again when they're back on that desktop.")
+    }
+    var previous = ProcessSerialNumber(), target = ProcessSerialNumber()
+    func same(_ a: ProcessSerialNumber, _ b: ProcessSerialNumber) -> Bool { a.highLongOfPSN == b.highLongOfPSN && a.lowLongOfPSN == b.lowLongOfPSN }
+    guard sky.front(&previous) == .success, sky.process(app.processIdentifier, &target) == noErr, !same(previous, target) else {
+        throw fail("activation_failed", "\(label) could not be run: \(name) could not be made active. Nothing was sent.")
+    }
+    // Checked last, right before the switch.
+    if let busy = personBusy() {
+        throw fail("person_active", "\(label) needs \(name) active for a split second, and the person is \(busy) right now, so nothing was sent. Try again in a few seconds.")
+    }
+    // A busy or hung app must not hold the person's keyboard: every
+    // Accessibility call while it is active gives up after 0.25 s.
+    AXUIElementSetMessagingTimeout(appElement, 0.25)
+    // No-windows mode, naming the observed window: with no window named, the
+    // app still raised its key window above the person's for about 20 ms.
+    let noWindows: UInt32 = 0x400 // kCPSNoWindows
+    let start = DispatchTime.now().uptimeNanoseconds
+    func within(_ check: () -> Bool) -> Bool { for _ in 0..<200 { if check() { return true }; usleep(1000) }; return false }
+    func frontIs(_ process: ProcessSerialNumber) -> Bool { var now = ProcessSerialNumber(); return sky.front(&now) == .success && same(now, process) }
+    _ = sky.setFront(&target, UInt32(window), noWindows)
+    // Asked of the app itself: its menus check against its own active state.
+    let active = within { (axValue(appElement, kAXFrontmostAttribute) as Bool?) == true }
+    let pressed = active ? press() : .failure
+    var restored = false
+    for _ in 0..<2 where !restored { _ = sky.setFront(&previous, 0, noWindows); restored = within { frontIs(previous) } }
+    // An activation that lands after the wait above must not keep the front.
+    if !active { usleep(150_000); if frontIs(target) { _ = sky.setFront(&previous, 0, noWindows); restored = within { frontIs(previous) } } }
+    let ms = Int((DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
+    let back = restored ? "" : " The person's app could not be put back in front, so \(name) is the active app now: tell them."
+    guard active else { throw fail("activation_failed", "\(name) did not become active, so \(label) was not run.\(back)") }
+    guard pressed == .success else { throw fail("menu_unavailable", "\(label) could not be pressed in \(name).\(back)") }
+    return ["ms": ms, "restored": restored]
+}
+
+// Save's shortcut is CMD+S in every language.
+func savesDocument(_ item: AXUIElement) -> Bool {
+    (axValue(item, kAXMenuItemCmdCharAttribute) as String?)?.uppercased() == "S" && (axValue(item, kAXMenuItemCmdModifiersAttribute) as NSNumber?)?.intValue == 0
+}
+
+// When the file behind a document window last changed, to confirm a save.
+func documentModified(_ window: AXUIElement) -> Date? {
+    guard let link: String = axValue(window, kAXDocumentAttribute), let url = URL(string: link), url.isFileURL else { return nil }
+    return (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+}
+
+@available(macOS 12.3, *) @MainActor
+func appInput(_ request: [String: Any]) async throws -> [String: Any] {
+    try consoleSession()
+    guard AXIsProcessTrusted() else { throw fail("accessibility_denied", "Allow Keyboard and mouse in the Mac app's computer setup.") }
+    guard let expected = request["expected"] as? [String: Any], let pid = (expected["pid"] as? NSNumber)?.int32Value,
+          let windowID = (expected["window_id"] as? NSNumber)?.uint32Value,
+          let bounds = expected["bounds"] as? [String: Double],
+          let width = expected["width"] as? Double, let height = expected["height"] as? Double, width > 0, height > 0 else {
+        throw fail("stale_observation", "Observe the app again before input.")
+    }
+    let (target, _) = try await resolveWindow(pid: pid, windowID: CGWindowID(windowID))
+    guard abs(target.frame.minX - (bounds["x"] ?? .nan)) < 2, abs(target.frame.minY - (bounds["y"] ?? .nan)) < 2,
+          abs(target.frame.width - (bounds["width"] ?? .nan)) < 2, abs(target.frame.height - (bounds["height"] ?? .nan)) < 2 else {
+        throw fail("desktop_changed", "The window moved or resized. Observe the app again.")
+    }
+    let frame = target.frame
+    let operation = request["operation"] as? String ?? ""
+    let typing = ["type", "press_key", "set_text"].contains(operation)
+    if typing && IsSecureEventInputEnabled() && NSWorkspace.shared.frontmostApplication?.processIdentifier == pid {
+        throw fail("secure_input", "Secure input is active. The person must complete that interaction.")
+    }
+    func element(_ index: Int) throws -> AXUIElement {
+        let identities = expected["element_identities"] as? [[String: Any]] ?? []
+        let elements = collectElements(target.window)
+        guard index >= 0, index < elements.count, let identity = identities.first(where: { ($0["index"] as? Int) == index }),
+              let role = identity["role"] as? String, (axValue(elements[index], kAXRoleAttribute) as String?) == role,
+              let saved = identity["frame"] as? [String: Double], let now = axFrame(elements[index]),
+              abs(now.minX - (saved["x"] ?? .nan)) < 3, abs(now.minY - (saved["y"] ?? .nan)) < 3 else {
+            throw fail("stale_observation", "That element changed. Observe the app again and use the new index.")
+        }
+        return elements[index]
+    }
+    func globalPoint(_ name: String) throws -> CGPoint {
         guard let p = request[name] as? [Double], p.count == 2, p.allSatisfy({ $0.isFinite }),
               p[0] >= 0, p[0] < width, p[1] >= 0, p[1] < height else {
-            throw fail("invalid_arguments", "Use coordinates inside the observed image.")
+            throw fail("invalid_arguments", "Use coordinates inside the observed window image.")
         }
-        return CGPoint(x: rect.minX + p[0] * rect.width / width, y: rect.minY + p[1] * rect.height / height)
+        return CGPoint(x: frame.minX + p[0] * frame.width / width, y: frame.minY + p[1] * frame.height / height)
     }
     let source = CGEventSource(stateID: .privateState)
+    // WindowServer does not route events posted to a process, so each carries
+    // its target process and window, and from macOS 27 its window-local point.
+    func route(_ event: CGEvent, _ at: CGPoint) {
+        event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(pid))
+        event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowID))
+        event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowID))
+        windowLocationStamp?(event, CGPoint(x: at.x - frame.minX, y: at.y - frame.minY))
+    }
+    func postMouse(_ type: CGEventType, _ at: CGPoint, _ button: CGMouseButton, _ count: Int64) {
+        guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: at, mouseButton: button) else { return }
+        event.setIntegerValueField(.mouseEventClickState, value: count)
+        route(event, at)
+        event.postToPid(pid)
+    }
+    // Keys go to the window this app has focused, which is not necessarily the
+    // observed one. Make the observed window the app's main window, as a real
+    // click would; the app stays inactive and the person's front app keeps focus.
+    func focusWindow() -> Bool {
+        if let focused: AXUIElement = axValue(target.appElement, kAXFocusedWindowAttribute), let f = axFrame(focused), sameFrame(f, frame) { return true }
+        AXUIElementSetAttributeValue(target.window, kAXMainAttribute as CFString, kCFBooleanTrue)
+        guard let focused: AXUIElement = axValue(target.appElement, kAXFocusedWindowAttribute), let f = axFrame(focused) else { return false }
+        return sameFrame(f, frame)
+    }
+    if ["type", "press_key"].contains(operation), !focusWindow() {
+        throw fail("target_not_focused", "Keys would go to another window of this app. Click a field in the observed window first.")
+    }
+    var pointer: [String: Double] = [:], shortcut: [String]?, focusedText: String?
+    // Server-owned: whether a command the app turns off in the background may
+    // run through a split-second activation (see activateBriefly).
+    let mayActivate = request["allow_activation"] as? Bool == true && skyLight != nil && !target.app.isActive
+    var activation: [String: Any]?, documentSaved: Bool?
+    func runBriefly(_ item: AXUIElement, _ label: String) throws {
+        let before = savesDocument(item) ? documentModified(target.window) : nil
+        AXUIElementSetMessagingTimeout(item, 0.25)
+        activation = try activateBriefly(target.app, target.appElement, window: CGWindowID(windowID), label: label) { AXUIElementPerformAction(item, kAXPressAction as CFString) }
+        guard let before else { return }
+        documentSaved = false
+        for _ in 0..<30 {
+            if let now = documentModified(target.window), now != before { documentSaved = true; break }
+            pause(0.05)
+        }
+    }
     func postKey(_ code: CGKeyCode, _ down: Bool, _ flags: CGEventFlags = []) {
-        let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down)!
-        event.flags = flags; event.post(tap: .cghidEventTap)
-        // Give WindowServer a distinct key transition before releasing it.
-        Thread.sleep(forTimeInterval: 0.02)
+        guard let event = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: down) else { return }
+        event.flags = flags; event.postToPid(pid)
+        pause(0.02)
     }
-    func mouse(_ type: CGEventType, _ point: CGPoint, _ button: CGMouseButton = .left, count: Int64 = 1) {
-        let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button)!
-        event.setIntegerValueField(.mouseEventClickState, value: count); event.post(tap: .cghidEventTap)
+    func pressable(_ start: AXUIElement) -> AXUIElement? {
+        var current: AXUIElement? = start
+        for _ in 0..<6 {
+            guard let element = current else { return nil }
+            if axActions(element).contains(kAXPressAction as String) { return element }
+            current = axValue(element, kAXParentAttribute)
+        }
+        return nil
     }
-    switch request["operation"] as? String {
+    var method = "event"
+    switch operation {
     case "click":
-        let p = try point("point"), right = request["button"] as? String == "right"
+        let right = request["button"] as? String == "right"
         let count = request["click_count"] as? Int ?? 1
         guard (1...2).contains(count) else { throw fail("invalid_arguments", "Use one or two clicks.") }
+        var hit: AXUIElement?
+        let at: CGPoint
+        if let index = request["element"] as? Int {
+            let e = try element(index); hit = e
+            let f = axFrame(e) ?? .zero; at = CGPoint(x: f.midX, y: f.midY)
+        } else {
+            at = try globalPoint("point")
+            var found: AXUIElement?
+            if AXUIElementCopyElementAtPosition(target.appElement, Float(at.x), Float(at.y), &found) == .success { hit = found }
+        }
+        pointer = ["x": at.x, "y": at.y]
+        _ = focusWindow()
+        if count == 1, let e = hit {
+            if right, axActions(e).contains(kAXShowMenuAction as String),
+               AXUIElementPerformAction(e, kAXShowMenuAction as CFString) == .success { method = "accessibility"; break }
+            let role: String = axValue(e, kAXRoleAttribute) ?? ""
+            if !right, textRoles.contains(role), AXUIElementSetAttributeValue(e, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success {
+                // A click at a point in text puts the caret there; inactive apps
+                // ignore the mouse events that would otherwise do it.
+                var point = at, range: AnyObject?, caret = CFRange()
+                if request["point"] != nil, let position = AXValueCreate(.cgPoint, &point),
+                   AXUIElementCopyParameterizedAttributeValue(e, kAXRangeForPositionParameterizedAttribute as CFString, position, &range) == .success,
+                   let range, CFGetTypeID(range) == AXValueGetTypeID(), AXValueGetValue(range as! AXValue, .cfRange, &caret), caret.location >= 0, caret.length > 0 {
+                    // An empty range means no text under the point: keep the caret.
+                    // Otherwise that is the character under it. A click on its right
+                    // half puts the caret after it, except at a line break.
+                    var location = caret.location, one = CFRange(location: caret.location, length: 1)
+                    var bounds: AnyObject?, glyph: AnyObject?, box = CGRect.zero
+                    if let character = AXValueCreate(.cfRange, &one),
+                       AXUIElementCopyParameterizedAttributeValue(e, kAXStringForRangeParameterizedAttribute as CFString, character, &glyph) == .success,
+                       let text = glyph as? String, text != "\n", text != "\r",
+                       AXUIElementCopyParameterizedAttributeValue(e, kAXBoundsForRangeParameterizedAttribute as CFString, character, &bounds) == .success,
+                       let bounds, CFGetTypeID(bounds) == AXValueGetTypeID(), AXValueGetValue(bounds as! AXValue, .cgRect, &box),
+                       at.x > box.midX { location += 1 }
+                    var empty = CFRange(location: location, length: 0)
+                    if let value = AXValueCreate(.cfRange, &empty) { AXUIElementSetAttributeValue(e, kAXSelectedTextRangeAttribute as CFString, value) }
+                }
+                method = "accessibility_focus"; break
+            }
+            if !right, let p = pressable(e), AXUIElementPerformAction(p, kAXPressAction as CFString) == .success { method = "accessibility"; break }
+            if !right, ["AXRow", "AXCell", "AXOutlineRow"].contains(role) || (axValue(e, kAXSelectedAttribute) as Bool?) != nil,
+               AXUIElementSetAttributeValue(e, kAXSelectedAttribute as CFString, kCFBooleanTrue) == .success { method = "accessibility_select"; break }
+        }
         for i in 1...count {
-            mouse(right ? .rightMouseDown : .leftMouseDown, p, right ? .right : .left, count: Int64(i))
-            Thread.sleep(forTimeInterval: 0.04)
-            mouse(right ? .rightMouseUp : .leftMouseUp, p, right ? .right : .left, count: Int64(i))
-            Thread.sleep(forTimeInterval: 0.04)
+            postMouse(right ? .rightMouseDown : .leftMouseDown, at, right ? .right : .left, Int64(i))
+            pause(0.04)
+            postMouse(right ? .rightMouseUp : .leftMouseUp, at, right ? .right : .left, Int64(i))
+            pause(0.04)
         }
-    case "move": mouse(.mouseMoved, try point("point"))
-    case "drag":
-        let start = try point("point"), end = try point("to")
-        mouse(.leftMouseDown, start)
-        defer { mouse(.leftMouseUp, end) }
-        for i in 1...20 {
-            let t = Double(i) / 20
-            mouse(.leftMouseDragged, CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t))
-            Thread.sleep(forTimeInterval: 0.015)
+    case "set_text":
+        guard let index = request["element"] as? Int, let text = request["text"] as? String, text.utf16.count <= 4096 else {
+            throw fail("invalid_arguments", "Supply an element index and at most 4096 characters.")
         }
-    case "scroll":
-        let p = try point("point")
-        guard let dx = request["dx"] as? Int32, let dy = request["dy"] as? Int32, abs(Int(dx)) <= 2000, abs(Int(dy)) <= 2000 else {
-            throw fail("invalid_arguments", "Scroll deltas must be between -2000 and 2000 pixels.")
+        let e = try element(index)
+        guard (axValue(e, kAXRoleAttribute) as String?) != "AXSecureTextField" else {
+            throw fail("secure_input", "That is a password field. The person must fill it.")
         }
-        mouse(.mouseMoved, p)
-        let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)!
-        // The preceding move is asynchronous; creation can inherit the old
-        // cursor location. Route the wheel event to the requested image point.
-        event.location = p
-        event.post(tap: .cghidEventTap)
+        AXUIElementSetAttributeValue(e, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        guard AXUIElementSetAttributeValue(e, kAXValueAttribute as CFString, text as CFString) == .success else {
+            throw fail("not_editable", "That element does not accept text. Click it, then use type.")
+        }
+        method = "accessibility"
     case "type":
         guard let text = request["text"] as? String, !text.isEmpty, text.utf16.count <= 4096 else { throw fail("invalid_arguments", "Supply at most 4096 UTF-16 units of text.") }
-        // Unicode events do not overwrite the person's clipboard. Split on
-        // Characters so surrogate pairs/graphemes are never split between events.
+        if let focused: AXUIElement = axValue(target.appElement, kAXFocusedUIElementAttribute),
+           (axValue(focused, kAXRoleAttribute) as String?) != "AXSecureTextField",
+           AXUIElementSetAttributeValue(focused, kAXSelectedTextAttribute as CFString, text as CFString) == .success {
+            method = "accessibility"; break
+        }
         var chunk: [UniChar] = []
         func send() {
             for down in [true, false] {
-                let e = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down)!
+                guard let e = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: down) else { continue }
                 chunk.withUnsafeBufferPointer { e.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: $0.baseAddress!) }
-                e.post(tap: .cghidEventTap)
+                e.postToPid(pid)
             }
-            chunk.removeAll(); Thread.sleep(forTimeInterval: 0.01)
+            chunk.removeAll(); pause(0.01)
         }
+        // An app drops a whole Unicode event that carries a line break or tab,
+        // so those go as real Return/Tab presses between text chunks.
         for character in text {
+            if character == "\n" || character == "\r\n" || character == "\r" || character == "\t" {
+                if !chunk.isEmpty { send() }
+                let code: CGKeyCode = character == "\t" ? 48 : 36
+                postKey(code, true); postKey(code, false)
+                continue
+            }
             let units = Array(String(character).utf16)
-            guard units.count <= 20 else { throw fail("invalid_arguments", "A text character exceeds the event size limit.") }
+            if chunk.count + units.count > 20 { send() }
+            chunk += units
         }
-        for character in text { let units = Array(String(character).utf16); if chunk.count + units.count > 20 { send() }; chunk += units }
         if !chunk.isEmpty { send() }
     case "press_key":
         let keys: [String: CGKeyCode] = ["A":0,"S":1,"D":2,"F":3,"H":4,"G":5,"Z":6,"X":7,"C":8,"V":9,"B":11,"Q":12,"W":13,"E":14,"R":15,"Y":16,"T":17,"1":18,"2":19,"3":20,"4":21,"6":22,"5":23,"9":25,"7":26,"8":28,"0":29,"O":31,"U":32,"I":34,"P":35,"RETURN":36,"L":37,"J":38,"K":40,"N":45,"M":46,"TAB":48,"SPACE":49,"BACKSPACE":51,"ESCAPE":53,"HOME":115,"PAGEUP":116,"DELETE":117,"END":119,"PAGEDOWN":121,"LEFT":123,"RIGHT":124,"DOWN":125,"UP":126,"F1":122,"F2":120,"F3":99,"F4":118,"F5":96,"F6":97,"F7":98,"F8":100,"F9":101,"F10":109,"F11":103,"F12":111]
         let modifiers: [String: (CGKeyCode, CGEventFlags)] = ["CMD":(55,.maskCommand),"SHIFT":(56,.maskShift),"ALT":(58,.maskAlternate),"CTRL":(59,.maskControl)]
         guard let chord = request["keys"] as? [String], let last = chord.last, let code = keys[last], chord.count <= 5,
               Set(chord).count == chord.count, chord.dropLast().allSatisfy({ modifiers[$0] != nil }) else { throw fail("invalid_arguments", "Use modifiers CMD/CTRL/ALT/SHIFT followed by one supported key.") }
+        if chord == ["RETURN"], let focused: AXUIElement = axValue(target.appElement, kAXFocusedUIElementAttribute),
+           axActions(focused).contains(kAXConfirmAction as String),
+           AXUIElementPerformAction(focused, kAXConfirmAction as CFString) == .success { method = "accessibility"; break }
+        // A chord the app's menus own does nothing when that item is turned off,
+        // so it isn't sent: the receipt would otherwise read as done.
+        if chord.count > 1, let matches = menuShortcuts(target.appElement, key: last, code: code, modifiers: Set(chord.dropLast())), !matches.isEmpty {
+            let label = chord.joined(separator: "+")
+            if matches.contains(where: { $0.system }) {
+                throw fail("system_command", "\(label) is a Mac command from the Apple menu, not this app's. Nothing was sent.")
+            }
+            if let item = matches.first(where: { $0.enabled }) {
+                shortcut = item.path.map { String($0.prefix(60)) }
+            } else {
+                let item = matches[0], titled = item.path.map { String($0.prefix(60)) }
+                guard mayActivate else {
+                    throw fail("shortcut_unavailable", "\(label) is \(target.app.localizedName ?? "this app")'s \(titled.joined(separator: " › ")), which \(turnedOff(target.app)). Nothing was sent.")
+                }
+                shortcut = titled
+                try runBriefly(item.element, "\(label) (\(titled.joined(separator: " › ")))")
+                method = "brief_activation"; break
+            }
+        }
+        // Whether the focused text's caret moved, read back once the app has
+        // handled the keys. A key a text view has no binding for (CMD+END on a
+        // Mac) arrives and does nothing.
+        func textState() -> (element: AXUIElement, location: Int, length: Int, characters: Int)? {
+            guard let focused: AXUIElement = axValue(target.appElement, kAXFocusedUIElementAttribute),
+                  let role: String = axValue(focused, kAXRoleAttribute), textRoles.contains(role),
+                  let selected: AXValue = axValue(focused, kAXSelectedTextRangeAttribute) else { return nil }
+            var range = CFRange()
+            guard AXValueGetValue(selected, .cfRange, &range) else { return nil }
+            return (focused, range.location, range.length, (axValue(focused, kAXNumberOfCharactersAttribute) as NSNumber?)?.intValue ?? -1)
+        }
+        // Only for moves, where "unchanged" means the key did nothing: RETURN or
+        // a menu shortcut can act without touching the text.
+        let navigation: Set<String> = ["LEFT", "RIGHT", "UP", "DOWN", "HOME", "END", "PAGEUP", "PAGEDOWN"]
+        let before = shortcut == nil && navigation.contains(last) ? textState() : nil
         var flags: CGEventFlags = []
         for name in chord.dropLast() { let (key, flag) = modifiers[name]!; flags.insert(flag); postKey(key, true, flags) }
         postKey(code, true, flags); postKey(code, false, flags)
         for name in chord.dropLast().reversed() { let (key, flag) = modifiers[name]!; flags.remove(flag); postKey(key, false, flags) }
-    default: throw fail("invalid_arguments", "Unsupported computer operation.")
+        if let before {
+            focusedText = "unchanged"
+            for _ in 0..<10 {
+                guard let now = textState(), CFEqual(now.element, before.element), now.location == before.location,
+                      now.length == before.length, now.characters == before.characters else { focusedText = "changed"; break }
+                pause(0.03)
+            }
+        }
+    case "scroll":
+        let at = try globalPoint("point")
+        guard let dx = request["dx"] as? Int32, let dy = request["dy"] as? Int32, abs(Int(dx)) <= 2000, abs(Int(dy)) <= 2000 else {
+            throw fail("invalid_arguments", "Scroll deltas must be between -2000 and 2000 pixels.")
+        }
+        // Prefer the scroll area's own scroll bar: it works without the pointer.
+        var hit: AXUIElement?
+        if dx == 0, AXUIElementCopyElementAtPosition(target.appElement, Float(at.x), Float(at.y), &hit) == .success {
+            var current = hit
+            for _ in 0..<12 {
+                guard let e = current else { break }
+                if (axValue(e, kAXRoleAttribute) as String?) == "AXScrollArea",
+                   let bar: AXUIElement = axValue(e, kAXVerticalScrollBarAttribute),
+                   let value: NSNumber = axValue(bar, kAXValueAttribute), let area = axFrame(e), area.height > 0 {
+                    let next = min(1, max(0, value.doubleValue - Double(dy) / Double(area.height) * 0.25))
+                    if AXUIElementSetAttributeValue(bar, kAXValueAttribute as CFString, NSNumber(value: next)) == .success { method = "accessibility" }
+                    break
+                }
+                current = axValue(e, kAXParentAttribute)
+            }
+        }
+        if method != "accessibility", let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) {
+            event.location = at
+            route(event, at)
+            event.postToPid(pid)
+        }
+        pointer = ["x": at.x, "y": at.y]
+    case "menu":
+        guard let path = request["path"] as? [String], !path.isEmpty, path.count <= 6 else { throw fail("invalid_arguments", "Give the menu path, e.g. [\"File\", \"New Window\"].") }
+        func norm(_ s: String) -> String { s.lowercased().replacingOccurrences(of: "…", with: "").replacingOccurrences(of: "...", with: "").trimmingCharacters(in: .whitespaces) }
+        guard var current: AXUIElement = axValue(target.appElement, kAXMenuBarAttribute) else { throw fail("menu_unavailable", "That app has no menu bar.") }
+        var available: [String] = []
+        for (depth, title) in path.enumerated() {
+            var children: [AXUIElement] = axValue(current, kAXChildrenAttribute) ?? []
+            // Menu bar items and menu items hold their entries inside an AXMenu child.
+            if depth > 0, children.count == 1, (axValue(children[0], kAXRoleAttribute) as String?) == "AXMenu" { children = axValue(children[0], kAXChildrenAttribute) ?? [] }
+            available = children.compactMap { axValue($0, kAXTitleAttribute) as String? }.filter { !$0.isEmpty }
+            guard let index = children.firstIndex(where: { norm((axValue($0, kAXTitleAttribute) as String?) ?? "") == norm(title) }) else {
+                throw fail("menu_item_not_found", "No menu item '\(title.prefix(60))'. Available here: \(available.prefix(40).joined(separator: ", ").prefix(600))")
+            }
+            // The Apple menu (sleep, restart, log out...) belongs to the Mac.
+            if depth == 0, index == 0 { throw fail("system_command", "The Apple menu holds the Mac's own commands, not this app's. Nothing was pressed.") }
+            current = children[index]
+        }
+        // Pressing a turned-off item reports success and does nothing.
+        if (axValue(current, kAXEnabledAttribute) as Bool?) == false {
+            let titled = path.map { String($0.prefix(60)) }.joined(separator: " › ")
+            guard mayActivate else {
+                throw fail("menu_unavailable", "\(titled) in \(target.app.localizedName ?? "this app") \(turnedOff(target.app)). Nothing was pressed.")
+            }
+            // Save and the like act on the app's main window: make it the observed one.
+            guard focusWindow() else { throw fail("target_not_focused", "\(titled) would act on another window of this app. Click in the observed window first.") }
+            try runBriefly(current, titled)
+            method = "brief_activation"; break
+        }
+        guard AXUIElementPerformAction(current, kAXPressAction as CFString) == .success else { throw fail("menu_unavailable", "That menu item could not be pressed. It may be disabled.") }
+        method = "accessibility"
+    default: throw fail("invalid_arguments", "Unsupported app operation.")
     }
-    // CGEvent posting is asynchronous. A short-lived helper must not exit while
-    // WindowServer is still accepting its final events (short key actions were
-    // lost in signed acceptance). This grace period is not delivery verification;
-    // callers must still observe the intended effect and must never replay input.
-    Thread.sleep(forTimeInterval: 0.1)
-    return ["dispatched": true, "delivery_verified": false, "source_pid": getpid(),
-            "message": "Events were posted. Observe again to verify the result; this receipt alone does not prove the intended effect."]
+    pause(0.1)
+    var reply: [String: Any] = ["dispatched": true, "delivery_verified": false, "source_pid": getpid(), "method": method,
+                                "message": "Sent to that app only. Observe the app again to verify the result."]
+    if !pointer.isEmpty { reply["pointer"] = pointer }
+    if let shortcut { reply["shortcut"] = shortcut }
+    if let focusedText { reply["focused_text"] = focusedText }
+    if let activation { reply["activation"] = activation }
+    if let documentSaved { reply["document_saved"] = documentSaved }
+    return reply
 }
 
 @main struct ComputerMain {
     @MainActor static func main() async {
+        // The shape's pointer is its own long-lived process (see cursor.swift).
+        if CommandLine.arguments.dropFirst().first == "--cursor" { runShapeCursor() }
         var reply: [String: Any]
+        // Window capture needs a WindowServer connection. Open it with a
+        // display query: creating NSApplication here would make this helper
+        // an app of its own, which changes how macOS checks its permissions.
+        _ = CGMainDisplayID()
         do {
             let data = FileHandle.standardInput.readData(ofLength: 32769)
             guard data.count <= 32768, let request = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw fail("invalid_arguments", "Invalid computer request.") }
-            if request["operation"] as? String == "observe" {
+            let operation = request["operation"] as? String
+            let appScoped = request["app"] != nil || (request["expected"] as? [String: Any])?["mode"] as? String == "app"
+            if operation == "apps" || appScoped || operation == "set_text" || operation == "menu" {
+                guard #available(macOS 12.3, *) else { throw fail("unsupported", "App control requires macOS 12.3 or newer.") }
+                if operation == "apps" { reply = ["success": true, "result": try await listApps()] }
+                else if operation == "observe" { reply = ["success": true, "result": try await observeApp(request)] }
+                else { reply = ["success": true, "result": try await appInput(request)] }
+            } else if operation == "observe" {
                 guard #available(macOS 12.3, *) else { throw fail("unsupported", "Screen control requires macOS 12.3 or newer.") }
                 reply = ["success": true, "result": try await observe(request)]
-            } else { reply = ["success": true, "result": try input(request)] }
+            } else { throw wholeScreenInputRefused() }
         } catch let error as ControlError { reply = ["success": false, "error_type": error.code, "error": error.message, "dispatched": false] }
         catch { reply = ["success": false, "error_type": "native_control_failed", "error": "Computer control failed. Observe again or check the Mac app's permissions."] }
         let out = try! JSONSerialization.data(withJSONObject: reply, options: [.sortedKeys])

@@ -15,7 +15,7 @@
 //   POST /open          -> open a file/app/url with the OS default {target}
 //   POST /computer      -> one observed desktop input or screenshot {scope, control}
 //   GET  /agents        -> check local Codex and Claude Code readiness
-//   POST /agents/start  -> delegate {agent?, prompt, cwd?, workspace_write?}
+//   POST /agents/start  -> delegate {agent?, prompt, cwd?, workspace_write?, images?}
 //   GET  /agents/status -> wait up to 20 seconds for a job {job_id in query}
 //   POST /agents/cancel -> request cancellation {job_id}
 //   GET  /agents/jobs   -> recent jobs {request_key?, limit? in query}
@@ -33,8 +33,10 @@ const { spawn } = require("node:child_process");
 const { elevationStatus } = require("./command-shell");
 const commandJobs = require("./command-jobs");
 const { URL } = require("node:url");
-const { startJob, publicStatus, listJobs, cancelJob, respondJob } = require("./codex");
+const { startJob, publicStatus, listJobs, cancelJob, respondJob, sendTurn, sessionStatus,
+  readSession: readAgentSession, stopSession, listSessions } = require("./codex");
 const { listAgents } = require("./agents");
+const { normalizeImages } = require("./agent-images");
 const { expandHome } = require("./local-workspace");
 const { bundledRuntime } = require("./bundled-runtime");
 const { createComputerControl } = require("./computer");
@@ -42,13 +44,14 @@ const { createSession, startSessionTurn, readSession, sessionEvents } = require(
 const { runtimeCapabilities } = require("./runtime-capabilities");
 const { runCommand: startCommandProcess } = require("./command-process");
 const { commandStatus, cancelCommand } = require("./commands");
+const { loadLoginShellAuth } = require("./login-shell-env");
 
 const MAX_OUTPUT = 20000;
 const MAX_FILE_READ = 100000;
 const MAX_DIRECTORY_ENTRIES = 2000;
 
 const CAPABILITIES = {
-  computer: "observe the desktop screen or send one keyboard/mouse action (requires computer_control capability)",
+  computer: "observe the desktop screen or one app's window and send one keyboard/mouse action to that app (requires computer_control; app-scoped background control requires computer_app_control; on macOS a whole-screen view is look-only)",
   run: "run a shell command",
   write: "create or replace a file",
   read: "read a file",
@@ -64,7 +67,26 @@ const CAPABILITIES = {
   agent_status: "wait for a local agent task and collect its result",
   agent_cancel: "stop a local agent task",
   agent_jobs: "list recent local agent tasks to find a job_id again",
+  agent_send: "send a follow-up message to a Claude Code session or Codex thread a chat started",
+  agent_session: "status of a Claude Code session or Codex thread a chat started, and whether it is open elsewhere",
+  agent_read: "recent messages of a Claude Code session or Codex thread a chat started, including the person's own",
+  agent_session_stop: "stop the running turn of a Claude Code session or Codex thread a chat started",
+  agent_sessions: "list the Claude Code sessions and Codex threads a chat started on this computer",
 };
+
+// Session routes refuse anything they don't name. A scope comes only from the
+// shapes.inc server, so a 404 never says whether another chat has the session.
+function sessionError(res, err) {
+  if (err.errorType === "agent_unavailable") return sendJson(res, 409,
+    { error: err.message, error_type: err.errorType, started: false, agents: err.agents });
+  return sendJson(res, err.statusCode || 400, { error: err.message,
+    ...(err.errorType ? { error_type: err.errorType } : {}), ...(err.jobId ? { job_id: err.jobId } : {}),
+    ...(err.holderStatus ? { holder_status: err.holderStatus } : {}) });
+}
+
+function onlyKeys(value, keys) {
+  return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).every((key) => keys.includes(key));
+}
 
 const CODEX_TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"]);
 
@@ -183,6 +205,16 @@ async function sysinfo(readElevation = elevationStatus) {
  * @returns {Promise<import('node:http').Server>}
  */
 function startServer({ port, token, computerControl = createComputerControl(), platform = process.platform, readElevation = elevationStatus }) {
+  // A process's elevation cannot change while it runs, and on Windows each
+  // check starts PowerShell. Keep the first definite answer instead of paying
+  // for it on every discovery call; an unanswered check is asked again.
+  let elevation;
+  const knownElevation = async () => {
+    if (elevation) return elevation;
+    const result = await readElevation();
+    if (typeof result?.elevated === "boolean") elevation = result;
+    return result;
+  };
   const authed = (req) => {
     const provided = req.headers["x-token"];
     if (!token || typeof provided !== "string") return false;
@@ -207,8 +239,13 @@ function startServer({ port, token, computerControl = createComputerControl(), p
     }
     if (route === "/capabilities" && method === "GET") {
       return sendJson(res, 200, { bridge: "shapes-bridge", actions: CAPABILITIES, features: {
-        command_jobs: true, interactive_codex: true, idempotent_start: true, job_list: true,
-        ...runtimeCapabilities(), computer_control: computerControl.available() } });
+        command_jobs: true, interactive_codex: true, idempotent_start: true, job_list: true, agent_sessions: true,
+        // Personal agents take the person's chat images, and write wherever the
+        // person points them (no worktree rule).
+        agent_images: true, agent_any_folder: true,
+        ...runtimeCapabilities(), computer_control: computerControl.available(),
+        computer_app_control: Boolean(computerControl.appControlAvailable?.()),
+        computer_brief_activation: Boolean(computerControl.appControlAvailable?.()) } });
     }
 
     // Everything below requires the token.
@@ -254,7 +291,8 @@ function startServer({ port, token, computerControl = createComputerControl(), p
         } catch (error) { return sendJson(res, error.statusCode || 400, { error: error.message, error_type: error.errorType }); }
       }
       if (route === "/computer" && method === "POST") {
-        const result = await computerControl.execute(await readBody(req, 32768));
+        const result = await computerControl.execute(await readBody(req, 32768),
+          { allowActivation: req.headers["x-shapes-computer-activation"] === "brief" });
         return sendJson(res, result.success ? 200 : 409, result);
       }
       if (route === "/sessions/create" && method === "POST") {
@@ -282,23 +320,28 @@ function startServer({ port, token, computerControl = createComputerControl(), p
             return sendJson(res, result.deduplicated ? 200 : 202, result);
           }
           if (!body || typeof body !== "object" || Array.isArray(body)
-              || Object.keys(body).some((key) => !["prompt", "cwd", "workspace_write", "interactive", "request_key", ...(codexOnly ? [] : ["agent"])].includes(key))
+              || Object.keys(body).some((key) => !["prompt", "cwd", "workspace_write", "interactive", "request_key", ...(codexOnly ? [] : ["agent", "session_scope", "title", "started_by", "images"])].includes(key))
               || typeof body.prompt !== "string" || !body.prompt.trim()
               || (body.cwd !== undefined && typeof body.cwd !== "string")
               || (!codexOnly && body.agent !== undefined && !["auto", "codex", "claude"].includes(body.agent))
               || (body.workspace_write !== undefined && typeof body.workspace_write !== "boolean")
               || (body.interactive !== undefined && typeof body.interactive !== "boolean")
-              || (body.request_key !== undefined && typeof body.request_key !== "string")) {
+              || (body.request_key !== undefined && typeof body.request_key !== "string")
+              || (body.title !== undefined && typeof body.title !== "string")
+              || (body.started_by !== undefined && typeof body.started_by !== "string")) {
             return sendJson(res, 400, { error: "Supply prompt text, optional absolute cwd, boolean workspace_write, and a supported agent on /agents/start." });
           }
           const cwd = body.cwd ? expandHome(body.cwd) : process.cwd();
           const agent = codexOnly ? "codex" : body.agent || "auto";
-          log(`AGENT START (${agent}, cwd=${cwd}, scope=${body.workspace_write ? "workspace-write" : "read-only"})`);
+          const images = normalizeImages(body.images);
           const result = await startJob({
-            prompt: body.prompt, cwd, agent,
+            prompt: body.prompt, cwd, agent, images,
             interactive: body.interactive === true, requestKey: body.request_key,
             sandbox: body.workspace_write ? "workspace-write" : "read-only",
+            ...(body.session_scope !== undefined ? { sessionScope: body.session_scope, title: body.title, startedBy: body.started_by } : {}),
           });
+          // The folder as the job uses it: its on-disk spelling.
+          log(`AGENT START (${agent}, cwd=${result.cwd || cwd}, scope=${body.workspace_write ? "workspace-write" : "read-only"}${images.length ? `, images=${images.length}` : ""})`);
           if (result.deduplicated) log(`AGENT START deduplicated: ${result.job_id}`);
           return sendJson(res, result.deduplicated ? 200 : 202, result);
         } catch (err) {
@@ -307,6 +350,47 @@ function startServer({ port, token, computerControl = createComputerControl(), p
             { error: err.message, error_type: err.errorType, started: false, agents: err.agents, ...job });
           return sendJson(res, err.statusCode || 400, { error: err.message, ...(err.jobId ? { started: false, ...job } : {}) });
         }
+      }
+
+      if (route === "/agents/send" && method === "POST") {
+        try {
+          const body = await readBody(req);
+          if (!onlyKeys(body, ["agent_session_id", "session_scope", "prompt", "request_key", "workspace_write", "agent", "images"])
+              || typeof body.prompt !== "string" || !body.prompt.trim()
+              || (body.workspace_write !== undefined && typeof body.workspace_write !== "boolean")
+              || (body.request_key !== undefined && typeof body.request_key !== "string")) {
+            return sendJson(res, 400, { error: "Supply agent_session_id, prompt text, optional boolean workspace_write and the chat's session scope." });
+          }
+          log(`AGENT SEND: ${body.agent_session_id}`);
+          const result = await sendTurn({ agentSessionId: body.agent_session_id, sessionScope: body.session_scope, prompt: body.prompt, agent: body.agent,
+            images: normalizeImages(body.images),
+            requestKey: body.request_key, ...(body.workspace_write !== undefined ? { sandbox: body.workspace_write ? "workspace-write" : "read-only" } : {}) });
+          return sendJson(res, result.deduplicated ? 200 : 202, result);
+        } catch (err) { return sessionError(res, err); }
+      }
+
+      if (["/agents/session", "/agents/read", "/agents/sessions"].includes(route) && method === "GET") {
+        try {
+          const allowed = route === "/agents/sessions" ? ["session_scope", "limit"]
+            : route === "/agents/read" ? ["agent_session_id", "session_scope", "limit", "agent"] : ["agent_session_id", "session_scope"];
+          if ([...url.searchParams.keys()].some((key) => !allowed.includes(key))) return sendJson(res, 400, { error: `Supply only ${allowed.join(", ")}.` });
+          const scope = url.searchParams.get("session_scope"), id = url.searchParams.get("agent_session_id");
+          const limit = url.searchParams.get("limit") ?? 10;
+          if (route === "/agents/sessions") return sendJson(res, 200, listSessions({ sessionScope: scope, limit }));
+          log(`AGENT ${route === "/agents/read" ? "READ" : "SESSION"}: ${id}`);
+          return sendJson(res, 200, route === "/agents/read"
+            ? await readAgentSession({ agentSessionId: id, sessionScope: scope, limit, agent: url.searchParams.get("agent") ?? undefined })
+            : await sessionStatus({ agentSessionId: id, sessionScope: scope }));
+        } catch (err) { return sessionError(res, err); }
+      }
+
+      if (route === "/agents/session/stop" && method === "POST") {
+        try {
+          const body = await readBody(req);
+          if (!onlyKeys(body, ["agent_session_id", "session_scope"])) return sendJson(res, 400, { error: "Supply agent_session_id and the chat's session scope." });
+          log(`AGENT SESSION STOP: ${body.agent_session_id}`);
+          return sendJson(res, 200, stopSession({ agentSessionId: body.agent_session_id, sessionScope: body.session_scope }));
+        } catch (err) { return sessionError(res, err); }
       }
 
       if (["/codex/jobs", "/agents/jobs"].includes(route) && method === "GET") {
@@ -368,7 +452,7 @@ function startServer({ port, token, computerControl = createComputerControl(), p
 
       if (route === "/sysinfo" && method === "GET") {
         log("sysinfo requested");
-        return sendJson(res, 200, await sysinfo(readElevation));
+        return sendJson(res, 200, await sysinfo(knownElevation));
       }
 
       if (route === "/run" && method === "POST") {
@@ -461,6 +545,9 @@ function startServer({ port, token, computerControl = createComputerControl(), p
     }
   });
 
+  // The person's sign-in settings from their login shell, read in the background
+  // so the first Claude Code or Codex task doesn't wait on their profile.
+  loadLoginShellAuth().catch(() => {});
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, "127.0.0.1", () => resolve(server));

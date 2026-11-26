@@ -151,6 +151,8 @@ test("typed original input survives authenticated dispatch, retry, restart and s
   assert.equal(first.state, "completed");
   const stored = path.join(f.jobs, start.body.job_id, "request.json");
   assert.deepEqual(JSON.parse(fs.readFileSync(stored)).input, input);
+  // Built-in sessions run on shapes.inc credits and keep their 30-minute deadline.
+  assert.equal(JSON.parse(fs.readFileSync(stored)).timeout, 1800);
   assert.equal(fs.statSync(stored).mode & 0o777, 0o600);
   assert.equal((await f.request(`/agents/jobs?request_key=${body.request_key}`)).body.jobs[0].task_preview.includes("base64"), false);
   assert.equal((await f.request("/agents/start", body)).body.job_id, start.body.job_id);
@@ -370,6 +372,31 @@ test("late HTTP cancel preserves a settled gateway failure or completion and per
   assert.equal(completed.thread_id, threadId);
 });
 
+test("a terminal job state is its last write, after the final event", async (t) => {
+  const f = await fixture(t);
+  await f.request("/sessions/create", f.create);
+  // Whoever sees the terminal state may rely on the complete event history,
+  // or remove the job. Read the events the moment the state turns terminal.
+  for (let turn = 0; turn < 10; turn++) {
+    const started = await f.request("/agents/start", f.turn(`turn ${turn}`, `final_event_order_${String.fromCharCode(97 + turn)}`));
+    assert.equal(started.status, 202, JSON.stringify(started.body));
+    const directory = path.join(f.jobs, started.body.job_id), deadline = Date.now() + 20000;
+    for (let reads = 1; ; reads++) {
+      // Tight reads to catch the gap, yielding now and then so a slow runner
+      // is not starved by this process.
+      if (reads % 500 === 0) await new Promise((resolve) => setImmediate(resolve));
+      let state;
+      try { state = JSON.parse(fs.readFileSync(path.join(directory, "state.json"), "utf8")); } catch { continue; }
+      if (terminal.has(state.status)) {
+        assert.ok(fs.readFileSync(path.join(directory, "events.jsonl"), "utf8").includes('"type":"job.finished"'), `turn ${turn}`);
+        break;
+      }
+      assert.ok(Date.now() < deadline, "the job did not finish");
+    }
+    await until(started.body.job_id);
+  }
+});
+
 test("bundled job recovers a cold initialization timeout with one turn and durable phase diagnostics", async (t) => {
   const f = await fixture(t, { stallFirstInitialize: true });
   await f.request("/sessions/create", f.create);
@@ -509,4 +536,18 @@ test("funded provider failures preserve the cause without personal account advic
     const repeated = await f.request("/agents/start", body);
     assert.equal(repeated.body.job_id, started.body.job_id);
   }
+});
+
+test("a session saved with the folder in another letter case is still the same session", async (t) => {
+  const f = await fixture(t);
+  const typed = f.directory.toUpperCase();
+  if (!fs.existsSync(typed) || typed === f.directory) { t.skip("this file system tells letter case apart"); return; }
+  const first = await f.request("/sessions/create", { ...f.create, cwd: typed });
+  assert.equal(first.status, 200);
+  assert.equal(first.body.cwd, fs.realpathSync.native(f.directory));
+  // A record written before folders were stored in their on-disk spelling.
+  const record = fs.readdirSync(f.state, { recursive: true }).map((name) => path.join(f.state, name))
+    .find((name) => name.endsWith(`${f.identity.session_id}.json`));
+  fs.writeFileSync(record, JSON.stringify({ ...JSON.parse(fs.readFileSync(record, "utf8")), cwd: typed }));
+  assert.equal((await f.request("/sessions/create", { ...f.create, cwd: typed })).status, 200);
 });
